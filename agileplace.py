@@ -198,6 +198,24 @@ def create_card(cfg: dict, apply: bool, title: str, custom_id: str, external_url
     return mutate(cfg, apply, "POST", "card", body=body, note=f"create card {custom_id}")
 
 
+# --- dependencies -> Blocked state (fallback; no confirmed dependency-link API) -- VALIDATE LIVE ----
+
+def card_is_blocked(card: dict) -> bool:
+    return bool(card.get("isBlocked"))
+
+
+def card_block_reason(card: dict) -> str:
+    return card.get("blockReason") or ""
+
+
+def set_blocked(cfg: dict, apply: bool, card: dict, blocked: bool, reason: str | None) -> None:
+    """Set a card's Blocked state + reason (LeanKit isBlocked/blockReason). VALIDATE LIVE: patch paths."""
+    body = [{"op": "replace", "path": "/isBlocked", "value": bool(blocked)},
+            {"op": "replace", "path": "/blockReason", "value": reason or ""}]
+    mutate(cfg, apply, "PATCH", f"card/{card['id']}", body=body, headers=_version_headers(card),
+           note=f"{'block' if blocked else 'unblock'} {card['id']}")
+
+
 # --- parent/child connections (hierarchy) -- VALIDATE LIVE (see API-VALIDATION.md) -----------------
 
 def card_child_ids(card: dict) -> set[str]:

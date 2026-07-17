@@ -25,7 +25,8 @@ import ghkit
 import ghproject
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
-from stages import epic_key_for_task, epic_rollup, issue_stage, normalize_status, title_key
+from stages import (blocked_reason, epic_key_for_task, epic_rollup, issue_stage,
+                    normalize_status, title_key)
 
 MS_PREFIX = "milestone:"
 
@@ -222,6 +223,21 @@ def main() -> None:
             key = title_key(epic["title"]) or str(epic["number"])
             agileplace.connect_children(cfg, apply, str(parent["id"]), missing)
             print(f"{'linked' if apply else 'DRY  '} [{key}] parent -> {len(missing)} child card(s)")
+
+    # 4) dependencies -> card Blocked state (a card is blocked while any GitHub blocker isn't Done)
+    blocked_by = ghkit.blocked_by_map(cfg, [i["number"] for i in issues]) if online else None
+    if blocked_by is not None:
+        stage_by_number = {i["number"]: resolve_issue_stage(i, project_status) for i in issues}
+        for issue in issues:
+            card = card_by_url.get(issue["url"])
+            if not card or not card.get("id"):
+                continue
+            reason = blocked_reason(blocked_by.get(issue["number"], []), stage_by_number)
+            want = reason is not None
+            if want != agileplace.card_is_blocked(card) or (want and reason != agileplace.card_block_reason(card)):
+                agileplace.set_blocked(cfg, apply, card, want, reason)
+                key = title_key(issue["title"]) or str(issue["number"])
+                print(f"{'block  ' if want else 'unblock'} [{key}]{': ' + reason if reason else ''}")
 
     if apply:
         save_state(state)

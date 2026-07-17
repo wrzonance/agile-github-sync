@@ -10,8 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agileplace import resolve_lane_for_stage  # noqa: E402
 from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
-from stages import (epic_key_for_task, epic_rollup, issue_stage,  # noqa: E402
-                    lane_matches_stage, normalize_status, title_key)
+from stages import (blocked_reason, epic_key_for_task, epic_rollup,  # noqa: E402
+                    issue_stage, lane_matches_stage, normalize_status, title_key)
 from sync import issue_card_title, resolve_issue_stage  # noqa: E402
 
 
@@ -216,3 +216,11 @@ def test_resolve_issue_stage_prefers_project_status_then_labels():
     assert resolve_issue_stage(issue, {"u1": "In review"}) == "In review"   # Project Status wins
     assert resolve_issue_stage(issue, {}) == "In progress"                   # fallback: label
     assert resolve_issue_stage({"url": "u2", "state": "OPEN", "labels": []}, {}) == "Backlog"
+
+
+def test_blocked_reason():
+    stages = {10: "Done", 11: "In progress", 12: "Backlog"}
+    assert blocked_reason([], stages) is None
+    assert blocked_reason([10], stages) is None                       # blocker Done -> unblocked
+    assert blocked_reason([10, 11], stages) == "Blocked by #11"
+    assert blocked_reason([12, 11], stages) == "Blocked by #11, #12"  # incomplete, sorted

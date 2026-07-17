@@ -97,6 +97,29 @@ def sub_issue_numbers(cfg: dict, epic_number: int) -> list[int] | None:
         return None
 
 
+def blocked_by_map(cfg: dict, issue_numbers: list[int]) -> dict[int, list[int]] | None:
+    """{issue_number: [blocker_issue_numbers]} from GitHub's issue-dependencies REST API. **None** when
+    the endpoint isn't available (dependencies then skipped entirely). VALIDATE LIVE: the exact
+    endpoint/shape (issue dependencies are a newer GitHub feature)."""
+    repo = repo_name(cfg)
+    if not repo:
+        return None
+    result: dict[int, list[int]] = {}
+    endpoint_ok = None
+    for n in issue_numbers:
+        try:
+            out = run(cfg, ["api", f"repos/{repo}/issues/{n}/dependencies/blocked_by",
+                            "--jq", ".[].number"], check=True)
+            endpoint_ok = True
+            nums = [int(x) for x in out.stdout.split() if x.strip().isdigit()]
+            if nums:
+                result[n] = nums
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            if endpoint_ok is None:
+                return None  # not available on the first probe -> skip dependencies
+    return result
+
+
 def edit_label(cfg: dict, apply: bool, number: int, label: str, *, add: bool) -> None:
     """Add or remove one label on an issue, through the dry-run gate."""
     flag = "--add-label" if add else "--remove-label"
