@@ -1,3 +1,8 @@
+# Secrets and per-target state -- never commit.
+.env
+.sync-state.json
+sync.log
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
