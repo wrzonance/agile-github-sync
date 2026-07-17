@@ -38,15 +38,15 @@ def reconcile(base, gh_now, ap_now) -> Reconciled:
     )
 
 
-def reconcile_value(base, gh, ap):
-    """3-way merge of a single OPTIONAL value (e.g. an issue's milestone, of which GitHub allows exactly
-    one). Returns the resolved value; None means 'unset'. GitHub wins a genuine two-sided conflict --
-    this is a real value-level conflict, unlike the membership merge above. The caller applies the
-    result as a single set-operation on each side (no clear-then-set), avoiding data loss."""
+def reconcile_value(base, gh, ap, prefer: str = "gh"):
+    """3-way merge of a single OPTIONAL value (milestone: GitHub allows one; a planned date). Returns the
+    resolved value; None means 'unset'. On a genuine two-sided conflict the `prefer` side wins ('gh' for
+    milestone, 'ap' for AgilePlace-owned dates). The caller applies the result as a single set-operation
+    on each side (no clear-then-set), avoiding data loss."""
     if gh == ap:
         return gh
     if gh != base and ap == base:
         return gh          # only GitHub changed
     if ap != base and gh == base:
         return ap          # only AgilePlace changed
-    return gh              # both diverged from base -> GitHub wins
+    return gh if prefer == "gh" else ap   # both diverged from base -> preferred side wins

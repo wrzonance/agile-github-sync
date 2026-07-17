@@ -132,7 +132,32 @@ def sync_metadata(cfg: dict, apply: bool, issue: dict, card: dict, ignore: froze
         print(f"meta  [{key}] labels gh+{len(r.gh_add)}/-{len(r.gh_remove)} ap+{len(r.ap_add)}/-{len(r.ap_remove)}"
               f" milestone={new_ms}")
     if apply:
-        issues_state[url] = {"labels": sorted(r.new_base), "milestone": new_ms}
+        issues_state.setdefault(url, {}).update({"labels": sorted(r.new_base), "milestone": new_ms})
+
+
+def sync_dates(cfg: dict, apply: bool, issue: dict, card: dict, pitem: dict | None,
+               field_meta: dict, issues_state: dict) -> None:
+    """Bidirectional planned dates (AgilePlace-wins): Project Start/Target date fields <-> card
+    plannedStart/plannedFinish, via the 3-way merge against the per-issue base. Skips issues not on the
+    Project."""
+    if not pitem:
+        return
+    url = issue["url"]
+    prev = issues_state.get(url, {})
+    key = title_key(issue["title"]) or str(issue["number"])
+    for kind, gh_field_id, ap_field in (("start", field_meta.get("start_field_id"), "plannedStart"),
+                                        ("target", field_meta.get("target_field_id"), "plannedFinish")):
+        gh_date = pitem.get(kind)
+        ap_date = card.get(ap_field)
+        new = reconcile_value(prev.get(kind), gh_date, ap_date, prefer="ap")  # dates are AgilePlace-owned
+        if new != gh_date:
+            ghproject.set_project_date(cfg, apply, field_meta["project_id"], pitem["item_id"], gh_field_id, new)
+        if new != ap_date:
+            agileplace.set_planned_date(cfg, apply, card, ap_field, new)
+        if (new != gh_date or new != ap_date):
+            print(f"date  [{key}] {kind} -> {new or 'unset'}")
+        if apply:
+            issues_state.setdefault(url, {})[kind] = new
 
 
 def main() -> None:
@@ -167,8 +192,11 @@ def main() -> None:
     epics = [i for i in issues if "type:epic" in i["labels"]]
 
     project_status = ghproject.issue_status_map(cfg)
+    field_meta = ghproject.field_meta(cfg) if ghproject.configured(cfg) else None
+    project_dates = ghproject.issue_dates_map(cfg) if (field_meta and online) else {}
     if ghproject.configured(cfg):
-        print(f"projects v2: {len(project_status)} items carry Status (source of truth for stage)")
+        print(f"projects v2: {len(project_status)} items carry Status (source of truth for stage)"
+              f"{'; dates enabled' if field_meta else ''}")
 
     lanes = agileplace.board_layout(cfg) if online else []
     cards = agileplace.list_cards(cfg) if online else []
@@ -209,6 +237,8 @@ def main() -> None:
                 agileplace.move_card(cfg, apply, card, target_lane["id"])
                 print(f"{'moved' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {stage})")
         sync_metadata(cfg, apply, issue, card, cfg["label_sync_ignore"], issues_state)
+        if field_meta:
+            sync_dates(cfg, apply, issue, card, project_dates.get(issue["url"]), field_meta, issues_state)
 
     # 3) parent/child connections: each epic card -> its task cards (mirrors sub-issues)
     for epic in epics:

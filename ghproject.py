@@ -67,3 +67,51 @@ def issue_status_map(cfg: dict) -> dict[str, str]:
     if parsed is None:
         return {}
     return {url: v["status"] for url, v in parsed.items() if v.get("status")}
+
+
+def issue_dates_map(cfg: dict) -> dict[str, dict]:
+    """issue URL -> {start, target, item_id} from the Project (Phase 4). Empty when unavailable."""
+    parsed = items(cfg)
+    if parsed is None:
+        return {}
+    return {url: {"start": v["start"], "target": v["target"], "item_id": v["item_id"]}
+            for url, v in parsed.items()}
+
+
+def field_meta(cfg: dict) -> dict | None:
+    """{project_id, status_field_id, status_options{name_lower:id}, start_field_id, target_field_id} for
+    writes (Status in Phase 1b, dates in Phase 4). None on failure. VALIDATE LIVE: gh project shapes."""
+    if not configured(cfg):
+        return None
+    p = cfg["gh_project"]
+    try:
+        proj = ghkit.run(cfg, ["project", "view", str(p["number"]), "--owner", p["owner"], "--format", "json"])
+        fl = ghkit.run(cfg, ["project", "field-list", str(p["number"]), "--owner", p["owner"], "--format", "json"])
+        meta = {"project_id": json.loads(proj.stdout)["id"], "status_field_id": None,
+                "status_options": {}, "start_field_id": None, "target_field_id": None}
+        for f in json.loads(fl.stdout).get("fields", []):
+            name = (f.get("name") or "").strip().lower()
+            if name == p["status_field"].strip().lower():
+                meta["status_field_id"] = f.get("id")
+                meta["status_options"] = {(o.get("name") or "").strip().lower(): o.get("id")
+                                          for o in f.get("options", [])}
+            elif name == p["start_field"].strip().lower():
+                meta["start_field_id"] = f.get("id")
+            elif name == p["target_field"].strip().lower():
+                meta["target_field_id"] = f.get("id")
+        return meta
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, SystemExit):
+        return None
+
+
+def set_project_date(cfg: dict, apply: bool, project_id: str, item_id: str, field_id: str, date: str | None) -> None:
+    """Set (date=YYYY-MM-DD) or clear (date=None) a Projects v2 date field, through the dry-run gate."""
+    if not (item_id and field_id):
+        return
+    args = ["project", "item-edit", "--id", item_id, "--project-id", project_id, "--field-id", field_id]
+    args += (["--date", date] if date else ["--clear"])
+    if apply:
+        ghkit.run(cfg, args)
+        print(f"gh    project item {item_id} date -> {date or 'cleared'}")
+    else:
+        print(f"DRY   gh project item-edit {item_id} {'--date ' + date if date else '--clear'}")

@@ -149,6 +149,15 @@ def test_reconcile_value_unset_and_agree():
     assert reconcile_value(base="A", gh="A", ap="A") == "A"     # no change
 
 
+def test_reconcile_value_prefer_ap_for_dates():
+    # both sides changed the value since base -> the preferred side wins (AgilePlace for dates)
+    assert reconcile_value("2026-01-01", "2026-02-01", "2026-03-01", prefer="ap") == "2026-03-01"
+    assert reconcile_value("2026-01-01", "2026-02-01", "2026-03-01", prefer="gh") == "2026-02-01"
+    # only one side changed -> that side wins regardless of prefer
+    assert reconcile_value("2026-01-01", "2026-02-01", "2026-01-01", prefer="ap") == "2026-02-01"
+    assert reconcile_value("2026-01-01", "2026-01-01", "2026-03-01", prefer="ap") == "2026-03-01"
+
+
 # --- lane resolution on the user's real board -----------------------------
 
 def test_inference_resolves_distinct_titles():

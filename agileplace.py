@@ -242,3 +242,10 @@ def edit_tag(cfg: dict, apply: bool, card: dict, tag: str, *, add: bool) -> None
     op = {"op": "add", "path": "/tags/-", "value": tag} if add else {"op": "remove", "path": "/tags", "value": tag}
     mutate(cfg, apply, "PATCH", f"card/{card['id']}", body=[op],
            headers=_version_headers(card), note=f"{'add' if add else 'remove'} tag {tag}")
+
+
+def set_planned_date(cfg: dict, apply: bool, card: dict, field: str, date: str | None) -> None:
+    """Set/clear a card planned date (field = 'plannedStart' | 'plannedFinish'), through the write gate.
+    VALIDATE LIVE: date format (io v2 uses YYYY-MM-DD) and null-to-clear."""
+    mutate(cfg, apply, "PATCH", f"card/{card['id']}", body=[{"op": "replace", "path": f"/{field}", "value": date}],
+           headers=_version_headers(card), note=f"{field}={date}")
