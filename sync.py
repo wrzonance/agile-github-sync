@@ -22,9 +22,10 @@ import tempfile
 
 import agileplace
 import ghkit
+import ghproject
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
-from stages import epic_key_for_task, epic_rollup, issue_stage, title_key
+from stages import epic_key_for_task, epic_rollup, issue_stage, normalize_status, title_key
 
 MS_PREFIX = "milestone:"  # reserved card-tag namespace projecting the GitHub milestone
 
@@ -73,6 +74,18 @@ def epic_task_numbers(cfg: dict, epic: dict, by_key: dict) -> list[int]:
     epic_key = title_key(epic["title"])
     return [i["number"] for i in by_key.values()
             if epic_key_for_task(title_key(i["title"]) or "") == epic_key]
+
+
+def epic_stage(epic: dict, project_status: dict, by_number: dict, by_key: dict, cfg: dict) -> str:
+    """Stage from the epic's GitHub Projects v2 Status when present (the source of truth); else fall
+    back to a rollup of its tasks' derived stages, or the epic's own derived stage."""
+    raw = project_status.get(epic["url"])
+    stage = normalize_status(raw) if raw else None
+    if stage:
+        return stage
+    task_nums = epic_task_numbers(cfg, epic, by_key)
+    task_stages = [issue_stage(by_number[n]) for n in task_nums if n in by_number]
+    return epic_rollup(task_stages) if task_stages else issue_stage(epic)
 
 
 def _label_set(labels, ignore: frozenset) -> set[str]:
@@ -161,12 +174,13 @@ def main() -> None:
     lanes = agileplace.board_layout(cfg) if online else []
     cards = agileplace.list_cards(cfg) if online else []
     state = load_state(target, str(cfg["board_id"])) if online else {"epics": {}}
+    project_status = ghproject.issue_status_map(cfg)  # {} unless a Projects v2 board is configured/reachable
+    if ghproject.configured(cfg):
+        print(f"projects v2: {len(project_status)} items carry Status (source of truth for stage)")
 
     for epic in epics:
         key = title_key(epic["title"]) or str(epic["number"])
-        task_nums = epic_task_numbers(cfg, epic, by_key)
-        task_stages = [issue_stage(by_number[n]) for n in task_nums if n in by_number]
-        stage = epic_rollup(task_stages) if task_stages else issue_stage(epic)
+        stage = epic_stage(epic, project_status, by_number, by_key, cfg)
 
         card = agileplace.find_card(cards, epic["url"], key) if online else None
         if not card:

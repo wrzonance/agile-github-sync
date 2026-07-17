@@ -8,6 +8,14 @@ from __future__ import annotations
 
 STAGES = ("Backlog", "Ready", "In progress", "In review", "Done")
 
+_STAGE_BY_LOWER = {s.lower(): s for s in STAGES}
+
+
+def normalize_status(name: str) -> str | None:
+    """Map a GitHub Projects v2 Status option name to a canonical stage (case-insensitive), or None if
+    it isn't one of ours (caller then falls back to label/PR derivation)."""
+    return _STAGE_BY_LOWER.get((name or "").strip().lower())
+
 # LeanKit lane.cardStatus has only three values; In progress and In review both live under "started",
 # so lanes are disambiguated by title (see lane_matches_stage).
 STAGE_CARD_STATUS = {

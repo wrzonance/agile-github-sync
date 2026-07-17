@@ -67,4 +67,11 @@ def env_config() -> dict:
         "target_repo_path": Path(target).expanduser() if target else None,
         "label_sync_ignore": frozenset(DEFAULT_IGNORE) | frozenset(extra),
         "stage_lane_map": parse_stage_lane_map(os.environ.get("STAGE_LANE_MAP", "")),
+        "gh_project": {
+            "owner": os.environ.get("GH_PROJECT_OWNER") or None,
+            "number": os.environ.get("GH_PROJECT_NUMBER") or None,
+            "status_field": os.environ.get("GH_PROJECT_STATUS_FIELD", "Status"),
+            "start_field": os.environ.get("GH_PROJECT_START_FIELD", "Start"),
+            "target_field": os.environ.get("GH_PROJECT_TARGET_FIELD", "Target"),
+        },
     }

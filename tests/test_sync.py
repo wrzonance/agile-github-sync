@@ -8,9 +8,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agileplace import resolve_lane_for_stage  # noqa: E402
+from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
 from stages import (epic_key_for_task, epic_rollup, issue_stage,  # noqa: E402
-                    lane_matches_stage, title_key)
+                    lane_matches_stage, normalize_status, title_key)
 
 
 def _board_lanes():
@@ -175,3 +176,27 @@ def test_stage_lane_map_unknown_lane_falls_back_to_inference():
     smap = {"Ready": ["Nonexistent Lane"]}
     lane, _ = resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
     assert lane["id"] == "rs"
+
+
+# --- Projects v2 (Phase 1: Status source) --------------------------------
+
+def test_normalize_status():
+    assert normalize_status("In Progress") == "In progress"
+    assert normalize_status("done") == "Done"
+    assert normalize_status("  Ready ") == "Ready"
+    assert normalize_status("Icebox") is None
+    assert normalize_status("") is None
+
+
+def test_parse_items_maps_by_url_and_skips_urlless():
+    items = [
+        {"id": "PVTI_1",
+         "content": {"type": "Issue", "number": 5, "url": "https://github.com/o/r/issues/5"},
+         "status": "In progress", "Start": "2026-01-02", "Target": "2026-01-09"},
+        {"id": "PVTI_2", "content": {"type": "DraftIssue", "title": "no url"}},  # skipped
+    ]
+    parsed = parse_items(items, "Status", "Start", "Target")
+    assert set(parsed) == {"https://github.com/o/r/issues/5"}
+    row = parsed["https://github.com/o/r/issues/5"]
+    assert row == {"item_id": "PVTI_1", "number": 5, "status": "In progress",
+                   "start": "2026-01-02", "target": "2026-01-09"}
