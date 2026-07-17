@@ -94,24 +94,41 @@ def _leaf_lanes(lanes: list) -> list:
     return [l for l in lanes if l["id"] not in parent_ids]
 
 
-def resolve_lane_for_stage(lanes: list, stage: str, release: str) -> dict | None:
-    """The leaf lane for a stage: title match first (disambiguates In progress vs In review), then
-    cardStatus. Fails CLOSED (returns None -> caller no-ops with a warning) when the choice is
-    ambiguous, rather than guessing a wrong lane."""
+def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dict | None = None):
+    """Resolve a stage to (target_lane_or_None, acceptable_lane_ids).
+
+    STAGE_LANE_MAP wins when it names lanes for the stage: the first listed lane is the move target and
+    ALL listed lanes are 'already in that stage' (so a card manually moved between equivalent lanes --
+    e.g. New Requests <-> Approved, both Backlog -- is left alone). Otherwise infer by lane title, then
+    cardStatus, failing CLOSED (None) on ambiguity rather than guessing a wrong lane. Only leaf lanes
+    (which hold cards) are ever chosen.
+    """
     leaves = _leaf_lanes(lanes)
     by_id = {l["id"]: l for l in lanes}
+
+    if stage_map and stage in stage_map:
+        by_title = {lane_title(l).lower(): l for l in leaves}
+        ordered, seen = [], set()
+        for wanted in stage_map[stage]:
+            lane = by_title.get(wanted.strip().lower())
+            if lane and lane["id"] not in seen:
+                seen.add(lane["id"])
+                ordered.append(lane)
+        if ordered:
+            return ordered[0], {l["id"] for l in ordered}
+        print(f"WARN  STAGE_LANE_MAP lists {stage_map[stage]} for '{stage}' but none match a leaf lane -- inferring")
+
     cands = [l for l in leaves if lane_matches_stage(lane_title(l), stage)]
     if not cands:
-        status = STAGE_CARD_STATUS[stage]
-        cands = [l for l in leaves if l.get("cardStatus") == status]
+        cands = [l for l in leaves if l.get("cardStatus") == STAGE_CARD_STATUS[stage]]
     if len(cands) == 1:
-        return cands[0]
+        return cands[0], {cands[0]["id"]}
     if release and len(cands) > 1:
         in_release = [l for l in cands
                       if any(release.lower() in t.lower() for t in _ancestor_titles(l, by_id))]
         if len(in_release) == 1:
-            return in_release[0]
-    return None  # none, or still ambiguous -> don't move
+            return in_release[0], {in_release[0]["id"]}
+    return None, set()  # none, or still ambiguous -> don't move
 
 
 # --- cards ----------------------------------------------------------------

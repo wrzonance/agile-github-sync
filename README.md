@@ -19,7 +19,7 @@ The board is a projection of GitHub's execution truth; this tool is the only thi
 
 ## Point it at a repo
 
-```bash
+```
 cp .env.example .env      # set TARGET_REPO_PATH to the local clone; fill AGILEPLACE_*
 ```
 
@@ -27,9 +27,16 @@ Every `gh` call runs with its working directory set to `TARGET_REPO_PATH`, so `g
 from that clone's remote — no hardcoded owner/name, and this tool can live anywhere. Stdlib-only Python
 (3.10+); the same `python sync.py` runs in PowerShell, cmd, and bash.
 
+**Custom board columns?** The tool reads your board layout via the API and maps stages (Backlog / Ready
+/ In progress / In review / Done) to lanes by title, falling back to the three `cardStatus` tiers and
+**failing closed** (leaving the card put) when a stage is ambiguous — it never guesses a wrong lane. If
+your Not Started / Started / Finished tiers split into custom sub-lanes, set `STAGE_LANE_MAP` in `.env`
+to pin them; multiple lanes per stage are allowed (first = where a card is moved, all = "already in
+that stage", so cards you shuffle between equivalent lanes are left alone). See `.env.example`.
+
 ## Run
 
-```bash
+```
 python sync.py            # verbose DRY RUN (no writes)
 python sync.py --apply    # move cards + sync tags for real (needs a full .env)
 ```

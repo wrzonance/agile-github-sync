@@ -173,13 +173,14 @@ def main() -> None:
             print(f"noop  [{key}] stage={stage} -- {'no card (run init 04 first)' if online else 'board unknown (dry)'}")
             continue
 
-        target_lane = agileplace.resolve_lane_for_stage(lanes, stage, epic.get("milestone") or "")
+        target_lane, acceptable = agileplace.resolve_lane_for_stage(
+            lanes, stage, epic.get("milestone") or "", cfg.get("stage_lane_map"))
         if not target_lane:
-            print(f"noop  [{key}] no unambiguous lane for stage '{stage}' -- not moving")
+            print(f"noop  [{key}] no unambiguous lane for stage '{stage}' -- not moving (set STAGE_LANE_MAP)")
         else:
             current = str(card.get("laneId") or (card.get("lane") or {}).get("id") or "")
-            if current == str(target_lane["id"]):
-                print(f"ok    [{key}] already in '{agileplace.lane_title(target_lane)}' (stage {stage})")
+            if current in {str(i) for i in acceptable}:
+                print(f"ok    [{key}] already in-stage '{stage}' ({agileplace.lane_title(target_lane)} or equivalent)")
             else:
                 agileplace.move_card(cfg, apply, card, target_lane["id"])
                 print(f"{'moved' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {stage})")

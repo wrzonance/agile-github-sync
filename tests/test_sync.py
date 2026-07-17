@@ -7,9 +7,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agileplace import resolve_lane_for_stage  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
 from stages import (epic_key_for_task, epic_rollup, issue_stage,  # noqa: E402
                     lane_matches_stage, title_key)
+
+
+def _board_lanes():
+    """Models the user's real board: 3 cardStatus tiers, custom sub-lanes, one parent container lane."""
+    return [
+        {"id": "p", "title": "Not Started - Future Work", "cardStatus": "notStarted"},
+        {"id": "nr", "title": "New Requests", "cardStatus": "notStarted", "parentLaneId": "p"},
+        {"id": "ap", "title": "Approved", "cardStatus": "notStarted", "parentLaneId": "p"},
+        {"id": "rs", "title": "Ready to Start", "cardStatus": "notStarted", "parentLaneId": "p"},
+        {"id": "dn", "title": "Doing Now", "cardStatus": "started"},
+        {"id": "ur", "title": "Under Review", "cardStatus": "started"},
+        {"id": "rf", "title": "Recently Finished", "cardStatus": "finished"},
+    ]
 
 
 # --- issue_stage ----------------------------------------------------------
@@ -131,3 +145,33 @@ def test_reconcile_value_unset_and_agree():
     assert reconcile_value(base="A", gh=None, ap="A") is None   # GitHub cleared it -> propagate
     assert reconcile_value(base=None, gh=None, ap=None) is None
     assert reconcile_value(base="A", gh="A", ap="A") == "A"     # no change
+
+
+# --- lane resolution on the user's real board -----------------------------
+
+def test_inference_resolves_distinct_titles():
+    L = _board_lanes()
+    assert resolve_lane_for_stage(L, "Ready", "")[0]["id"] == "rs"
+    assert resolve_lane_for_stage(L, "In progress", "")[0]["id"] == "dn"
+    assert resolve_lane_for_stage(L, "In review", "")[0]["id"] == "ur"
+    assert resolve_lane_for_stage(L, "Done", "")[0]["id"] == "rf"
+
+
+def test_inference_backlog_ambiguous_fails_closed():
+    # 3 not-started leaves, none titled "Backlog", and the matching "Not Started..." lane is a parent
+    # container (excluded) -> no move rather than a wrong guess.
+    lane, acceptable = resolve_lane_for_stage(_board_lanes(), "Backlog", "")
+    assert lane is None and acceptable == set()
+
+
+def test_stage_lane_map_multi_lane_backlog():
+    smap = {"Backlog": ["New Requests", "Approved"]}
+    lane, acceptable = resolve_lane_for_stage(_board_lanes(), "Backlog", "", smap)
+    assert lane["id"] == "nr"              # first listed = move target
+    assert acceptable == {"nr", "ap"}      # a card already in Approved is left alone
+
+
+def test_stage_lane_map_unknown_lane_falls_back_to_inference():
+    smap = {"Ready": ["Nonexistent Lane"]}
+    lane, _ = resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
+    assert lane["id"] == "rs"

@@ -6,6 +6,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from stages import STAGES
+
 REPO_DIR = Path(__file__).resolve().parent
 ENV_FILE = REPO_DIR / ".env"
 STATE_FILE = REPO_DIR / ".sync-state.json"
@@ -29,6 +31,28 @@ def load_env_file() -> None:
             os.environ.setdefault(key.strip(), value)
 
 
+def parse_stage_lane_map(raw: str) -> dict[str, list[str]]:
+    """Parse STAGE_LANE_MAP: ';'-separated 'Stage=Lane' entries, '|' for multiple lanes per stage.
+
+    Stage names match the canonical STAGES case-insensitively. For a stage's lane list the FIRST lane
+    is the move-to target; ALL listed lanes count as 'already in that stage' (so the sync won't shuffle
+    a card between equivalent lanes -- e.g. New Requests|Approved both meaning Backlog). Unmapped stages
+    fall back to title/cardStatus inference.
+    """
+    canonical = {s.lower(): s for s in STAGES}
+    mapping: dict[str, list[str]] = {}
+    for entry in raw.split(";"):
+        entry = entry.strip()
+        if not entry or "=" not in entry:
+            continue
+        stage_raw, _, lanes_raw = entry.partition("=")
+        stage = canonical.get(stage_raw.strip().lower())
+        lane_list = [l.strip() for l in lanes_raw.split("|") if l.strip()]
+        if stage and lane_list:
+            mapping[stage] = lane_list
+    return mapping
+
+
 def env_config() -> dict:
     """token/host/board_id are None when absent (offline dry run). target_repo_path is the local clone
     every `gh` call runs against."""
@@ -42,4 +66,5 @@ def env_config() -> dict:
         "board_id": os.environ.get("AGILEPLACE_BOARD_ID") or None,
         "target_repo_path": Path(target).expanduser() if target else None,
         "label_sync_ignore": frozenset(DEFAULT_IGNORE) | frozenset(extra),
+        "stage_lane_map": parse_stage_lane_map(os.environ.get("STAGE_LANE_MAP", "")),
     }
