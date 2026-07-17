@@ -187,6 +187,37 @@ def move_card(cfg: dict, apply: bool, card: dict, lane_id: str) -> None:
            headers=_version_headers(card), note=f"move card {card['id']}")
 
 
+def create_card(cfg: dict, apply: bool, title: str, custom_id: str, external_url: str, lane_id: str | None):
+    """Create a card (POST /io/card) -- same shape the init kit's 04 used successfully. Returns the new
+    card dict (with id) on --apply, else {}."""
+    body = {"boardId": cfg["board_id"], "title": title, "customId": custom_id}
+    if lane_id:
+        body["laneId"] = lane_id
+    if external_url:
+        body["externalLink"] = {"label": f"GitHub {custom_id}", "url": external_url}
+    return mutate(cfg, apply, "POST", "card", body=body, note=f"create card {custom_id}")
+
+
+# --- parent/child connections (hierarchy) -- VALIDATE LIVE (see API-VALIDATION.md) -----------------
+
+def card_child_ids(card: dict) -> set[str]:
+    """Existing child-card ids on a parent card, best-effort from the card payload. The exact field is
+    confirmed at first live run; returns set() when absent so connect is a safe (possibly repeated) POST."""
+    kids = card.get("connectedCards") or card.get("children") or card.get("childCards") or []
+    return {str(c.get("id") or c.get("cardId")) for c in kids if isinstance(c, dict) and (c.get("id") or c.get("cardId"))}
+
+
+def connect_children(cfg: dict, apply: bool, parent_card_id: str, child_card_ids: list[str]) -> None:
+    """Connect a parent card to one or more child cards (LeanKit 'connect-many'). VALIDATE LIVE: the
+    exact endpoint/body is confirmed against a disposable card at first run."""
+    ids = [c for c in child_card_ids if c]
+    if not ids:
+        return
+    mutate(cfg, apply, "POST", "card/connect",
+           body={"parentCardId": parent_card_id, "childCardIds": ids},
+           note=f"connect {parent_card_id} -> {len(ids)} child card(s)")
+
+
 def edit_tag(cfg: dict, apply: bool, card: dict, tag: str, *, add: bool) -> None:
     """Add or remove one card tag (io v2 JSON-patch). Add appends at /tags/-, remove is by value at
     /tags -- validated at first live run."""

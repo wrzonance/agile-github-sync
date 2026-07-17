@@ -12,6 +12,7 @@ from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
 from stages import (epic_key_for_task, epic_rollup, issue_stage,  # noqa: E402
                     lane_matches_stage, normalize_status, title_key)
+from sync import issue_card_title, resolve_issue_stage  # noqa: E402
 
 
 def _board_lanes():
@@ -200,3 +201,18 @@ def test_parse_items_maps_by_url_and_skips_urlless():
     row = parsed["https://github.com/o/r/issues/5"]
     assert row == {"item_id": "PVTI_1", "number": 5, "status": "In progress",
                    "start": "2026-01-02", "target": "2026-01-09"}
+
+
+# --- Model 2 per-issue helpers -------------------------------------------
+
+def test_issue_card_title_strips_key_prefix():
+    assert issue_card_title({"title": "[EP-0C] API conventions"}) == "API conventions"
+    assert issue_card_title({"title": "[0C2] versioning middleware"}) == "versioning middleware"
+    assert issue_card_title({"title": "no key here"}) == "no key here"
+
+
+def test_resolve_issue_stage_prefers_project_status_then_labels():
+    issue = {"url": "u1", "state": "OPEN", "labels": ["agent:in-progress"]}
+    assert resolve_issue_stage(issue, {"u1": "In review"}) == "In review"   # Project Status wins
+    assert resolve_issue_stage(issue, {}) == "In progress"                   # fallback: label
+    assert resolve_issue_stage({"url": "u2", "state": "OPEN", "labels": []}, {}) == "Backlog"

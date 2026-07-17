@@ -34,6 +34,21 @@ Sources: LeanKit io v2 — Update a card, Get a list of cards, Get board, Core c
    sends the version but does not yet retry-on-conflict — a conflict surfaces as a failed run; add
    refetch-and-recompute if that proves noisy.)
 
+## Model 2 additions — [live-check]
+
+- **`gh project` CLI shapes** (`ghproject.py`, init `05`): `item-list --format json` (field values come
+  back as top-level keys — the parse is defensive across casing), `project view` (project id),
+  `field-list` (Status field id + option ids), `item-add --url`, `item-edit --single-select-option-id`.
+  Needs the `project` token scope. Confirm the item-list JSON shape on your board.
+- **Card create** (`POST /io/card`, `agileplace.create_card`): same shape the init used successfully;
+  confirm `customId` + `externalLink` are accepted for a fresh card.
+- **Parent/child connections** (`connect_children`): posts `card/connect` with
+  `{parentCardId, childCardIds}` — **VALIDATE** the exact endpoint/body against the Connections API
+  ([create](https://success.planview.com/Planview_LeanKit/LeanKit_API/01_v2/connections/create) /
+  connect-many) on a disposable card, and confirm how existing children read back (`card_child_ids`).
+- **Planned dates** (Phase 4): `plannedStart`/`plannedFinish` via the card PATCH; Project Start/Target
+  date fields via `item-edit --date`.
+
 ## GitHub side (standard, stable — noted for completeness)
 
 - `gh issue list --json number,title,state,labels,milestone,assignees,url` — stable.

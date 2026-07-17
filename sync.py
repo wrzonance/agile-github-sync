@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Ongoing GitHub -> AgilePlace sync. Agnostic: derives everything from live GitHub + the board, no
-manifest/issue-map.
+"""Ongoing GitHub -> AgilePlace sync (Model 2). Agnostic: derives everything from live GitHub + the
+board + the GitHub Projects v2 Status, with no manifest/issue-map.
 
-Two jobs each run:
-  1. Card movement -- roll each epic up from its tasks' stages and move its card lane-for-lane
-     (Backlog -> Ready -> In progress -> In review -> Done).
-  2. Bidirectional metadata -- on the EPIC issue: labels (a set) and milestone (a single value) <-> its
-     card's tags, each via a 3-way merge against .sync-state.json (removals propagate; milestone is a
-     single set-operation, never clear-then-set). Tasks have no card, so metadata sync is epic-level.
+Per run:
+  1. Ensure a card per GitHub issue (epics AND tasks), matched by external-link URL.
+  2. Move each card to the lane for its stage -- stage = the issue's Projects v2 Status (source of
+     truth) or, as a fallback, the label/PR-derived stage.
+  3. Mirror sub-issues as AgilePlace parent/child connections (epic card -> task cards); LeanKit then
+     rolls child progress/dates up to the parent natively.
+  4. Bidirectional metadata: labels/milestone on each issue <-> its card's tags (3-way merge).
 
-DRY RUN by default. State is target-scoped and keyed by the immutable issue URL; a dry run never
-advances the merge base; state I/O is atomic and fails closed on corruption. Local-only safe: if the
-target repo has no reachable remote, it prints a notice and does nothing.
+DRY RUN by default. State is target-scoped, issue-URL-keyed, atomic, fail-closed. Connections and card
+creation are validated at first live run (not reachable offline). Local-only safe.
 """
 from __future__ import annotations
 
@@ -27,14 +27,12 @@ from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
 from stages import epic_key_for_task, epic_rollup, issue_stage, normalize_status, title_key
 
-MS_PREFIX = "milestone:"  # reserved card-tag namespace projecting the GitHub milestone
+MS_PREFIX = "milestone:"
 
 
 def load_state(target: str, board: str) -> dict:
-    """Fail closed: corrupt JSON or a state file for a different target/board refuses to proceed rather
-    than silently discarding the merge base (which would resurrect removals)."""
     if not STATE_FILE.exists():
-        return {"target": target, "board": board, "epics": {}}
+        return {"target": target, "board": board, "issues": {}}
     try:
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as err:
@@ -43,12 +41,11 @@ def load_state(target: str, board: str) -> dict:
     if state.get("target") != target or str(state.get("board")) != str(board):
         raise SystemExit(f"ERROR: {STATE_FILE} is for target {state.get('target')}/board {state.get('board')}, "
                          f"but configured for {target}/board {board}. Move or delete it, then re-run.")
-    state.setdefault("epics", {})
+    state.setdefault("issues", {})
     return state
 
 
 def save_state(state: dict) -> None:
-    """Atomic: write a sibling temp file and os.replace, so an interrupted run can't corrupt state."""
     fd, tmp = tempfile.mkstemp(dir=str(STATE_FILE.parent), prefix=".sync-state.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -63,8 +60,7 @@ def save_state(state: dict) -> None:
 
 
 def epic_task_numbers(cfg: dict, epic: dict, by_key: dict) -> list[int]:
-    """Native sub-issues first; fall back to the [KEY] title convention. A GraphQL FAILURE (None) warns
-    loudly before falling back; a genuine empty result falls back quietly."""
+    """Native sub-issues first; fall back to the [KEY] title convention (warn loudly on GraphQL failure)."""
     nums = ghkit.sub_issue_numbers(cfg, epic["number"])
     if nums is None:
         print(f"WARN  [{title_key(epic['title']) or epic['number']}] native sub-issues unavailable -- "
@@ -76,21 +72,22 @@ def epic_task_numbers(cfg: dict, epic: dict, by_key: dict) -> list[int]:
             if epic_key_for_task(title_key(i["title"]) or "") == epic_key]
 
 
-def epic_stage(epic: dict, project_status: dict, by_number: dict, by_key: dict, cfg: dict) -> str:
-    """Stage from the epic's GitHub Projects v2 Status when present (the source of truth); else fall
-    back to a rollup of its tasks' derived stages, or the epic's own derived stage."""
-    raw = project_status.get(epic["url"])
-    stage = normalize_status(raw) if raw else None
-    if stage:
-        return stage
-    task_nums = epic_task_numbers(cfg, epic, by_key)
-    task_stages = [issue_stage(by_number[n]) for n in task_nums if n in by_number]
-    return epic_rollup(task_stages) if task_stages else issue_stage(epic)
+def issue_card_title(issue: dict) -> str:
+    """The card title: the GitHub issue title without its redundant '[KEY] ' prefix (customId carries it)."""
+    t = issue["title"]
+    k = title_key(t)
+    if k and t.startswith(f"[{k}]"):
+        return t[len(f"[{k}]"):].strip() or t
+    return t
+
+
+def resolve_issue_stage(issue: dict, project_status: dict) -> str:
+    """Per issue: Projects v2 Status is the source of truth; else label/PR derivation."""
+    raw = project_status.get(issue["url"])
+    return (normalize_status(raw) if raw else None) or issue_stage(issue)
 
 
 def _label_set(labels, ignore: frozenset) -> set[str]:
-    """Labels eligible for the tag mirror: minus lifecycle/ignored labels and the reserved milestone
-    namespace (which the milestone projection owns)."""
     return {l for l in labels if l not in ignore and not l.startswith(MS_PREFIX)}
 
 
@@ -101,47 +98,44 @@ def _card_milestone(card: dict) -> str | None:
     return None
 
 
-def sync_metadata(cfg: dict, apply: bool, epic: dict, card: dict, ignore: frozenset, epics: dict) -> None:
-    url = epic["url"]
-    prev = epics.get(url, {})
+def sync_metadata(cfg: dict, apply: bool, issue: dict, card: dict, ignore: frozenset, issues_state: dict) -> None:
+    url = issue["url"]
+    prev = issues_state.get(url, {})
 
-    # Labels (set-valued) -- filter ignore from BOTH sides and the base before reconciling.
-    gh_labels = _label_set(epic["labels"], ignore)
+    gh_labels = _label_set(issue["labels"], ignore)
     ap_label_tags = _label_set((t for t in agileplace.card_tags(card) if not t.startswith(MS_PREFIX)), ignore)
     base_labels = _label_set(prev.get("labels", []), ignore)
     r = reconcile(base_labels, gh_labels, ap_label_tags)
     for item in sorted(r.gh_add):
-        ghkit.edit_label(cfg, apply, epic["number"], item, add=True)
+        ghkit.edit_label(cfg, apply, issue["number"], item, add=True)
     for item in sorted(r.gh_remove):
-        ghkit.edit_label(cfg, apply, epic["number"], item, add=False)
+        ghkit.edit_label(cfg, apply, issue["number"], item, add=False)
     for tag in sorted(r.ap_add):
         agileplace.edit_tag(cfg, apply, card, tag, add=True)
     for tag in sorted(r.ap_remove):
         agileplace.edit_tag(cfg, apply, card, tag, add=False)
 
-    # Milestone (single value) -- 3-way merge, applied as one set-operation per side (no clear-then-set).
-    gh_ms = epic.get("milestone")
+    gh_ms = issue.get("milestone")
     ap_ms = _card_milestone(card)
     new_ms = reconcile_value(prev.get("milestone"), gh_ms, ap_ms)
     if new_ms != gh_ms:
-        ghkit.set_milestone(cfg, apply, epic["number"], new_ms)
+        ghkit.set_milestone(cfg, apply, issue["number"], new_ms)
     if new_ms != ap_ms:
         if ap_ms:
             agileplace.edit_tag(cfg, apply, card, f"{MS_PREFIX}{ap_ms}", add=False)
         if new_ms:
             agileplace.edit_tag(cfg, apply, card, f"{MS_PREFIX}{new_ms}", add=True)
 
-    changed = r.gh_add or r.gh_remove or r.ap_add or r.ap_remove or new_ms != gh_ms or new_ms != ap_ms
-    if changed:
-        key = title_key(epic["title"]) or str(epic["number"])
+    if r.gh_add or r.gh_remove or r.ap_add or r.ap_remove or new_ms != gh_ms or new_ms != ap_ms:
+        key = title_key(issue["title"]) or str(issue["number"])
         print(f"meta  [{key}] labels gh+{len(r.gh_add)}/-{len(r.gh_remove)} ap+{len(r.ap_add)}/-{len(r.ap_remove)}"
-              f"  milestone={new_ms}")
-    if apply:  # advance the merge base only on a real write, or a dry run would swallow changes
-        epics[url] = {"labels": sorted(r.new_base), "milestone": new_ms}
+              f" milestone={new_ms}")
+    if apply:
+        issues_state[url] = {"labels": sorted(r.new_base), "milestone": new_ms}
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sync GitHub issue state -> AgilePlace cards (lanes + bidirectional metadata)")
+    parser = argparse.ArgumentParser(description="Sync GitHub -> AgilePlace (per-issue cards, lanes, connections, metadata)")
     parser.add_argument("--apply", action="store_true", help="actually write (default: verbose dry run)")
     args = parser.parse_args()
 
@@ -151,9 +145,9 @@ def main() -> None:
     if args.apply and not online:
         print("NOTE: --apply given but AgilePlace is not fully configured (.env) -- forcing dry run")
     elif not online:
-        print("DRY RUN: AgilePlace not fully configured -> no writes; printing planned moves")
+        print("DRY RUN: AgilePlace not fully configured -> no writes; printing planned actions")
     elif not apply:
-        print("DRY RUN (read-only): pass --apply to move cards / sync metadata")
+        print("DRY RUN (read-only): pass --apply to create/move/connect cards + sync metadata")
 
     if cfg["target_repo_path"] is None:
         print("NOTE: TARGET_REPO_PATH not set (.env) -- cannot read GitHub; nothing to sync.")
@@ -171,35 +165,63 @@ def main() -> None:
     by_key = {title_key(i["title"]) or str(i["number"]): i for i in issues}
     epics = [i for i in issues if "type:epic" in i["labels"]]
 
-    lanes = agileplace.board_layout(cfg) if online else []
-    cards = agileplace.list_cards(cfg) if online else []
-    state = load_state(target, str(cfg["board_id"])) if online else {"epics": {}}
-    project_status = ghproject.issue_status_map(cfg)  # {} unless a Projects v2 board is configured/reachable
+    project_status = ghproject.issue_status_map(cfg)
     if ghproject.configured(cfg):
         print(f"projects v2: {len(project_status)} items carry Status (source of truth for stage)")
 
-    for epic in epics:
-        key = title_key(epic["title"]) or str(epic["number"])
-        stage = epic_stage(epic, project_status, by_number, by_key, cfg)
+    lanes = agileplace.board_layout(cfg) if online else []
+    cards = agileplace.list_cards(cfg) if online else []
+    state = load_state(target, str(cfg["board_id"])) if online else {"issues": {}}
+    issues_state = state.setdefault("issues", {})
+    smap = cfg.get("stage_lane_map")
 
-        card = agileplace.find_card(cards, epic["url"], key) if online else None
-        if not card:
-            print(f"noop  [{key}] stage={stage} -- {'no card (run init 04 first)' if online else 'board unknown (dry)'}")
+    card_by_url = {}
+    for card in cards:
+        for u in agileplace.card_external_urls(card):
+            card_by_url[u] = card
+
+    # 1) ensure a card per issue
+    for issue in issues:
+        if issue["url"] in card_by_url:
             continue
+        key = title_key(issue["title"]) or str(issue["number"])
+        stage = resolve_issue_stage(issue, project_status)
+        lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
+        created = agileplace.create_card(cfg, apply, issue_card_title(issue), key, issue["url"],
+                                         lane["id"] if lane else None)
+        if apply and created.get("id"):
+            card_by_url[issue["url"]] = created
+        print(f"{'made ' if apply else 'DRY  '} card [{key}] stage={stage}"
+              f"{' lane=' + agileplace.lane_title(lane) if lane else ''}")
 
-        target_lane, acceptable = agileplace.resolve_lane_for_stage(
-            lanes, stage, epic.get("milestone") or "", cfg.get("stage_lane_map"))
-        if not target_lane:
-            print(f"noop  [{key}] no unambiguous lane for stage '{stage}' -- not moving (set STAGE_LANE_MAP)")
-        else:
+    # 2) per issue: move to the stage's lane + reconcile metadata
+    for issue in issues:
+        key = title_key(issue["title"]) or str(issue["number"])
+        card = card_by_url.get(issue["url"])
+        if not card:
+            continue  # freshly dry-run-created (no id yet), or unresolved
+        stage = resolve_issue_stage(issue, project_status)
+        target_lane, acceptable = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
+        if target_lane:
             current = str(card.get("laneId") or (card.get("lane") or {}).get("id") or "")
-            if current in {str(i) for i in acceptable}:
-                print(f"ok    [{key}] already in-stage '{stage}' ({agileplace.lane_title(target_lane)} or equivalent)")
-            else:
+            if current not in {str(i) for i in acceptable}:
                 agileplace.move_card(cfg, apply, card, target_lane["id"])
                 print(f"{'moved' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {stage})")
+        sync_metadata(cfg, apply, issue, card, cfg["label_sync_ignore"], issues_state)
 
-        sync_metadata(cfg, apply, epic, card, cfg["label_sync_ignore"], state["epics"])
+    # 3) parent/child connections: each epic card -> its task cards (mirrors sub-issues)
+    for epic in epics:
+        parent = card_by_url.get(epic["url"])
+        if not parent or not parent.get("id"):
+            continue
+        task_urls = [by_number[n]["url"] for n in epic_task_numbers(cfg, epic, by_key) if n in by_number]
+        child_ids = [str(card_by_url[u]["id"]) for u in task_urls
+                     if u in card_by_url and card_by_url[u].get("id")]
+        missing = [cid for cid in child_ids if cid not in agileplace.card_child_ids(parent)]
+        if missing:
+            key = title_key(epic["title"]) or str(epic["number"])
+            agileplace.connect_children(cfg, apply, str(parent["id"]), missing)
+            print(f"{'linked' if apply else 'DRY  '} [{key}] parent -> {len(missing)} child card(s)")
 
     if apply:
         save_state(state)
