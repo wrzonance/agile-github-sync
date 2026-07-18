@@ -4,6 +4,9 @@ Auth: AGILEPLACE_TOKEN (Bearer). Tokens have NO scopes -- never commit or log on
 issues by external-link URL (customId fallback). Lanes resolve to a stage by TITLE among LEAF lanes,
 failing closed when ambiguous. ALL mutations to one card are batched into a single versioned JSON-Patch
 (op-builders + patch_card) so the resource version can't go stale mid-run (optimistic concurrency).
+patch_card never sends an unversioned PATCH: a card missing `version` is refetched once first
+(_card_with_version); if the refetch is also version-less, the PATCH is skipped and a WARN is
+printed instead of risking a silent stale overwrite (issue #8).
 API shapes marked "VALIDATE LIVE" follow current Planview docs but are confirmed at first live run.
 """
 from __future__ import annotations
@@ -213,11 +216,34 @@ def ops_blocked(blocked: bool, reason: str | None) -> list[dict]:
 
 def patch_card(cfg: dict, apply: bool, card: dict, ops: list[dict], note: str = "") -> dict:
     """Send ONE JSON Patch for a card with its resource version (optimistic concurrency). Batching every
-    op for a card into a single PATCH is what prevents the version going stale between writes."""
+    op for a card into a single PATCH is what prevents the version going stale between writes.
+    Never sends a PATCH without a resource version: if `card` arrives without one, a fresh refetch is
+    attempted first; if that refetch also has no version, the PATCH is skipped entirely (see
+    _card_with_version)."""
     if not ops:
         return {}
-    return mutate(cfg, apply, "PATCH", f"card/{card['id']}", body=ops,
-                  headers=_version_headers(card), note=note or f"patch card {card['id']} ({len(ops)} ops)")
+    versioned = _card_with_version(cfg, apply, card)
+    if versioned is None:
+        return {}
+    return mutate(cfg, apply, "PATCH", f"card/{versioned['id']}", body=ops,
+                  headers=_version_headers(versioned), note=note or f"patch card {versioned['id']} ({len(ops)} ops)")
+
+
+def _card_with_version(cfg: dict, apply: bool, card: dict) -> dict | None:
+    """Guarantee `card` carries a resource version before patch_card is allowed to PATCH it.
+    Returns `card` unchanged (zero network calls) when a version is already present or apply is
+    False -- dry runs never trigger a refetch. Otherwise refetches the card fresh: on success returns
+    a NEW dict (never mutates `card`) with the refetched version filled in; if the refetch also has
+    no version, returns None and prints one WARN naming the card so the caller can refuse to send an
+    unversioned PATCH instead of risking a silent stale overwrite."""
+    if card.get("version") is not None or not apply:
+        return card
+    fresh = get_card(cfg, card["id"])
+    if fresh.get("version") is None:
+        print(f"WARN  card {card['id']} has no resource version after refetch -- "
+              f"refusing unversioned PATCH, skipping ops")
+        return None
+    return {**card, "version": fresh["version"]}
 
 
 def _version_headers(card: dict) -> dict:
