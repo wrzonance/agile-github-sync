@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import ghproject  # noqa: E402
 from ghproject import (_camel, _field, _field_candidates,  # noqa: E402
-                       _field_key_seen, unmatched_date_kinds)
+                       _field_key_seen, parse_items, unmatched_date_kinds)
+from sync import sync_dates  # noqa: E402
 
 
 # --- _camel -----------------------------------------------------------------
@@ -225,3 +226,78 @@ def test_set_project_date_true_and_no_write_on_dry_run():
         result = ghproject.set_project_date(_cfg(), False, "PVT_1", "PVTI_1", "SF_1", "2026-01-02")
     assert result is True
     run_mock.assert_not_called()
+
+
+# --- two-run end-to-end regression: merge-base skip-write --------------------
+# Exercises sync.sync_dates across two SIMULATED CONSECUTIVE RUNS with the real (unmocked)
+# ghproject.set_project_date -- only ghkit.run (the actual subprocess boundary) is patched. This pins
+# the fix for issue #6's merge-base bug at the real call boundary, not by hand-waving a mocked bool.
+#
+# SPIKE-LEARNED CONSTRUCTION (do not deviate): hold pitem['start'] constant at whatever GitHub actually
+# has across both runs; toggle ONLY item_id (None on run 1, present on run 2). Do NOT set the GitHub-side
+# read to None to simulate "write skipped" -- that exercises reconcile_value's legitimate "GitHub
+# genuinely cleared it" branch instead, which is a different bug and would pin the wrong invariant.
+
+def test_two_run_merge_base_does_not_advance_until_item_id_resolves():
+    """Run 1: the Project item id isn't resolved yet (item_id=None) -- set_project_date's own falsy-
+    guard skips the write before ever touching ghkit.run, so prev['start'] must NOT advance even though
+    apply=True. Run 2: item_id has resolved; GitHub's real value is unchanged (the skipped write never
+    took effect), so the same merge computes the same desired value and this time the write actually
+    goes through -- prev['start'] converges to it."""
+    issue = {"url": "https://github.com/o/r/issues/9", "title": "[T9] widget"}
+    card = {"id": "C9", "plannedStart": "2026-02-01", "plannedFinish": None}  # AgilePlace changed the date
+    meta = {"project_id": "PVT_1", "start_field_id": "SF_1", "target_field_id": None}
+    state = {issue["url"]: {"start": "2026-01-01"}}  # base == GitHub's current (unchanged) value
+    calls = []
+
+    def queue(card, ops, note):
+        calls.append((card, ops, note))
+
+    # Run 1: item_id not yet resolved.
+    with patch("ghproject.ghkit.run") as run_mock:
+        pitem = {"item_id": None, "start": "2026-01-01", "target": None}
+        sync_dates({}, True, issue, card, pitem, meta, state, queue)
+    run_mock.assert_not_called()                              # skipped before reaching the subprocess boundary
+    assert state[issue["url"]]["start"] == "2026-01-01"        # NOT advanced -- write was never confirmed
+
+    # Run 2: item_id now resolved; GitHub's real value is unchanged (nothing actually wrote last run).
+    with patch("ghproject.ghkit.run") as run_mock:
+        pitem = {"item_id": "PVTI_1", "start": "2026-01-01", "target": None}
+        sync_dates({}, True, issue, card, pitem, meta, state, queue)
+    run_mock.assert_called_once()                               # the write now actually goes through
+    args = run_mock.call_args.args[1]
+    assert "--clear" not in args and "2026-02-01" in args       # a real date write, not a null-PATCH
+    assert state[issue["url"]]["start"] == "2026-02-01"         # converged: base now matches the confirmed write
+
+
+# --- two-run end-to-end regression: camelCase convergence --------------------
+
+def test_two_run_camelcase_convergence_issues_no_null_patch():
+    """Two consecutive runs against a raw Project row keyed 'start Date' (gh's camelCase flatten of a
+    'Start Date' field). Real ghproject.parse_items must resolve this value on every run -- if it fell
+    back to the old 2-variant probe and silently read None instead, reconcile_value would see base (the
+    real date) matched by AgilePlace but diverged from GitHub-as-(mis)parsed, conclude 'only GitHub
+    changed', and sync.sync_dates would issue a null-PATCH clearing a date GitHub actually still has.
+    Proves the fix converges losslessly: no write is ever attempted across either run."""
+    url = "https://github.com/o/r/issues/9"
+    raw_items = [{"id": "PVTI_1", "content": {"type": "Issue", "number": 9, "url": url},
+                  "start Date": "2026-01-05"}]
+    parsed = parse_items(raw_items, status_field="Status", start_field="Start Date", target_field="Target")
+    pitem = parsed[url]
+    assert pitem["start"] == "2026-01-05"                       # camelCase match confirmed before the real test
+
+    issue = {"url": url, "title": "[T9] widget"}
+    card = {"id": "C9", "plannedStart": "2026-01-05", "plannedFinish": None}  # AgilePlace already matches
+    meta = {"project_id": "PVT_1", "start_field_id": "SF_1", "target_field_id": None}
+    state = {url: {"start": "2026-01-05"}}                      # already-converged base from a prior run
+    calls = []
+
+    def queue(card, ops, note):
+        calls.append((card, ops, note))
+
+    for _ in range(2):                                          # two consecutive runs, unchanged inputs
+        with patch("ghproject.ghkit.run") as run_mock:
+            sync_dates({}, True, issue, card, pitem, meta, state, queue)
+        run_mock.assert_not_called()                            # no PATCH -- let alone a null one -- ever issued
+    assert calls == []
+    assert state[url]["start"] == "2026-01-05"                  # base holds steady, no oscillation
