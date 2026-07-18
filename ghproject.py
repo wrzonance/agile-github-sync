@@ -69,8 +69,8 @@ def parse_items(items: list, status_field: str = "Status", start_field: str = "S
     return result
 
 
-def items(cfg: dict) -> dict[str, dict] | None:
-    """All project items keyed by issue URL, or None on failure/not-configured (caller falls back)."""
+def _fetch_raw_items(cfg: dict) -> list | None:
+    """Raw `gh project item-list` rows, or None on failure/not-configured."""
     if not configured(cfg):
         return None
     p = cfg["gh_project"]
@@ -78,9 +78,45 @@ def items(cfg: dict) -> dict[str, dict] | None:
         out = ghkit.run(cfg, ["project", "item-list", str(p["number"]), "--owner", p["owner"],
                               "--format", "json", "--limit", "1000"])
         data = json.loads(out.stdout or "{}")
-        return parse_items(data.get("items", []), p["status_field"], p["start_field"], p["target_field"])
+        return data.get("items", [])
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, SystemExit):
         return None
+
+
+def items_and_raw(cfg: dict) -> tuple[dict[str, dict] | None, list | None]:
+    """(parse_items(...) keyed by issue URL, raw item-list rows), or (None, None) on failure/not-
+    configured. The raw rows let callers (e.g. unmatched_date_kinds) inspect field keys gh actually
+    exposed, beyond what parse_items already extracted."""
+    raw = _fetch_raw_items(cfg)
+    if raw is None:
+        return None, None
+    p = cfg["gh_project"]
+    try:
+        parsed = parse_items(raw, p["status_field"], p["start_field"], p["target_field"])
+    except KeyError:
+        return None, None
+    return parsed, raw
+
+
+def items(cfg: dict) -> dict[str, dict] | None:
+    """All project items keyed by issue URL, or None on failure/not-configured (caller falls back)."""
+    return items_and_raw(cfg)[0]
+
+
+def unmatched_date_kinds(raw_items: list | None, field_meta: dict | None, start_field: str,
+                          target_field: str) -> frozenset[str]:
+    """Kinds ("start"/"target") whose Projects v2 field resolved to a field id but no raw item row
+    ever exposed a matching key for that field's name -- signals a likely field-name mismatch worth
+    warning about before dates silently stop syncing. A row that HAS the key with an empty/null value
+    does NOT count as a mismatch (that's a normal unset field, the common case); only true key-absence
+    across every row does. Pure: no I/O, no printing. frozenset() when raw_items or field_meta is
+    falsy/empty."""
+    if not raw_items or not field_meta:
+        return frozenset()
+    checks = (("start", start_field, field_meta.get("start_field_id")),
+              ("target", target_field, field_meta.get("target_field_id")))
+    return frozenset(kind for kind, name, field_id in checks
+                      if field_id and not any(_field_key_seen(row, name) for row in raw_items))
 
 
 def issue_status_map(cfg: dict) -> dict[str, str]:
