@@ -203,11 +203,11 @@ def main() -> None:
 
     # Projects v2: tri-state. A configured-but-FAILED read must not silently fall back and mass-move lanes.
     if ghproject.configured(cfg):
-        pit = ghproject.items(cfg)
+        pit, raw_items = ghproject.items_and_raw(cfg)
         project_read_failed = pit is None
         project_items = pit or {}
     else:
-        project_read_failed, project_items = False, {}
+        project_read_failed, project_items, raw_items = False, {}, []
     project_status = {u: v["status"] for u, v in project_items.items() if v.get("status")}
     field_meta = ghproject.field_meta(cfg) if (ghproject.configured(cfg) and not project_read_failed) else None
     move_lanes = not project_read_failed
@@ -215,6 +215,13 @@ def main() -> None:
         print("WARN  Projects v2 read FAILED -- leaving lanes untouched this run (Status is the source of truth)")
     elif ghproject.configured(cfg):
         print(f"projects v2: {len(project_status)} items carry Status{'; dates enabled' if field_meta else ''}")
+    unmatched_kinds = (
+        ghproject.unmatched_date_kinds(raw_items, field_meta, cfg["gh_project"]["start_field"],
+                                        cfg["gh_project"]["target_field"])
+        if field_meta else frozenset())
+    for kind in sorted(unmatched_kinds):
+        print(f"WARN  Projects v2 '{kind}' field resolved but no item ever exposed a matching key -- "
+              f"skipping {kind} date sync this run")
 
     lanes = agileplace.board_layout(cfg) if online else []
     cards = agileplace.list_cards(cfg) if online else []
@@ -279,7 +286,8 @@ def main() -> None:
                     print(f"{'move ' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {stage})")
         sync_metadata(cfg, apply, issue, card, cfg["label_sync_ignore"], issues_state, queue)
         if field_meta:
-            sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue)
+            sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue,
+                       unmatched_kinds)
 
     # 3) parent/child connections: make each epic card's children EQUAL its sub-issues (add + remove)
     our_card_ids = {str(c["id"]) for c in card_by_url.values() if c.get("id")}
