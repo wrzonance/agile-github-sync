@@ -32,9 +32,20 @@ def test_camel_falsy_name_returned_unchanged():
 
 
 # --- _field_candidates -------------------------------------------------------
+# Probe PRIORITY is observable behavior worth pinning (which value wins when multiple candidate keys
+# are present on the same item); the exact private tuple _field_candidates returns is not -- test the
+# priority through the public boundary (_field) instead, so a behavior-preserving reordering inside
+# the private helper (e.g. checking camelCase before the plain lower-case form, which changes nothing
+# observable when only one candidate key is ever present) doesn't force a test update.
 
-def test_field_candidates_order_and_contents():
-    assert _field_candidates("Start Date") == ("Start Date", "start date", "start Date")
+def test_field_prefers_exact_name_over_lowercase_over_camelcase():
+    item = {"start Date": "camel", "start date": "lower", "Start Date": "exact"}
+    assert _field(item, "Start Date") == "exact"
+
+
+def test_field_falls_back_to_lowercase_then_camelcase_in_order():
+    assert _field({"start date": "lower", "start Date": "camel"}, "Start Date") == "lower"
+    assert _field({"start Date": "camel"}, "Start Date") == "camel"
 
 
 def test_field_candidates_includes_alts_with_no_dedup():
@@ -152,17 +163,41 @@ def test_items_and_raw_matches_items_when_not_configured():
 
 
 # --- unmatched_date_kinds -----------------------------------------------------
-# Pure, no I/O. Flags a kind iff the field id resolved AND raw_items is non-empty AND no row
-# exposes any candidate key for that field's name -- a present-but-empty value is NOT a flag.
+# Pure, no I/O. Flags a kind iff the field id resolved AND the kind is in `known_kinds` (some issue's
+# merge-base previously held a real value for it) AND raw_items is non-empty AND no row exposes any
+# candidate key for that field's name -- a present-but-empty value is NOT a flag, and neither is a
+# kind with no known history (see issue #6 follow-up: gh's item-list only flattens a custom field's
+# key onto items that actually carry a value, so an all-unset field is indistinguishable from a name
+# mismatch by key-presence alone on a project's first rollout -- known_kinds is what tells "used to
+# work, now doesn't" apart from "never used").
 
 def _field_meta(start_id="SF_1", target_id="TF_1"):
     return {"project_id": "PVT_1", "status_field_id": "STF", "status_options": {},
             "start_field_id": start_id, "target_field_id": target_id}
 
 
-def test_unmatched_date_kinds_flags_on_zero_match():
+_BOTH_KNOWN = frozenset({"start", "target"})
+
+
+def test_unmatched_date_kinds_flags_on_zero_match_when_kind_is_known():
     raw = [{"id": "PVTI_1", "content": {"url": "u1"}, "other": "x"}]
-    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target") == frozenset({"start", "target"})
+    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target", _BOTH_KNOWN) == frozenset({"start", "target"})
+
+
+def test_unmatched_date_kinds_no_flag_on_zero_match_when_kind_has_no_known_history():
+    # First rollout: the field is correctly configured but nobody has ever set it on any item, so gh
+    # never flattens the key onto any row. That must NOT be mistaken for a name mismatch -- it would
+    # permanently block Phase 4 date sync for a project that has never had a date set yet.
+    raw = [{"id": "PVTI_1", "content": {"url": "u1"}, "other": "x"}]
+    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target") == frozenset()
+    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target", frozenset()) == frozenset()
+
+
+def test_unmatched_date_kinds_flags_only_the_known_kind_that_regresses():
+    # "start" previously read real values (known); "target" never has (unknown). Both now show zero
+    # key matches -- only "start" is a genuine regression worth flagging.
+    raw = [{"id": "PVTI_1", "content": {"url": "u1"}, "other": "x"}]
+    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target", frozenset({"start"})) == frozenset({"start"})
 
 
 def test_unmatched_date_kinds_no_flag_when_any_row_matches():
@@ -170,30 +205,30 @@ def test_unmatched_date_kinds_no_flag_when_any_row_matches():
         {"id": "PVTI_1", "content": {"url": "u1"}},                                  # no keys at all
         {"id": "PVTI_2", "content": {"url": "u2"}, "start Date": "", "target": "2026-01-01"},
     ]
-    assert unmatched_date_kinds(raw, _field_meta(), "Start Date", "Target") == frozenset()
+    assert unmatched_date_kinds(raw, _field_meta(), "Start Date", "Target", _BOTH_KNOWN) == frozenset()
 
 
 def test_unmatched_date_kinds_no_flag_on_empty_or_none_raw_items():
-    assert unmatched_date_kinds([], _field_meta(), "Start", "Target") == frozenset()
-    assert unmatched_date_kinds(None, _field_meta(), "Start", "Target") == frozenset()
+    assert unmatched_date_kinds([], _field_meta(), "Start", "Target", _BOTH_KNOWN) == frozenset()
+    assert unmatched_date_kinds(None, _field_meta(), "Start", "Target", _BOTH_KNOWN) == frozenset()
 
 
 def test_unmatched_date_kinds_no_flag_when_field_meta_lacks_field_id():
     raw = [{"id": "PVTI_1", "content": {"url": "u1"}}]
     meta = _field_meta(start_id=None, target_id=None)
-    assert unmatched_date_kinds(raw, meta, "Start", "Target") == frozenset()
-    assert unmatched_date_kinds(raw, None, "Start", "Target") == frozenset()
+    assert unmatched_date_kinds(raw, meta, "Start", "Target", _BOTH_KNOWN) == frozenset()
+    assert unmatched_date_kinds(raw, None, "Start", "Target", _BOTH_KNOWN) == frozenset()
 
 
 def test_unmatched_date_kinds_present_but_empty_value_does_not_flag():
     # A row that HAS the key but with an empty value is genuinely-unset, not a mismatch.
     raw = [{"id": "PVTI_1", "content": {"url": "u1"}, "Start": "", "Target": None}]
-    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target") == frozenset()
+    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target", _BOTH_KNOWN) == frozenset()
 
 
 def test_unmatched_date_kinds_flags_only_the_missing_kind():
     raw = [{"id": "PVTI_1", "content": {"url": "u1"}, "Start": "2026-01-01"}]  # no Target key at all
-    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target") == frozenset({"target"})
+    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target", _BOTH_KNOWN) == frozenset({"target"})
 
 
 # --- set_project_date returns bool (True iff a write was actually issued) ----

@@ -73,9 +73,15 @@ def _mock_io(card, items_and_raw_return, field_meta_return):
     return stack, run_mock, patch_card_mock
 
 
-def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None):
+def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_issues_state=None):
+    """seed_issues_state pre-populates the on-disk state file's issues[ISSUE_URL] before main() runs --
+    used to simulate a kind that previously read real values (see ghproject.unmatched_date_kinds's
+    known_kinds gate)."""
     cfg = _cfg(tmp_path)
     state_file = tmp_path / ".sync-state.json"
+    if seed_issues_state is not None:
+        state_file.write_text(json.dumps({"schema": 2, "target": "acme/repo", "board": "42",
+                                          "issues": {ISSUE_URL: seed_issues_state}}), encoding="utf-8")
     card = _card()
     stack, run_mock, patch_card_mock = _mock_io(card, items_and_raw_return, field_meta_return)
     with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
@@ -109,19 +115,38 @@ def test_merge_base_advances_only_after_confirmed_write_across_two_main_runs(tmp
 # --- unmatched_kinds: computed in main(), WARNs, and gates sync_dates end-to-end -------------------
 
 def test_unmatched_kinds_warns_and_skips_both_date_kinds(tmp_path, capsys):
-    # No raw row exposes ANY candidate key for "Start" or "Target" -> both kinds are unmatched.
+    # Both kinds previously read real values (known_kinds), but NOW no raw row exposes ANY candidate
+    # key for "Start" or "Target" -> a genuine regression, both kinds are unmatched.
     raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}, "unrelated": "x"}]
     parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
                           "start": None, "target": None}}
-    state, run_mock, patch_card_mock = _run_main_once(tmp_path, (parsed, raw_items), _field_meta())
+    state, run_mock, patch_card_mock = _run_main_once(
+        tmp_path, (parsed, raw_items), _field_meta(),
+        seed_issues_state={"start": "2026-01-01", "target": "2026-01-09"})
 
     out = capsys.readouterr().out
     assert "WARN  Projects v2 'start' field resolved but no item ever exposed a matching key" in out
     assert "WARN  Projects v2 'target' field resolved but no item ever exposed a matching key" in out
     run_mock.assert_not_called()               # no GH date write attempted for either skipped kind
     patch_card_mock.assert_not_called()        # no AgilePlace date write queued either
-    assert "start" not in state["issues"][ISSUE_URL]
-    assert "target" not in state["issues"][ISSUE_URL]
+    assert state["issues"][ISSUE_URL]["start"] == "2026-01-01"    # base untouched, not wiped/advanced
+    assert state["issues"][ISSUE_URL]["target"] == "2026-01-09"
+
+
+def test_no_warn_and_no_skip_on_first_rollout_with_no_known_date_history(tmp_path, capsys):
+    # Neither kind has ANY prior recorded value (fresh state, first run) and no raw row exposes a
+    # matching key for either -- the common case when a Project's date fields are configured correctly
+    # but nobody has set one on any item yet. This must sync normally, not be mistaken for a name
+    # mismatch and permanently blocked (issue #6 follow-up).
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}, "unrelated": "x"}]
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
+                          "start": None, "target": None}}
+    state, run_mock, patch_card_mock = _run_main_once(tmp_path, (parsed, raw_items), _field_meta())
+
+    out = capsys.readouterr().out
+    assert "WARN  Projects v2" not in out
+    run_mock.assert_called_once()               # start: AgilePlace's plannedStart is written to GitHub
+    assert state["issues"][ISSUE_URL]["start"] == "2026-02-01"
 
 
 # --- guarded call site: frozenset() when field_meta is falsy, no crash, no WARN --------------------

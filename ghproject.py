@@ -104,19 +104,28 @@ def items(cfg: dict) -> dict[str, dict] | None:
 
 
 def unmatched_date_kinds(raw_items: list | None, field_meta: dict | None, start_field: str,
-                          target_field: str) -> frozenset[str]:
-    """Kinds ("start"/"target") whose Projects v2 field resolved to a field id but no raw item row
-    ever exposed a matching key for that field's name -- signals a likely field-name mismatch worth
-    warning about before dates silently stop syncing. A row that HAS the key with an empty/null value
-    does NOT count as a mismatch (that's a normal unset field, the common case); only true key-absence
-    across every row does. Pure: no I/O, no printing. frozenset() when raw_items or field_meta is
-    falsy/empty."""
+                          target_field: str, known_kinds: frozenset[str] = frozenset()) -> frozenset[str]:
+    """Kinds ("start"/"target") that USED TO read real values (kind in `known_kinds` -- some issue's
+    merge-base previously held a non-empty value for it, see sync.known_date_kinds) but NOW no raw item
+    row exposes a matching key for that field's name at all -- a regression signal worth warning about
+    before dates silently stop syncing (issue #6's two-run misread-as-deletion scenario).
+
+    A kind with NO known history is never flagged on zero-match alone: `gh project item-list` only
+    flattens a custom field's key onto an item that actually carries a value, so a field that has never
+    been set on any item -- the common case on a project's first rollout, even with the field
+    correctly configured -- is indistinguishable from a genuine name mismatch by key-presence alone.
+    `known_kinds` is what tells "used to work, now doesn't" apart from "never used".
+
+    A row that HAS the key with an empty/null value does NOT count as a mismatch either way (that's a
+    normal unset field, the common case). Pure: no I/O, no printing. frozenset() when raw_items or
+    field_meta is falsy/empty."""
     if not raw_items or not field_meta:
         return frozenset()
     checks = (("start", start_field, field_meta.get("start_field_id")),
               ("target", target_field, field_meta.get("target_field_id")))
     return frozenset(kind for kind, name, field_id in checks
-                      if field_id and not any(_field_key_seen(row, name) for row in raw_items))
+                      if field_id and kind in known_kinds
+                      and not any(_field_key_seen(row, name) for row in raw_items))
 
 
 def issue_status_map(cfg: dict) -> dict[str, str]:

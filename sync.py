@@ -59,6 +59,15 @@ def save_state(state: dict) -> None:
             os.unlink(tmp)
 
 
+def known_date_kinds(issues_state: dict) -> frozenset[str]:
+    """Kinds ("start"/"target") that some issue's merge-base has actually held a real (non-empty) value
+    for -- i.e. a prior run successfully read/wrote that date kind against GitHub. Feeds
+    ghproject.unmatched_date_kinds so a field that has NEVER carried a value project-wide (the common
+    case on a project's first rollout) isn't mistaken for a name mismatch and permanently blocked --
+    see issue #6 follow-up."""
+    return frozenset(kind for kind in ("start", "target") if any(v.get(kind) for v in issues_state.values()))
+
+
 def epic_task_numbers(cfg: dict, epic: dict, by_key: dict) -> list[int]:
     """Native sub-issues; fall back to the [KEY] title convention ONLY on a query FAILURE (None), never
     on a genuine empty result."""
@@ -201,6 +210,9 @@ def main() -> None:
     by_key = {title_key(i["title"]) or str(i["number"]): i for i in issues}
     epics = [i for i in issues if "type:epic" in i["labels"]]
 
+    state = load_state(target, str(cfg["board_id"])) if online else {"issues": {}}
+    issues_state = state.setdefault("issues", {})
+
     # Projects v2: tri-state. A configured-but-FAILED read must not silently fall back and mass-move lanes.
     if ghproject.configured(cfg):
         pit, raw_items = ghproject.items_and_raw(cfg)
@@ -217,7 +229,7 @@ def main() -> None:
         print(f"projects v2: {len(project_status)} items carry Status{'; dates enabled' if field_meta else ''}")
     unmatched_kinds = (
         ghproject.unmatched_date_kinds(raw_items, field_meta, cfg["gh_project"]["start_field"],
-                                        cfg["gh_project"]["target_field"])
+                                        cfg["gh_project"]["target_field"], known_date_kinds(issues_state))
         if field_meta else frozenset())
     for kind in sorted(unmatched_kinds):
         print(f"WARN  Projects v2 '{kind}' field resolved but no item ever exposed a matching key -- "
@@ -225,8 +237,6 @@ def main() -> None:
 
     lanes = agileplace.board_layout(cfg) if online else []
     cards = agileplace.list_cards(cfg) if online else []
-    state = load_state(target, str(cfg["board_id"])) if online else {"issues": {}}
-    issues_state = state.setdefault("issues", {})
     smap = cfg.get("stage_lane_map")
 
     card_by_url, card_by_cid = {}, {}
