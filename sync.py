@@ -59,6 +59,15 @@ def save_state(state: dict) -> None:
             os.unlink(tmp)
 
 
+def known_date_kinds(issues_state: dict) -> frozenset[str]:
+    """Kinds ("start"/"target") that some issue's merge-base has actually held a real (non-empty) value
+    for -- i.e. a prior run successfully read/wrote that date kind against GitHub. Feeds
+    ghproject.unmatched_date_kinds so a field that has NEVER carried a value project-wide (the common
+    case on a project's first rollout) isn't mistaken for a name mismatch and permanently blocked --
+    see issue #6 follow-up."""
+    return frozenset(kind for kind in ("start", "target") if any(v.get(kind) for v in issues_state.values()))
+
+
 def epic_task_numbers(cfg: dict, epic: dict, by_key: dict) -> list[int]:
     """Native sub-issues; fall back to the [KEY] title convention ONLY on a query FAILURE (None), never
     on a genuine empty result."""
@@ -134,28 +143,39 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
         prev.update({"labels": sorted(r.new_base), "milestone": new_ms})
 
 
-def sync_dates(cfg, apply, issue, card, pitem, field_meta, issues_state, queue) -> None:
-    """Bidirectional planned dates (AgilePlace-wins). Only a date whose Project field id is known is
-    synced -- otherwise it is skipped entirely (never advanced), so a missing field can't be read as a
-    deletion next run."""
+def sync_dates(cfg, apply, issue, card, pitem, field_meta, issues_state, queue,
+               unmatched_kinds: frozenset[str] = frozenset()) -> None:
+    """Bidirectional planned dates (AgilePlace-wins). Only a date whose Project field id is known AND
+    not flagged as unmatched (see ghproject.unmatched_date_kinds) is synced -- otherwise it is skipped
+    entirely (never advanced), so a missing/mismatched field can't be read as a deletion next run.
+
+    Merge-base gating: the GH-side merge base (prev[kind]) only advances when the GitHub value is
+    already correct (new == gh_date, nothing to write) or the write is confirmed to have happened
+    (ghproject.set_project_date returned True). A silently-skipped write (e.g. item_id/field_id
+    missing) must never advance the base -- doing so would mask the mismatch forever, since the next
+    run would compare the base against a GitHub value it never actually reached. The AgilePlace-side
+    queue write is unaffected by this gating -- it always fires when the AgilePlace value needs to
+    change."""
     if not pitem:
         return
     prev = issues_state[issue["url"]]
     key = title_key(issue["title"]) or str(issue["number"])
+    item_id = pitem.get("item_id")
     for kind, field_id, ap_field in (("start", field_meta.get("start_field_id"), "plannedStart"),
                                      ("target", field_meta.get("target_field_id"), "plannedFinish")):
-        if not field_id:
-            continue  # field not resolved -> do not sync or advance this date
+        if not field_id or kind in unmatched_kinds:
+            continue  # field not resolved, or resolved-but-unmatched -> do not sync or advance this date
         gh_date = pitem.get(kind)
         ap_date = card.get(ap_field)
         new = reconcile_value(prev.get(kind), gh_date, ap_date, prefer="ap")
+        gh_write_ok = True
         if new != gh_date:
-            ghproject.set_project_date(cfg, apply, field_meta["project_id"], pitem["item_id"], field_id, new)
+            gh_write_ok = ghproject.set_project_date(cfg, apply, field_meta["project_id"], item_id, field_id, new)
         if new != ap_date:
             queue(card, [agileplace.op_planned_date(ap_field, new)], f"{ap_field}={new}")
         if new != gh_date or new != ap_date:
             print(f"date  [{key}] {kind} -> {new or 'unset'}")
-        if apply:
+        if apply and gh_write_ok:
             prev[kind] = new
 
 
@@ -190,13 +210,16 @@ def main() -> None:
     by_key = {title_key(i["title"]) or str(i["number"]): i for i in issues}
     epics = [i for i in issues if "type:epic" in i["labels"]]
 
+    state = load_state(target, str(cfg["board_id"])) if online else {"issues": {}}
+    issues_state = state.setdefault("issues", {})
+
     # Projects v2: tri-state. A configured-but-FAILED read must not silently fall back and mass-move lanes.
     if ghproject.configured(cfg):
-        pit = ghproject.items(cfg)
+        pit, raw_items = ghproject.items_and_raw(cfg)
         project_read_failed = pit is None
         project_items = pit or {}
     else:
-        project_read_failed, project_items = False, {}
+        project_read_failed, project_items, raw_items = False, {}, []
     project_status = {u: v["status"] for u, v in project_items.items() if v.get("status")}
     field_meta = ghproject.field_meta(cfg) if (ghproject.configured(cfg) and not project_read_failed) else None
     move_lanes = not project_read_failed
@@ -204,11 +227,16 @@ def main() -> None:
         print("WARN  Projects v2 read FAILED -- leaving lanes untouched this run (Status is the source of truth)")
     elif ghproject.configured(cfg):
         print(f"projects v2: {len(project_status)} items carry Status{'; dates enabled' if field_meta else ''}")
+    unmatched_kinds = (
+        ghproject.unmatched_date_kinds(raw_items, field_meta, cfg["gh_project"]["start_field"],
+                                        cfg["gh_project"]["target_field"], known_date_kinds(issues_state))
+        if field_meta else frozenset())
+    for kind in sorted(unmatched_kinds):
+        print(f"WARN  Projects v2 '{kind}' field resolved but no item ever exposed a matching key -- "
+              f"skipping {kind} date sync this run")
 
     lanes = agileplace.board_layout(cfg) if online else []
     cards = agileplace.list_cards(cfg) if online else []
-    state = load_state(target, str(cfg["board_id"])) if online else {"issues": {}}
-    issues_state = state.setdefault("issues", {})
     smap = cfg.get("stage_lane_map")
 
     card_by_url, card_by_cid = {}, {}
@@ -268,7 +296,8 @@ def main() -> None:
                     print(f"{'move ' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {stage})")
         sync_metadata(cfg, apply, issue, card, cfg["label_sync_ignore"], issues_state, queue)
         if field_meta:
-            sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue)
+            sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue,
+                       unmatched_kinds)
 
     # 3) parent/child connections: make each epic card's children EQUAL its sub-issues (add + remove)
     our_card_ids = {str(c["id"]) for c in card_by_url.values() if c.get("id")}
