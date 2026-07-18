@@ -24,14 +24,6 @@ def run(cfg: dict, args: list[str], *, check: bool = True) -> subprocess.Complet
                           text=True, encoding="utf-8", errors="replace", timeout=GH_TIMEOUT)
 
 
-def gh_available() -> bool:
-    try:
-        subprocess.run(["gh", "--version"], capture_output=True, check=True)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
-
-
 def repo_name(cfg: dict) -> str | None:
     try:
         return run(cfg, ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]).stdout.strip() or None
@@ -105,18 +97,15 @@ def blocked_by_map(cfg: dict, issue_numbers: list[int]) -> dict[int, list[int]] 
     if not repo:
         return None
     result: dict[int, list[int]] = {}
-    endpoint_ok = None
     for n in issue_numbers:
         try:
             out = run(cfg, ["api", f"repos/{repo}/issues/{n}/dependencies/blocked_by",
-                            "--jq", ".[].number"], check=True)
-            endpoint_ok = True
+                            "--paginate", "--jq", ".[].number"], check=True)
             nums = [int(x) for x in out.stdout.split() if x.strip().isdigit()]
             if nums:
                 result[n] = nums
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            if endpoint_ok is None:
-                return None  # not available on the first probe -> skip dependencies
+            return None  # ANY failure -> the snapshot is incomplete; skip ALL blocked-state writes
     return result
 
 

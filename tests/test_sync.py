@@ -10,9 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agileplace import resolve_lane_for_stage  # noqa: E402
 from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
-from stages import (blocked_reason, epic_key_for_task, epic_rollup,  # noqa: E402
-                    issue_stage, lane_matches_stage, normalize_status, title_key)
-from sync import issue_card_title, resolve_issue_stage  # noqa: E402
+from stages import (blocked_reason, epic_key_for_task, issue_stage,  # noqa: E402
+                    lane_matches_stage, normalize_status, title_key)
+from sync import _card_milestones, issue_card_title, resolve_issue_stage  # noqa: E402
 
 
 def _board_lanes():
@@ -48,31 +48,24 @@ def test_ready_then_backlog():
     assert issue_stage({"state": "OPEN", "labels": []}) == "Backlog"
 
 
-# --- epic_rollup ----------------------------------------------------------
+# --- lane matching: strict word boundaries --------------------------------
 
-def test_rollup_empty_is_backlog():
-    assert epic_rollup([]) == "Backlog"
-
-
-def test_rollup_all_done():
-    assert epic_rollup(["Done", "Done"]) == "Done"
-
-
-def test_rollup_any_in_progress_wins():
-    assert epic_rollup(["Done", "In progress", "In review"]) == "In progress"
+def test_lane_matches_word_boundaries():
+    assert lane_matches_stage("Under Review", "In review")
+    assert lane_matches_stage("Ready to Start", "Ready")
+    assert not lane_matches_stage("Reviewers", "In review")   # no false hit inside a word
+    assert not lane_matches_stage("Readying", "Ready")
+    assert not lane_matches_stage("In Review", "In progress")
 
 
-def test_rollup_in_review_when_no_in_progress():
-    assert epic_rollup(["Done", "In review", "Backlog"]) == "In review"
+# --- milestone tag determinism --------------------------------------------
 
-
-def test_rollup_some_done_rest_untouched_is_in_progress():
-    assert epic_rollup(["Done", "Backlog"]) == "In progress"
-
-
-def test_rollup_ready_when_nothing_started():
-    assert epic_rollup(["Ready", "Backlog"]) == "Ready"
-    assert epic_rollup(["Backlog", "Backlog"]) == "Backlog"
+def test_card_milestones_deterministic():
+    assert _card_milestones({"tags": []}) == (None, set())
+    assert _card_milestones({"tags": ["bug", "milestone:0.2.0"]}) == ("0.2.0", {"milestone:0.2.0"})
+    val, tags = _card_milestones({"tags": ["milestone:0.3.0", "milestone:0.1.0", "milestone:"]})
+    assert val == "0.1.0"                                                   # deterministic (sorted) first
+    assert tags == {"milestone:0.3.0", "milestone:0.1.0", "milestone:"}     # all returned for cleanup
 
 
 # --- lane matching --------------------------------------------------------

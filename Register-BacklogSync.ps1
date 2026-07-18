@@ -40,19 +40,21 @@ if ($Unregister) {
 
 # Preconditions -- report, don't silently fail.
 foreach ($tool in @("python", "gh")) {
-  if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-    Write-Warning "'$tool' is not on PATH -- the scheduled task will fail until it is."
+  if (-not (Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue)) {
+    Write-Warning "'$tool' is not on PATH as an executable -- the scheduled task uses -NoProfile and will fail until it is."
   }
 }
+if ($IntervalMinutes -le 0 -or $ActiveHours -le 0) { throw "IntervalMinutes and ActiveHours must be positive." }
 if (-not (Test-Path (Join-Path $here ".env"))) {
   Write-Warning "No .env in $here -- copy .env.example to .env and fill TARGET_REPO_PATH + AGILEPLACE_*."
 }
 
 $log = Join-Path $here "sync.log"
-# Static command string (no external input -> no injection surface). Set-Location so .env/state resolve.
-$inner = "Set-Location -LiteralPath '$here'; python sync.py --apply *>> '$log'"
+# Run in $here via -WorkingDirectory (a real parameter, so paths with apostrophes/spaces are safe) and
+# log to a RELATIVE path -- the -Command string is fully static, so no interpolated path can break it.
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
-  -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -Command `"$inner`""
+  -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -Command "python sync.py --apply *>> sync.log"' `
+  -WorkingDirectory $here
 
 # Weekly on weekdays, with a 30-min repetition across the active window.
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At $StartTime

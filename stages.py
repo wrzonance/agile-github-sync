@@ -52,29 +52,6 @@ def issue_stage(issue: dict) -> str:
     return "Backlog"
 
 
-def epic_rollup(task_stages: list[str]) -> str:
-    """An epic's card stage rolled up from its tasks' stages.
-
-    Policy (intentional, NOT a monotonic high-water mark): the least-advanced *active* work drives the
-    epic. If a task starts fresh work, the epic legitimately shows 'In progress' even if another task
-    was 'In review' -- the card reflects current reality, not the furthest any task ever reached.
-    """
-    if not task_stages:
-        return "Backlog"
-    stages = set(task_stages)
-    if stages == {"Done"}:
-        return "Done"
-    if "In progress" in stages:
-        return "In progress"
-    if "In review" in stages:
-        return "In review"
-    if "Done" in stages:  # some done, rest not yet active -> work has started
-        return "In progress"
-    if "Ready" in stages:
-        return "Ready"
-    return "Backlog"
-
-
 def lane_matches_stage(lane_title: str, stage: str) -> bool:
     """True if a lane's title denotes the given stage. Word-boundary substring match so real-world lane
     names resolve ('Ready to Start' -> Ready, 'Code Review' -> In review) without false hits inside
@@ -83,8 +60,8 @@ def lane_matches_stage(lane_title: str, stage: str) -> bool:
     t = (lane_title or "").strip().lower()
     if not t:
         return False
-    padded = f" {t}"
-    return any(t == h or f" {h}" in padded for h in STAGE_TITLE_HINTS[stage])
+    padded = f" {t} "  # both-side word boundaries: "Ready to Start"->Ready, but NOT "Readying"/"Reviewers"
+    return any(f" {h} " in padded for h in STAGE_TITLE_HINTS[stage])
 
 
 def title_key(title: str) -> str | None:

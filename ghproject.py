@@ -86,7 +86,8 @@ def field_meta(cfg: dict) -> dict | None:
     p = cfg["gh_project"]
     try:
         proj = ghkit.run(cfg, ["project", "view", str(p["number"]), "--owner", p["owner"], "--format", "json"])
-        fl = ghkit.run(cfg, ["project", "field-list", str(p["number"]), "--owner", p["owner"], "--format", "json"])
+        fl = ghkit.run(cfg, ["project", "field-list", str(p["number"]), "--owner", p["owner"],
+                             "--limit", "200", "--format", "json"])  # default is only 30 fields
         meta = {"project_id": json.loads(proj.stdout)["id"], "status_field_id": None,
                 "status_options": {}, "start_field_id": None, "target_field_id": None}
         for f in json.loads(fl.stdout).get("fields", []):
