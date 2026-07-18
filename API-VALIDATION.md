@@ -37,6 +37,11 @@ at `github.com/LeanKit/leankit-node-client`.
    `x-lk-resource-version` header produces a clean conflict (HTTP 409 or 428) rather than a silent
    stale overwrite. The current code sends the version but does not retry on conflict, so a
    conflict surfaces as a failed run; add refetch-and-recompute if that proves noisy.
+4. Single-card GET response shape (`agileplace.get_card`, `GET /io/card/{id}`, issue #8). Docs
+   don't confirm whether this wraps the payload as `{"card": {...}}` (like `list_cards`' `cards`
+   array) or returns the card fields flat. `get_card` defensively unwraps either shape
+   (`data.get("card", data)`), so both possibilities are handled without a human needing to pick
+   one first. Confirm on a live card and, if it's always one shape, the unwrap can be simplified.
 
 ## Model 2 additions, also [live-check]
 

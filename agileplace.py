@@ -146,6 +146,15 @@ def list_cards(cfg: dict) -> list[dict]:
     return cards
 
 
+def get_card(cfg: dict, card_id: str) -> dict:
+    """Fetch a single card fresh (GET /io/card/{id}). VALIDATE LIVE: docs don't confirm whether the
+    single-card GET wraps the payload as {"card": {...}} (like list_cards' {"cards": [...]}) or
+    returns the card fields flat -- defensively unwrap either shape so callers always get a flat
+    card dict. See API-VALIDATION.md."""
+    data = api(cfg, "GET", f"card/{card_id}")
+    return data.get("card", data)
+
+
 def card_external_urls(card: dict) -> list[str]:
     links = card.get("externalLinks") or ([card["externalLink"]] if card.get("externalLink") else [])
     return [(l or {}).get("url", "") for l in links if l]

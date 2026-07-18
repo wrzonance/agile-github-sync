@@ -3,10 +3,11 @@ the live sync depends on. Run: pytest -q
 """
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agileplace import card_block_reason, card_is_blocked, ops_blocked  # noqa: E402
+from agileplace import card_block_reason, card_is_blocked, get_card, ops_blocked  # noqa: E402
 
 
 def test_ops_blocked_block_with_reason():
@@ -74,3 +75,22 @@ def test_card_block_reason_reads_nested_blockedstatus_reason():
     assert card_block_reason({"blockedStatus": {"isBlocked": False, "reason": None}}) == ""
     assert card_block_reason({}) == ""
     assert card_block_reason({"blockReason": "waiting"}) == ""  # flat write shape must not be read
+
+
+def test_get_card_unwraps_wrapped_card_response():
+    """The live single-card GET may wrap the card in {"card": {...}} (VALIDATE LIVE) -- get_card
+    must hand callers the flat card dict either way."""
+    wrapped = {"card": {"id": "123", "version": 5, "title": "Do the thing"}}
+    with patch("agileplace.api", return_value=wrapped) as api_mock:
+        card = get_card({"token": "t", "host": "h"}, "123")
+    api_mock.assert_called_once_with({"token": "t", "host": "h"}, "GET", "card/123")
+    assert card == {"id": "123", "version": 5, "title": "Do the thing"}
+
+
+def test_get_card_returns_already_flat_response_as_is():
+    """If the live API instead returns the card fields at the top level (no "card" wrapper),
+    get_card must not misinterpret that shape -- it should hand it back unchanged."""
+    flat = {"id": "456", "version": 2, "title": "Another thing"}
+    with patch("agileplace.api", return_value=flat):
+        card = get_card({"token": "t", "host": "h"}, "456")
+    assert card == flat
