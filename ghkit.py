@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 
 
 GH_TIMEOUT = 60  # seconds; bounds every gh call so a stall can't hang the sync
@@ -20,8 +21,14 @@ def run(cfg: dict, args: list[str], *, check: bool = True) -> subprocess.Complet
         raise SystemExit("TARGET_REPO_PATH is not set (.env or environment) -- cannot target the repo")
     if not target.is_dir():
         raise SystemExit(f"TARGET_REPO_PATH does not exist or is not a directory: {target}")
-    return subprocess.run(["gh", *args], cwd=str(target), check=check, capture_output=True,
-                          text=True, encoding="utf-8", errors="replace", timeout=GH_TIMEOUT)
+    try:
+        return subprocess.run(["gh", *args], cwd=str(target), check=check, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=GH_TIMEOUT)
+    except subprocess.CalledProcessError as exc:
+        # Surface gh's own message; captured-and-discarded stderr makes every failure opaque.
+        if exc.stderr:
+            print(f"gh {' '.join(args[:2])} failed: {exc.stderr.strip()}", file=sys.stderr)
+        raise
 
 
 def repo_name(cfg: dict) -> str | None:
@@ -32,12 +39,16 @@ def repo_name(cfg: dict) -> str | None:
 
 
 def list_issues(cfg: dict) -> list[dict]:
-    """Every issue with the facts the sync needs, normalized, in one call."""
+    """Every issue with the facts the sync needs, normalized, in one call. Issues closed as
+    not-planned or duplicate are excluded entirely: they are not work, and a card for one would sit
+    in the board's Done lane as if it were (the target repo carries 16 such neutralized husks)."""
     out = run(cfg, ["issue", "list", "--state", "all", "--limit", "1000", "--json",
-                    "number,title,state,labels,milestone,assignees,url"])
+                    "number,title,state,stateReason,labels,milestone,assignees,url"])
     issues = json.loads(out.stdout or "[]")
     normalized = []
     for i in issues:
+        if str(i.get("stateReason") or "").upper() in ("NOT_PLANNED", "DUPLICATE"):
+            continue
         ms = i.get("milestone") or {}
         normalized.append({
             "number": i["number"],

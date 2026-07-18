@@ -42,8 +42,10 @@ Sources: LeanKit io v2 — Update a card, Get a list of cards, Get board, Core c
   Needs the `project` token scope. Confirm the item-list JSON shape on your board.
 - **Card create** (`POST /io/card`, `agileplace.create_card`): same shape the init used successfully;
   confirm `customId` + `externalLink` are accepted for a fresh card.
-- **Parent/child connections** (`connect_children`): posts `card/connect` with
-  `{parentCardId, childCardIds}` — **VALIDATE** the exact endpoint/body against the Connections API
+- **Parent/child connections** (`connect_children`): posts `card/connections` with
+  `{cardIds:[parent], connections:{children:[...]}}` (matching `agileplace.py`; an earlier draft of
+  this doc said `card/connect` with `{parentCardId, childCardIds}`, which is NOT what the code
+  sends) — **VALIDATE** the exact endpoint/body against the Connections API
   ([create](https://success.planview.com/Planview_LeanKit/LeanKit_API/01_v2/connections/create) /
   connect-many) on a disposable card, and confirm how existing children read back (`card_child_ids`).
 - **Planned dates** (Phase 4): `plannedStart`/`plannedFinish` via the card PATCH; Project Start/Target
@@ -51,8 +53,33 @@ Sources: LeanKit io v2 — Update a card, Get a list of cards, Get board, Core c
 
 ## GitHub side (standard, stable — noted for completeness)
 
-- `gh issue list --json number,title,state,labels,milestone,assignees,url` — stable.
+- `gh issue list --json number,title,state,stateReason,labels,milestone,assignees,url` — stable.
+  Issues closed as `NOT_PLANNED`/`DUPLICATE` are filtered out in `list_issues` (not work; must not
+  get cards). `stateReason` confirmed a valid `--json` field on the installed gh (2026-07-18).
 - Native sub-issues via `gh api graphql` `repository.issue.subIssues` (GitHub 2024+). **[live-check]** on
   the target host/GHES version; `sub_issue_numbers()` returns **None on failure** so `sync.py` warns and
   falls back to the `[KEY]` title convention rather than silently mis-associating.
 - Open-PR "in review" signal via `pullRequests.closingIssuesReferences` — standard GraphQL.
+- `gh issue edit --remove-milestone` — confirmed present in the installed gh's help (2026-07-18).
+
+## Validated live 2026-07-18 (against People-Places-Solutions/cable-tool + board #158)
+
+During the backlog stand-up these formerly-[live-check] GitHub shapes were exercised for real:
+
+- **Issue dependencies REST**: `GET repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by`
+  returns an array of issue objects; `.number` extraction works (`blocked_by_map` is sound).
+- **`gh project item-list --format json`**: items carry top-level `id`, flattened lower-case field
+  values (`status`), and `content{number,title,url,state}` — exactly what `parse_items` expects.
+- **`gh project view --format json`** (`.id`) and **`field-list --format json`**
+  (`fields[].id/name/options[].id/name`) — shapes as coded; board #158's Status options are the
+  canonical five (Backlog/Ready/In progress/In review/Done). Note field-list's default limit is 30
+  (the code already passes `--limit 200`).
+- **`gh project item-add`/`item-edit --single-select-option-id`** — used successfully by init `05`.
+
+Two hard-won gh behaviors from the same day, recorded so this repo never relearns them:
+
+1. `gh issue create --type <TYPE>` is NOT atomic: with a type the org lacks, the issue is created
+   FIRST and the command then fails -- a blind retry mints a duplicate. (This sync never creates
+   issues, but any future issue-writing code must probe `orgs/{org}/issue-types` first.)
+2. `gh issue edit --add-blocked-by` is NOT idempotent: re-adding an existing edge fails with
+   "Target issue has already been taken", which is success for the caller's intent.

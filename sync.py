@@ -291,6 +291,8 @@ def main() -> None:
 
     # 4) dependencies -> card Blocked state (skip entirely unless the whole blocked-by snapshot is complete)
     blocked_by = ghkit.blocked_by_map(cfg, [i["number"] for i in issues]) if online else None
+    if online and blocked_by is None:
+        print("WARN  blocked-by snapshot incomplete -- leaving ALL card Blocked states untouched this run")
     if blocked_by is not None:
         stage_by_number = {i["number"]: resolve_issue_stage(i, project_status) for i in issues}
         for issue in issues:
