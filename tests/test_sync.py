@@ -98,6 +98,49 @@ def test_card_milestones_falls_back_to_sorted_first_when_fully_unanchored():
     assert _card_milestones(card, "0.2.0", "0.2.0")[0] == "0.1.0"
 
 
+def test_card_milestones_single_tag_passthrough():
+    # exactly one non-empty suffix, no anchor matches it -> it is still the candidate.
+    card = {"tags": ["milestone:1.2.3"]}
+    assert _card_milestones(card, None, None)[0] == "1.2.3"
+
+
+def test_card_milestones_base_wins_over_unrelated_other_tag():
+    # base present among suffixes, gh is a third value absent from the card -> base wins,
+    # even though "other" sorts before base.
+    card = {"tags": ["milestone:0.9.0", "milestone:0.1.0"]}
+    assert _card_milestones(card, "0.9.0", "5.0.0")[0] == "0.9.0"
+
+
+def test_card_milestones_gh_wins_over_unrelated_other_tag():
+    # base is absent from the card entirely -> falls through to gh, which is present.
+    card = {"tags": ["milestone:9.9", "milestone:0.1.0"]}
+    assert _card_milestones(card, None, "9.9")[0] == "9.9"
+
+
+def test_card_milestones_verified_repro_base_equals_gh_wins_over_stale_leftover():
+    # issue #7's worked example: base and gh agree at "0.2.0"; a stale "0.1.0" leftover
+    # tag must not out-sort the anchored value.
+    card = {"tags": ["milestone:0.2.0", "milestone:0.1.0"]}
+    assert _card_milestones(card, "0.2.0", "0.2.0")[0] == "0.2.0"
+
+
+def test_card_milestones_fully_unanchored_upgrade_is_selected():
+    # issue #7's other worked example: base and gh agree at "0.2.0", but the card carries
+    # only a genuinely new, unanchored "9.9" tag -- that upgrade must be picked up, not
+    # discarded in favor of the (absent) anchor.
+    card = {"tags": ["milestone:9.9"]}
+    assert _card_milestones(card, "0.2.0", "0.2.0")[0] == "9.9"
+
+
+def test_card_milestones_empty_suffix_never_selected():
+    # an empty-suffix "milestone:" tag must never be the candidate, even when it coexists
+    # with unanchored non-empty suffixes.
+    card = {"tags": ["milestone:", "milestone:0.2.0", "milestone:0.1.0"]}
+    candidate, _ = _card_milestones(card, None, None)
+    assert candidate != ""
+    assert candidate == "0.1.0"
+
+
 # --- lane matching --------------------------------------------------------
 
 def test_lane_matches_stage_disambiguates_started():
