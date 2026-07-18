@@ -58,14 +58,44 @@ def test_lane_matches_word_boundaries():
     assert not lane_matches_stage("In Review", "In progress")
 
 
-# --- milestone tag determinism --------------------------------------------
+# --- milestone tag selection: base/gh-anchor precedence --------------------
 
-def test_card_milestones_deterministic():
-    assert _card_milestones({"tags": []}) == (None, set())
-    assert _card_milestones({"tags": ["bug", "milestone:0.2.0"]}) == ("0.2.0", {"milestone:0.2.0"})
-    val, tags = _card_milestones({"tags": ["milestone:0.3.0", "milestone:0.1.0", "milestone:"]})
-    assert val == "0.1.0"                                                   # deterministic (sorted) first
-    assert tags == {"milestone:0.3.0", "milestone:0.1.0", "milestone:"}     # all returned for cleanup
+def test_card_milestones_pure_and_deterministic():
+    card = {"tags": ["milestone:0.3.0", "milestone:0.1.0", "milestone:"]}
+    # same inputs -> same output, repeated calls, no hidden state
+    assert _card_milestones(card, "0.1.0", "0.3.0") == _card_milestones(card, "0.1.0", "0.3.0")
+    assert _card_milestones(card, None, None) == _card_milestones(card, None, None)
+
+
+def test_card_milestones_raw_tags_is_every_ms_tag_verbatim():
+    card = {"tags": ["bug", "milestone:0.3.0", "milestone:0.1.0", "milestone:"]}
+    _, tags = _card_milestones(card, None, None)
+    assert tags == {"milestone:0.3.0", "milestone:0.1.0", "milestone:"}
+    assert _card_milestones({"tags": []}, None, None) == (None, set())
+    assert _card_milestones({"tags": ["milestone:"]}, None, None) == (None, {"milestone:"})
+
+
+def test_card_milestones_none_iff_no_nonempty_suffix():
+    assert _card_milestones({"tags": []}, "0.1.0", "0.2.0")[0] is None
+    assert _card_milestones({"tags": ["milestone:"]}, "0.1.0", "0.2.0")[0] is None
+    assert _card_milestones({"tags": ["milestone:0.9.0"]}, None, None)[0] is not None
+
+
+def test_card_milestones_prefers_base_anchor_regardless_of_sort_position():
+    # base "0.2.0" sorts after "0.1.0" but must still win -- this is the issue #7 bug:
+    # a stale extra tag must never override the confirmed-synced base value.
+    card = {"tags": ["milestone:0.1.0", "milestone:0.2.0"]}
+    assert _card_milestones(card, "0.2.0", "0.2.0")[0] == "0.2.0"
+
+
+def test_card_milestones_falls_back_to_gh_anchor_when_base_absent():
+    card = {"tags": ["milestone:0.1.0", "milestone:9.9"]}
+    assert _card_milestones(card, "0.2.0", "9.9")[0] == "9.9"
+
+
+def test_card_milestones_falls_back_to_sorted_first_when_fully_unanchored():
+    card = {"tags": ["milestone:0.3.0", "milestone:0.1.0"]}
+    assert _card_milestones(card, "0.2.0", "0.2.0")[0] == "0.1.0"
 
 
 # --- lane matching --------------------------------------------------------
