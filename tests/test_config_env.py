@@ -53,13 +53,36 @@ def test_load_env_file_still_sets_unrelated_keys_from_same_file(tmp_path, monkey
 
 def test_load_env_file_does_not_override_real_env_for_blocklisted_keys_either(tmp_path, monkeypatch):
     """Belt-and-suspenders: even if GH_REPO were already correctly set in the real environment,
-    the loader must not be the mechanism that could ever change it -- it must skip the line
-    entirely rather than relying on setdefault's no-op-when-present behavior."""
-    env_file = _write_env(tmp_path, "GH_REPO=someone/else\n")
+    the loader must not be the mechanism that could ever change it -- it must skip the blocklisted
+    line entirely rather than relying on os.environ.setdefault's no-op-when-present behavior.
+
+    Checking only the post-call environ value can't tell those two implementations apart: setdefault
+    is *always* a no-op when the key already exists, blocklist or not. So this spies directly on
+    os.environ.setdefault to prove it is never even called for GH_REPO/GH_HOST, while unrelated keys
+    still go through it normally."""
+    import os
+
+    env_file = _write_env(
+        tmp_path, "GH_REPO=someone/else\nGH_HOST=stale.example.com\nAGILEPLACE_TOKEN=abc123\n"
+    )
     monkeypatch.setattr(config, "ENV_FILE", env_file)
     monkeypatch.setenv("GH_REPO", "correct/repo")
+    monkeypatch.setenv("GH_HOST", "correct.example.com")
+    monkeypatch.delenv("AGILEPLACE_TOKEN", raising=False)
+
+    setdefault_calls: list[str] = []
+    real_setdefault = os.environ.setdefault
+
+    def spy_setdefault(key, value):
+        setdefault_calls.append(key)
+        return real_setdefault(key, value)
+
+    monkeypatch.setattr(os.environ, "setdefault", spy_setdefault)
 
     config.load_env_file()
 
-    import os
+    assert "GH_REPO" not in setdefault_calls  # never even attempted, not just a no-op
+    assert "GH_HOST" not in setdefault_calls
+    assert "AGILEPLACE_TOKEN" in setdefault_calls  # unrelated key still goes through setdefault
     assert os.environ.get("GH_REPO") == "correct/repo"  # untouched, never overwritten
+    assert os.environ.get("GH_HOST") == "correct.example.com"

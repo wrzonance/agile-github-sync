@@ -133,6 +133,22 @@ def test_repo_context_none_on_name_with_owner_extra_slash(monkeypatch):
     assert ghkit._repo_context({}) is None
 
 
+def test_repo_context_none_on_empty_owner(monkeypatch):
+    """nameWithOwner="/widgets" has exactly one '/' (passes the count check) but an empty owner --
+    must still fail closed rather than yielding RepoContext(owner="", ...)."""
+    _mock_repo_view(monkeypatch, {"nameWithOwner": "/widgets",
+                                  "url": "https://github.com/acme/widgets"})
+    assert ghkit._repo_context({}) is None
+
+
+def test_repo_context_none_on_empty_name(monkeypatch):
+    """nameWithOwner="acme/" has exactly one '/' (passes the count check) but an empty name --
+    must still fail closed rather than yielding RepoContext(name="", ...)."""
+    _mock_repo_view(monkeypatch, {"nameWithOwner": "acme/",
+                                  "url": "https://github.com/acme/widgets"})
+    assert ghkit._repo_context({}) is None
+
+
 def test_repo_context_none_on_gh_call_failure(monkeypatch):
     def fail(cfg, args, **k):
         raise subprocess.CalledProcessError(1, args, stderr="not a git repo")
