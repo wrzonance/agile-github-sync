@@ -121,6 +121,13 @@ def test_repo_context_none_on_unparseable_host(monkeypatch):
     assert ghkit._repo_context({}) is None
 
 
+def test_repo_context_none_on_malformed_url_valueerror(monkeypatch):
+    # An unmatched IPv6 bracket makes urlparse().hostname raise ValueError; it must
+    # follow the same fail-closed path rather than crashing callers.
+    _mock_repo_view(monkeypatch, {"nameWithOwner": "acme/widgets", "url": "https://[broken"})
+    assert ghkit._repo_context({}) is None
+
+
 def test_repo_context_none_on_name_with_owner_missing_slash(monkeypatch):
     _mock_repo_view(monkeypatch, {"nameWithOwner": "acmewidgets",
                                   "url": "https://github.com/acme/widgets"})

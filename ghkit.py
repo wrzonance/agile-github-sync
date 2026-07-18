@@ -78,15 +78,17 @@ def _repo_context(cfg: dict) -> RepoContext | None:
         data = json.loads(out.stdout)
         name_with_owner = data["nameWithOwner"]
         url = data["url"]
+        # urlparse() raises ValueError on malformed URLs (e.g. an unmatched IPv6
+        # bracket) -- keep it inside the try so that too follows the fail-closed path.
+        host = urlparse(url).hostname if isinstance(url, str) else None
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError,
-            SystemExit, json.JSONDecodeError, KeyError, TypeError):
+            SystemExit, json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
     if not isinstance(name_with_owner, str) or name_with_owner.count("/") != 1:
         return None
     owner, name = name_with_owner.split("/", 1)
     if not owner or not name:
         return None
-    host = urlparse(url).hostname if isinstance(url, str) else None
     if not host:
         return None
     return RepoContext(owner=owner, name=name, host=host)
