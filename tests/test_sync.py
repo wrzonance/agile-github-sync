@@ -146,9 +146,12 @@ def test_card_milestones_empty_suffix_never_selected():
 def test_stale_milestone_tags_never_exceeds_ms_tags():
     # spike-found gap: old_base != new_ms alone must NOT be enough to propose a removal --
     # the old-base tag must actually be a member of ms_tags. Here the card carries only an
-    # unanchored "9.9" tag; base="0.2.0" was never re-tagged onto this card at all.
+    # unanchored "9.9" tag; base="0.2.0" was never re-tagged onto this card at all. old_base
+    # ("0.2.0") != new_ms ("9.9") so the card HAS genuinely moved on -- the supersession
+    # condition is true -- which is what actually forces the membership check
+    # (`old_tag in ms_tags`) to be reached and do its job.
     ms_tags = {f"{MS_PREFIX}9.9"}
-    stale = _stale_milestone_tags(ms_tags, "0.2.0", "0.2.0")
+    stale = _stale_milestone_tags(ms_tags, "0.2.0", "9.9")
     assert stale <= ms_tags
     assert stale == frozenset()
 
