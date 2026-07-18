@@ -147,9 +147,15 @@ def test_new_base_arithmetic_excludes_skipped_add_keeps_skipped_remove():
     assert r.gh_remove == frozenset({"x,y", "ok-remove"})
 
 
-def test_new_base_arithmetic_noop_when_nothing_filtered():
-    """When gh_add_safe/gh_remove_safe equal the full reconciled sets (nothing unsafe), new_base
-    collapses to r.new_base exactly -- the fix is a no-op for the common case."""
+def test_new_base_arithmetic_noop_when_nothing_filtered(capsys):
+    """When every reconciled label is gh-safe, the real _filter_gh_safe_labels returns each batch
+    untouched, so the correction terms in sync.py's new_base formula collapse to empty and new_base
+    equals r.new_base exactly -- the fix is a no-op for the common (all-safe) case.
+
+    Unlike computing `r.gh_add - r.gh_add` (a set-algebra identity that is empty no matter what
+    gh_add_safe should have been, so it can never catch a regression), this drives the actual filter
+    function: a bug that dropped a safe name from gh_add_safe/gh_remove_safe would make gh_add_safe
+    != r.gh_add and this assertion would fail."""
     r = Reconciled(
         gh_add=frozenset({"bug"}),
         gh_remove=frozenset({"stale"}),
@@ -157,7 +163,11 @@ def test_new_base_arithmetic_noop_when_nothing_filtered():
         ap_remove=frozenset(),
         new_base=frozenset({"bug", "kept"}),
     )
-    new_base = (r.new_base - (r.gh_add - r.gh_add)) | (r.gh_remove - r.gh_remove)
+    gh_add_safe = _filter_gh_safe_labels(r.gh_add, key="k", action="add")
+    gh_remove_safe = _filter_gh_safe_labels(r.gh_remove, key="k", action="remove")
+    assert capsys.readouterr().out == ""  # nothing unsafe -> no WARN
+
+    new_base = (r.new_base - (r.gh_add - gh_add_safe)) | (r.gh_remove - gh_remove_safe)
     assert new_base == r.new_base
 
 
@@ -204,6 +214,51 @@ def test_sync_metadata_skips_unsafe_labels_and_fixes_merge_base(monkeypatch, cap
     out = capsys.readouterr().out
     warn_lines = [l for l in out.splitlines() if l.startswith("WARN")]
     assert len(warn_lines) == 2
+    add_warn = next(l for l in warn_lines if "a,b" in l)      # skipped add -> must say "skipping add"
+    remove_warn = next(l for l in warn_lines if "x,y" in l)   # skipped remove -> must say "skipping remove"
+    # NOTE: every WARN line mentions both "--add-label" and "--remove-label" (the flag names quoted
+    # verbatim in the message), so a bare `"add" in line` / `"remove" in line` check would pass no
+    # matter which batch a name came from. Anchor on the actual action phrase instead.
+    assert "skipping add on GitHub" in add_warn
+    assert "skipping remove on GitHub" in remove_warn
+
+
+def test_sync_metadata_mixed_safe_and_unsafe_labels_in_same_batch(monkeypatch, capsys):
+    """Reconcile can legitimately put a safe AND an unsafe name in the SAME add batch and the SAME
+    remove batch in one run (AgilePlace both drops an unsafe tag and keeps a safe one is not needed
+    here -- it's enough that GitHub simultaneously carries a stale unsafe label and a stale safe
+    label while AgilePlace introduces a new unsafe tag and a new safe tag). This drives the real
+    reconcile -> _filter_gh_safe_labels -> ghkit.edit_label wiring end-to-end and pins that the safe/
+    unsafe names actually passed to edit_label are EXACTLY {n : is_gh_label_safe(n)} within each
+    batch -- not the whole batch (which would still write the unsafe name) and not empty (which would
+    also drop the safe one)."""
+    issue = _issue(labels=["x,y", "stale-safe"])
+    card = _card(tags=["a,b", "new-safe"])
+    issues_state = {issue["url"]: {"labels": ["x,y", "stale-safe"], "milestone": None}}
+
+    calls = []
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+
+    sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
+
+    added = {a[3] for a, k in calls if k["add"]}
+    removed = {a[3] for a, k in calls if not k["add"]}
+    assert added == {"new-safe"}       # "a,b" (unsafe) skipped out of the add batch
+    assert removed == {"stale-safe"}   # "x,y" (unsafe) skipped out of the remove batch
+
+    prev = issues_state[issue["url"]]
+    # stale-safe was actually removed on GitHub -> not in the new base; a,b never landed -> not in
+    # the new base either; x,y is still actually on GitHub (skipped removal) -> stays in the base.
+    assert set(prev["labels"]) == {"new-safe", "x,y"}
+
+    out = capsys.readouterr().out
+    warn_lines = [l for l in out.splitlines() if l.startswith("WARN")]
+    assert len(warn_lines) == 2
+    add_warn = next(l for l in warn_lines if "a,b" in l)
+    remove_warn = next(l for l in warn_lines if "x,y" in l)
+    assert "skipping add on GitHub" in add_warn
+    assert "skipping remove on GitHub" in remove_warn
 
 
 def test_sync_metadata_dry_run_never_mutates_state(monkeypatch, capsys):
