@@ -18,13 +18,35 @@ def configured(cfg: dict) -> bool:
     return bool(p.get("owner") and p.get("number"))
 
 
+def _camel(name: str) -> str:
+    """gh's camelCase flatten transform for multi-word field names (cli/cli v2.96.0 queries.go):
+    lowercase only the first rune, e.g. 'Start Date' -> 'start Date'. Falsy name returned unchanged."""
+    if not name:
+        return name
+    return name[0].lower() + name[1:]
+
+
+def _field_candidates(name: str, *alts: str) -> tuple[str, ...]:
+    """Shared probe order for a field's possible flattened keys: the configured name, its full
+    lower-case form, gh's camelCase flatten, then any caller-supplied aliases verbatim (no de-dup)."""
+    return (name, name.lower(), _camel(name), *alts)
+
+
 def _field(item: dict, name: str, *alts: str):
     """A Projects v2 field value off a `gh project item-list` row. gh flattens field values as top-level
-    keys; the exact casing varies, so try the configured name, its lower-case form, and any aliases."""
-    for key in (name, name.lower(), *alts):
+    keys; the exact casing varies, so try the configured name, its lower-case form, gh's camelCase
+    flatten, and any aliases."""
+    for key in _field_candidates(name, *alts):
         if key in item and item[key] not in (None, ""):
             return item[key]
     return None
+
+
+def _field_key_seen(item: dict, name: str, *alts: str) -> bool:
+    """True if ANY candidate key for this field is present in `item`, regardless of value -- including
+    present-but-empty. Presence-only; never used for value reads. Distinguishes a genuinely-unset field
+    (key present, value empty) from a field gh never exposed under any known key (key truly absent)."""
+    return any(key in item for key in _field_candidates(name, *alts))
 
 
 def parse_items(items: list, status_field: str = "Status", start_field: str = "Start",
