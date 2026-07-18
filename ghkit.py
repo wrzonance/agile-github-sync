@@ -120,8 +120,19 @@ def blocked_by_map(cfg: dict, issue_numbers: list[int]) -> dict[int, list[int]] 
     return result
 
 
+def is_gh_label_safe(name: str) -> bool:
+    """False iff name would be corrupted by gh's --add-label/--remove-label pflag StringSlice flag,
+    which CSV-splits its value: a comma anywhere, or a leading '"' (CSV-parse-significant), makes a
+    single label name arrive at gh as multiple/garbled labels."""
+    return "," not in name and not name.startswith('"')
+
+
 def edit_label(cfg: dict, apply: bool, number: int, label: str, *, add: bool) -> None:
     """Add or remove one label on an issue, through the dry-run gate."""
+    if not is_gh_label_safe(label):
+        raise ValueError(f"edit_label: unsafe label name {label!r} would be CSV-split by gh's "
+                          f"--add-label/--remove-label flag -- caller must pre-filter via "
+                          f"is_gh_label_safe() before calling")
     flag = "--add-label" if add else "--remove-label"
     if apply:
         run(cfg, ["issue", "edit", str(number), flag, label])
