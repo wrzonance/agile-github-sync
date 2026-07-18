@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import ghproject  # noqa: E402
-from ghproject import (_camel, _field, _field_candidates,  # noqa: E402
+from ghproject import (_camel, _field,  # noqa: E402
                        _field_key_seen, parse_items, unmatched_date_kinds)
 from sync import sync_dates  # noqa: E402
 
@@ -48,9 +48,11 @@ def test_field_falls_back_to_lowercase_then_camelcase_in_order():
     assert _field({"start Date": "camel"}, "Start Date") == "camel"
 
 
-def test_field_candidates_includes_alts_with_no_dedup():
-    # alts are appended verbatim, even if they duplicate an earlier candidate.
-    assert _field_candidates("Status", "status") == ("Status", "status", "status", "status")
+def test_field_matches_alt_key_unreachable_via_name_lower_or_camel():
+    # An alt is the only way to reach a key that name/name.lower()/_camel(name) can never produce --
+    # pinned through the public boundary (_field), not the private candidate tuple.
+    item = {"iteration": "v1"}
+    assert _field(item, "Sprint", "iteration") == "v1"
 
 
 # --- _field (superset of the old 2-variant probe) ---------------------------
