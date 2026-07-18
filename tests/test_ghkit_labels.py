@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ghkit import edit_label, is_gh_label_safe  # noqa: E402
+from reconcile import Reconciled  # noqa: E402
 from sync import _filter_gh_safe_labels, sync_metadata  # noqa: E402
 
 
@@ -77,6 +78,17 @@ def test_edit_label_still_works_for_safe_labels(monkeypatch, capsys):
     assert capsys.readouterr().out.startswith("gh    issue 5 add-label bug")
 
 
+def test_edit_label_dry_run_still_works_for_safe_labels(monkeypatch, capsys):
+    """Regression pin: apply=False + a safe label is unchanged by the guard -- prints the DRY line,
+    never shells out."""
+    calls = []
+    monkeypatch.setattr("ghkit.run", lambda *a, **k: calls.append((a, k)))
+    result = edit_label({}, False, 5, "bug", add=False)
+    assert result is None
+    assert calls == []
+    assert capsys.readouterr().out.startswith("DRY   gh issue edit 5 --remove-label 'bug'")
+
+
 # --- _filter_gh_safe_labels: pure subset + one WARN per rejected name -----
 
 def test_filter_gh_safe_labels_keeps_all_safe_names(capsys):
@@ -103,6 +115,50 @@ def test_filter_gh_safe_labels_one_warn_per_rejected_name(capsys):
     assert result == frozenset({"ok"})
     lines = [l for l in capsys.readouterr().out.splitlines() if l.startswith("WARN")]
     assert len(lines) == 2  # exactly one per rejected name, not per retry
+
+
+# --- new_base arithmetic: pure, pinned directly against a hand-built -------
+# --- Reconciled -- no sync_metadata/AgilePlace harness needed --------------
+
+def test_new_base_arithmetic_excludes_skipped_add_keeps_skipped_remove():
+    """Pins sync.py's `new_base = (r.new_base - (r.gh_add - gh_add_safe)) | (r.gh_remove -
+    gh_remove_safe)` formula directly against a hand-built Reconciled: 'a,b' is a reconciled add that
+    got filtered out (never written to GitHub) so it must NOT survive into new_base even though
+    reconcile said so; 'x,y' is a reconciled remove that got filtered out (still on GitHub) so it
+    must be added BACK into new_base even though reconcile dropped it."""
+    r = Reconciled(
+        gh_add=frozenset({"a,b", "ok-add"}),
+        gh_remove=frozenset({"x,y", "ok-remove"}),
+        ap_add=frozenset(),
+        ap_remove=frozenset(),
+        new_base=frozenset({"ok-add", "kept"}),  # reconcile's aspirational base: has ok-add, lacks x,y
+    )
+    gh_add_safe = frozenset({"ok-add"})       # "a,b" filtered out
+    gh_remove_safe = frozenset({"ok-remove"})  # "x,y" filtered out
+
+    new_base = (r.new_base - (r.gh_add - gh_add_safe)) | (r.gh_remove - gh_remove_safe)
+
+    assert "a,b" not in new_base    # skipped add never landed on GitHub -> excluded
+    assert "x,y" in new_base        # skipped remove is still actually on GitHub -> included
+    assert new_base == frozenset({"ok-add", "kept", "x,y"})
+    # r itself is never mutated by computing new_base
+    assert r.new_base == frozenset({"ok-add", "kept"})
+    assert r.gh_add == frozenset({"a,b", "ok-add"})
+    assert r.gh_remove == frozenset({"x,y", "ok-remove"})
+
+
+def test_new_base_arithmetic_noop_when_nothing_filtered():
+    """When gh_add_safe/gh_remove_safe equal the full reconciled sets (nothing unsafe), new_base
+    collapses to r.new_base exactly -- the fix is a no-op for the common case."""
+    r = Reconciled(
+        gh_add=frozenset({"bug"}),
+        gh_remove=frozenset({"stale"}),
+        ap_add=frozenset(),
+        ap_remove=frozenset(),
+        new_base=frozenset({"bug", "kept"}),
+    )
+    new_base = (r.new_base - (r.gh_add - r.gh_add)) | (r.gh_remove - r.gh_remove)
+    assert new_base == r.new_base
 
 
 # --- sync_metadata: unsafe labels never reach edit_label; merge base is ----
