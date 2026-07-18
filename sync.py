@@ -139,16 +139,25 @@ def _stale_milestone_tags(ms_tags: set[str], old_base: str | None, new_ms: str |
     """Subset of ms_tags (the 2nd _card_milestones return) safe to remove via op_tag(add=False) this
     pass. Postcondition: result <= ms_tags always -- never proposes removing a tag that was never on
     the card. Included:
-      - every empty-suffix tag ("milestone:" alone) -- always stale, carries no value
-      - f"{MS_PREFIX}{old_base}" iff ALL THREE hold: old_base is not None, old_base != new_ms (the
-        base has been confirmed superseded THIS pass), AND that literal tag is a member of ms_tags
-        (it may legitimately not be, e.g. the base was never re-tagged onto this card)
-
-    Deliberately excludes any other non-empty-suffix tag (one matching neither the old base nor the
-    new value): it cannot be told apart from a pending, ambiguous human edit by value alone, so it is
-    preserved rather than destroyed -- a stray leftover self-cleans on a later pass instead of risking
-    the deletion of a genuine, not-yet-reconciled upgrade (issue #7).
+      - new_ms is None (reconcile resolved the milestone to UNSET this pass -- GitHub cleared it, or
+        it was never set): EVERY milestone: tag is stale. With no current milestone there is nothing
+        legitimate for any tag to represent, and leaving one behind lets it resurrect the cleared
+        value on a later pass -- once the base is persisted as None the leftover looks like a fresh,
+        unanchored AgilePlace value and gets pushed straight back onto GitHub, silently undoing the
+        user's deletion (the cross-run resurrection Codex flagged). A tag cannot be a genuine pending
+        upgrade here: if it were, reconcile_value would have resolved new_ms TO that value, not None.
+      - otherwise (new_ms is a real value), the conservative set:
+          - every empty-suffix tag ("milestone:" alone) -- always stale, carries no value
+          - f"{MS_PREFIX}{old_base}" iff ALL THREE hold: old_base is not None, old_base != new_ms (the
+            base has been confirmed superseded THIS pass), AND that literal tag is a member of ms_tags
+            (it may legitimately not be, e.g. the base was never re-tagged onto this card)
+        and deliberately EXCLUDES any other non-empty-suffix tag (one matching neither the old base
+        nor the new value): while a real milestone still stands it cannot be told apart from a pending,
+        ambiguous human edit by value alone, so it is preserved rather than destroyed -- risking the
+        deletion of a genuine, not-yet-reconciled upgrade (issue #7).
     """
+    if new_ms is None:
+        return frozenset(ms_tags)
     stale = {t for t in ms_tags if t == MS_PREFIX}
     old_tag = f"{MS_PREFIX}{old_base}" if old_base is not None else None
     if old_tag is not None and old_base != new_ms and old_tag in ms_tags:

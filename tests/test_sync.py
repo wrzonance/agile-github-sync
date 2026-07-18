@@ -229,6 +229,19 @@ def test_stale_milestone_tags_preserves_unanchored_other_tag_during_actual_super
     assert stale == frozenset({old_tag})
 
 
+def test_stale_milestone_tags_removes_every_tag_when_milestone_unset():
+    # new_ms is None -> reconcile resolved the milestone to UNSET this pass (GitHub cleared it, or it
+    # was never set). EVERY milestone: tag is stale then, including an otherwise-"ambiguous" leftover
+    # that the standing-milestone branch would preserve: with no current milestone there is nothing
+    # legitimate for any tag to represent, and preserving one lets it resurrect the cleared value on a
+    # later pass (Codex-flagged cross-run deletion resurrection). The preservation tradeoff applies
+    # ONLY while a real milestone still stands.
+    ms_tags = {f"{MS_PREFIX}0.2.0", f"{MS_PREFIX}0.1.0", MS_PREFIX}
+    assert _stale_milestone_tags(ms_tags, "0.2.0", None) == frozenset(ms_tags)
+    # subset invariant still holds (equality is a valid subset), and the None-old_base clear also wipes
+    assert _stale_milestone_tags({f"{MS_PREFIX}0.1.0"}, None, None) == frozenset({f"{MS_PREFIX}0.1.0"})
+
+
 # --- lane matching --------------------------------------------------------
 
 def test_lane_matches_stage_disambiguates_started():

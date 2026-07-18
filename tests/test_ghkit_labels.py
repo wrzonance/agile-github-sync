@@ -357,6 +357,40 @@ def test_sync_metadata_calls_set_milestone_on_fully_unanchored_upgrade(monkeypat
     assert issues_state[issue["url"]]["milestone"] == "9.9"
 
 
+def test_sync_metadata_cleared_milestone_not_resurrected_next_pass(monkeypatch, capsys):
+    """Cross-run deletion resurrection (Codex-flagged, issue #7 class): base=gh=ap='0.2.0' with a stale
+    'milestone:0.1.0' leftover also on the card. The user then CLEARS the GitHub milestone. Pass 1 must
+    honor the clear (new_ms=None, base persists None) AND remove every milestone: tag from the card --
+    not just the old-base tag -- so pass 2 finds nothing to push back. Without wiping the leftover, pass
+    2 sees '0.1.0' as the sole unanchored AgilePlace value and calls set_milestone('0.1.0'), silently
+    undoing the deletion. This pins that pass 2 makes NO set_milestone call."""
+    issue = _issue(milestone=None)  # user cleared it on GitHub
+    card_tags = ["milestone:0.2.0", "milestone:0.1.0"]
+    card = _card(tags=list(card_tags))
+    issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
+
+    ms_calls = []
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
+
+    # PASS 1 — capture queued tag ops so we can apply the AgilePlace-side removals to the card.
+    queued = []
+    sync_metadata({}, True, issue, card, frozenset(), issues_state,
+                  lambda c, ops, note: queued.append(ops))
+    assert ms_calls == []  # gh already cleared -> no rewrite this pass either
+    assert issues_state[issue["url"]]["milestone"] is None  # clear persisted as the new base
+    removed = {op["value"] for ops in queued for op in ops
+               if op.get("op") == "remove" and op.get("path") == "/tags"}
+    # BOTH milestone tags must be queued for removal -- the leftover is not spared once new_ms is None
+    assert removed == set(card_tags)
+    card_after = {"id": card["id"], "tags": [t for t in card_tags if t not in removed]}
+
+    # PASS 2 — nothing changed on GitHub (still cleared); the cleaned card must not resurrect anything.
+    sync_metadata({}, True, issue, card_after, frozenset(), issues_state, lambda c, ops, note: None)
+    assert ms_calls == []  # <-- resurrection would show up here as set_milestone('0.1.0')
+    assert issues_state[issue["url"]]["milestone"] is None
+
+
 def test_sync_metadata_dry_run_never_mutates_state_with_milestone_tags(monkeypatch, capsys):
     """Regression pin for the milestone-block rewrite: apply=False must still never mutate
     issues_state, even when the card carries multiple milestone: tags that now flow through
