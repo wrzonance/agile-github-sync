@@ -193,8 +193,10 @@ def op_planned_date(field: str, date: str | None) -> dict:
 
 
 def ops_blocked(blocked: bool, reason: str | None) -> list[dict]:
-    return [{"op": "replace", "path": "/blockedStatus/isBlocked", "value": bool(blocked)},
-            {"op": "replace", "path": "/blockedStatus/reason", "value": reason or ""}]
+    # Writable paths are flat (/isBlocked, /blockReason) -- /blockedStatus/* is the nested READ shape
+    # only (see card_is_blocked/card_block_reason above). See issue #2.
+    return [{"op": "replace", "path": "/isBlocked", "value": bool(blocked)},
+            {"op": "add", "path": "/blockReason", "value": reason or ""}]
 
 
 def patch_card(cfg: dict, apply: bool, card: dict, ops: list[dict], note: str = "") -> dict:
