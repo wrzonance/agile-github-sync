@@ -12,7 +12,7 @@ from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
 from stages import (blocked_reason, epic_key_for_task, issue_stage,  # noqa: E402
                     lane_matches_stage, normalize_status, title_key)
-from sync import _card_milestones, issue_card_title, resolve_issue_stage  # noqa: E402
+from sync import MS_PREFIX, _card_milestones, _stale_milestone_tags, issue_card_title, resolve_issue_stage  # noqa: E402
 
 
 def _board_lanes():
@@ -139,6 +139,54 @@ def test_card_milestones_empty_suffix_never_selected():
     candidate, _ = _card_milestones(card, None, None)
     assert candidate != ""
     assert candidate == "0.1.0"
+
+
+# --- _stale_milestone_tags: staleness is never fabricated ------------------
+
+def test_stale_milestone_tags_never_exceeds_ms_tags():
+    # spike-found gap: old_base != new_ms alone must NOT be enough to propose a removal --
+    # the old-base tag must actually be a member of ms_tags. Here the card carries only an
+    # unanchored "9.9" tag; base="0.2.0" was never re-tagged onto this card at all.
+    ms_tags = {f"{MS_PREFIX}9.9"}
+    stale = _stale_milestone_tags(ms_tags, "0.2.0", "0.2.0")
+    assert stale <= ms_tags
+    assert stale == frozenset()
+
+
+def test_stale_milestone_tags_subset_invariant_holds_generally():
+    # broader fuzz-by-hand over several old_base/new_ms combinations: never propose removing
+    # something that was never on the card.
+    ms_tags = {f"{MS_PREFIX}0.1.0", f"{MS_PREFIX}"}
+    for old_base, new_ms in [("0.2.0", "0.2.0"), ("0.1.0", "0.1.0"), (None, None), ("9.9", "0.1.0")]:
+        assert _stale_milestone_tags(ms_tags, old_base, new_ms) <= ms_tags
+
+
+def test_stale_milestone_tags_always_includes_every_empty_suffix_tag():
+    ms_tags = {f"{MS_PREFIX}"}
+    assert _stale_milestone_tags(ms_tags, None, None) == frozenset({f"{MS_PREFIX}"})
+    assert _stale_milestone_tags(ms_tags, "0.2.0", "0.2.0") == frozenset({f"{MS_PREFIX}"})
+
+
+def test_stale_milestone_tags_includes_old_base_only_when_superseded_and_present():
+    old_tag = f"{MS_PREFIX}0.2.0"
+    # superseded AND present -> stale
+    assert _stale_milestone_tags({old_tag}, "0.2.0", "9.9") == frozenset({old_tag})
+    # superseded but NOT present on the card -> never fabricated (the spike-found gap)
+    assert _stale_milestone_tags({f"{MS_PREFIX}9.9"}, "0.2.0", "9.9") == frozenset()
+    # present but NOT superseded (old_base == new_ms) -> not stale
+    assert _stale_milestone_tags({old_tag}, "0.2.0", "0.2.0") == frozenset()
+    # old_base is None -> never stale via this path
+    assert _stale_milestone_tags({old_tag}, None, "9.9") == frozenset()
+
+
+def test_stale_milestone_tags_preserves_unanchored_other_tags():
+    # issue #7's leftover-vs-upgrade ambiguity: a tag matching neither the old base nor the
+    # new value is preserved, never destroyed, in the same pass it first appears.
+    other = f"{MS_PREFIX}0.1.0"
+    ms_tags = {f"{MS_PREFIX}0.2.0", other}
+    stale = _stale_milestone_tags(ms_tags, "0.2.0", "0.2.0")  # nothing superseded this pass
+    assert other not in stale
+    assert stale == frozenset()
 
 
 # --- lane matching --------------------------------------------------------

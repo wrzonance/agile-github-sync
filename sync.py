@@ -135,6 +135,27 @@ def _card_milestones(card: dict, base: str | None, gh: str | None) -> tuple[str 
     return sorted(suffixes)[0], tags
 
 
+def _stale_milestone_tags(ms_tags: set[str], old_base: str | None, new_ms: str | None) -> frozenset[str]:
+    """Subset of ms_tags (the 2nd _card_milestones return) safe to remove via op_tag(add=False) this
+    pass. Postcondition: result <= ms_tags always -- never proposes removing a tag that was never on
+    the card. Included:
+      - every empty-suffix tag ("milestone:" alone) -- always stale, carries no value
+      - f"{MS_PREFIX}{old_base}" iff ALL THREE hold: old_base is not None, old_base != new_ms (the
+        base has been confirmed superseded THIS pass), AND that literal tag is a member of ms_tags
+        (it may legitimately not be, e.g. the base was never re-tagged onto this card)
+
+    Deliberately excludes any other non-empty-suffix tag (one matching neither the old base nor the
+    new value): it cannot be told apart from a pending, ambiguous human edit by value alone, so it is
+    preserved rather than destroyed -- a stray leftover self-cleans on a later pass instead of risking
+    the deletion of a genuine, not-yet-reconciled upgrade (issue #7).
+    """
+    stale = {t for t in ms_tags if t == MS_PREFIX}
+    old_tag = f"{MS_PREFIX}{old_base}" if old_base is not None else None
+    if old_tag is not None and old_base != new_ms and old_tag in ms_tags:
+        stale.add(old_tag)
+    return frozenset(stale)
+
+
 def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
     url = issue["url"]
     prev = issues_state[url]
