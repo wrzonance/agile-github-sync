@@ -14,6 +14,8 @@ def test_ops_blocked_block_with_reason():
     assert len(ops) == 2
     assert ops[0] == {"op": "replace", "path": "/isBlocked", "value": True}
     assert ops[1] == {"op": "add", "path": "/blockReason", "value": "waiting on design review"}
+    # dict `==` doesn't distinguish bool from int (1 == True), so pin the type explicitly.
+    assert ops[0]["value"] is True
 
 
 def test_ops_blocked_unblock_clears_both():
@@ -21,6 +23,8 @@ def test_ops_blocked_unblock_clears_both():
     assert len(ops) == 2
     assert ops[0] == {"op": "replace", "path": "/isBlocked", "value": False}
     assert ops[1] == {"op": "add", "path": "/blockReason", "value": ""}
+    # dict `==` doesn't distinguish bool from int (0 == False), so pin the type explicitly.
+    assert ops[0]["value"] is False
 
 
 def test_ops_blocked_true_with_no_reason_coerces_empty_string():
