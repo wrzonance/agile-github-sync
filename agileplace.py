@@ -153,9 +153,15 @@ def get_card(cfg: dict, card_id: str) -> dict:
     """Fetch a single card fresh (GET /io/card/{id}). VALIDATE LIVE: docs don't confirm whether the
     single-card GET wraps the payload as {"card": {...}} (like list_cards' {"cards": [...]}) or
     returns the card fields flat -- defensively unwrap either shape so callers always get a flat
-    card dict. See API-VALIDATION.md."""
+    card dict. See API-VALIDATION.md.
+    A 200 response can still carry {"card": null} (e.g. a race with a delete) -- that must fail
+    loud here rather than handing callers a bare None that crashes downstream with an opaque
+    AttributeError (see issue #8 review finding)."""
     data = api(cfg, "GET", f"card/{card_id}")
-    return data.get("card", data)
+    card = data.get("card", data)
+    if card is None:
+        raise SystemExit(f"AgilePlace GET card/{card_id} returned no card data (got {{'card': null}})")
+    return card
 
 
 def card_external_urls(card: dict) -> list[str]:

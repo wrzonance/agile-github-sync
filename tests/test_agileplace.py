@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agileplace import (  # noqa: E402
@@ -106,6 +108,15 @@ def test_get_card_returns_already_flat_response_as_is():
     with patch("agileplace.api", return_value=flat):
         card = get_card({"token": "t", "host": "h"}, "456")
     assert card == flat
+
+
+def test_get_card_fails_loud_when_card_is_null():
+    """A live 200 response of {"card": null} must not silently become a bare None return -- that
+    would crash callers like _card_with_version with an opaque AttributeError. get_card must
+    instead fail loud with a message naming the card id (see issue #8 review finding)."""
+    with patch("agileplace.api", return_value={"card": None}):
+        with pytest.raises(SystemExit, match="789"):
+            get_card({"token": "t", "host": "h"}, "789")
 
 
 # --- _card_with_version / patch_card: no unversioned PATCH (issue #8) ------
