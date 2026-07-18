@@ -153,6 +153,31 @@ def test_card_with_version_returns_none_when_refetch_also_has_no_version(capsys)
     assert "42" in warn_lines[0]
 
 
+def test_card_with_version_treats_empty_string_version_as_missing():
+    """An empty-string `version` is not a usable resource version -- it must be treated the same as
+    a missing one and trigger the refetch, never be handed straight to patch_card's headers."""
+    card = {"id": "1", "version": ""}
+    refetched = {"card": {"id": "1", "version": 9}}
+    with patch("agileplace.api", return_value=refetched) as api_mock:
+        result = _card_with_version(CFG, True, card)
+    api_mock.assert_called_once_with(CFG, "GET", "card/1")
+    assert result == {"id": "1", "version": 9}
+
+
+def test_card_with_version_returns_none_when_version_is_empty_string_and_refetch_also_empty(capsys):
+    """apply=True, version="" (falsy-but-not-None), refetch also comes back version-less/empty ->
+    None sentinel + one WARN, same as the missing-version case."""
+    card = {"id": "1", "version": ""}
+    refetched = {"card": {"id": "1", "version": ""}}
+    with patch("agileplace.api", return_value=refetched):
+        result = _card_with_version(CFG, True, card)
+    assert result is None
+    out = capsys.readouterr().out
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN")]
+    assert len(warn_lines) == 1
+    assert "1" in warn_lines[0]
+
+
 def test_card_with_version_never_mutates_input_card():
     """The input dict must be unchanged after the call, whatever the outcome (same ref/new dict/None)."""
     versioned_card = {"id": "1", "version": 7}
@@ -210,6 +235,25 @@ def test_patch_card_sends_zero_patches_and_one_warn_when_double_miss(capsys):
     assert "42" in warn_lines[0]
 
 
+def test_patch_card_refetches_and_never_sends_empty_string_version_header():
+    """A card arriving with version="" must never reach patch_card's PATCH with that empty string
+    in the x-lk-resource-version header -- it must refetch first, same as a truly missing version."""
+    card = {"id": "42", "version": ""}
+    ops = [{"op": "replace", "path": "/laneId", "value": "L"}]
+
+    def fake_api(cfg, method, path, body=None, params=None, headers=None, _attempt=0):
+        if method == "GET":
+            return {"card": {"id": "42", "version": 11}}
+        assert method == "PATCH"
+        assert headers == {"x-lk-resource-version": "11"}
+        return {"ok": True}
+
+    with patch("agileplace.api", side_effect=fake_api) as api_mock:
+        result = patch_card(CFG, True, card, ops)
+    assert result == {"ok": True}
+    assert api_mock.call_count == 2  # one refetch, one PATCH -- never a PATCH with version=""
+
+
 def test_patch_card_sends_one_patch_with_refetched_version_on_successful_refetch():
     """apply=True, version-less card whose refetch succeeds -> exactly one PATCH using the refetched version."""
     card = {"id": "42"}
@@ -235,6 +279,7 @@ def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
     scenarios = [
         (True, {"id": "1", "version": 7}, {}),                          # version already present
         (True, {"id": "2"}, {"card": {"id": "2", "version": 3}}),       # version-less, refetch succeeds
+        (True, {"id": "5", "version": ""}, {"card": {"id": "5", "version": 13}}),  # empty-string version
     ]
     for apply, card, refetch_response in scenarios:
         def fake_api(cfg, method, path, body=None, params=None, headers=None, _attempt=0, _refetch=refetch_response):
@@ -249,6 +294,7 @@ def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
     no_patch_scenarios = [
         (False, {"id": "3"}, None),
         (True, {"id": "4"}, {"card": {"id": "4"}}),
+        (True, {"id": "6", "version": ""}, {"card": {"id": "6", "version": ""}}),  # empty-string double-miss
     ]
     for apply, card, refetch_response in no_patch_scenarios:
         def fake_api_no_patch(cfg, method, path, body=None, params=None, headers=None, _attempt=0):

@@ -229,17 +229,29 @@ def patch_card(cfg: dict, apply: bool, card: dict, ops: list[dict], note: str = 
                   headers=_version_headers(versioned), note=note or f"patch card {versioned['id']} ({len(ops)} ops)")
 
 
+def _has_usable_version(version) -> bool:
+    """A resource version is usable when it is present AND non-empty. `None` is the ordinary
+    "missing" case; a present-but-empty/whitespace string counts as missing too (some card payloads
+    can carry version="" ), since either would otherwise produce a blank x-lk-resource-version header.
+    An int/str 0 is a legitimate version number and must stay usable."""
+    if version is None:
+        return False
+    if isinstance(version, str) and version.strip() == "":
+        return False
+    return True
+
+
 def _card_with_version(cfg: dict, apply: bool, card: dict) -> dict | None:
-    """Guarantee `card` carries a resource version before patch_card is allowed to PATCH it.
-    Returns `card` unchanged (zero network calls) when a version is already present or apply is
-    False -- dry runs never trigger a refetch. Otherwise refetches the card fresh: on success returns
-    a NEW dict (never mutates `card`) with the refetched version filled in; if the refetch also has
-    no version, returns None and prints one WARN naming the card so the caller can refuse to send an
-    unversioned PATCH instead of risking a silent stale overwrite."""
-    if card.get("version") is not None or not apply:
+    """Guarantee `card` carries a usable resource version before patch_card is allowed to PATCH it.
+    Returns `card` unchanged (zero network calls) when a usable version is already present or apply
+    is False -- dry runs never trigger a refetch. Otherwise refetches the card fresh: on success
+    returns a NEW dict (never mutates `card`) with the refetched version filled in; if the refetch
+    also has no usable version, returns None and prints one WARN naming the card so the caller can
+    refuse to send an unversioned PATCH instead of risking a silent stale overwrite."""
+    if _has_usable_version(card.get("version")) or not apply:
         return card
     fresh = get_card(cfg, card["id"])
-    if fresh.get("version") is None:
+    if not _has_usable_version(fresh.get("version")):
         print(f"WARN  card {card['id']} has no resource version after refetch -- "
               f"refusing unversioned PATCH, skipping ops")
         return None
@@ -248,7 +260,7 @@ def _card_with_version(cfg: dict, apply: bool, card: dict) -> dict | None:
 
 def _version_headers(card: dict) -> dict:
     v = card.get("version")
-    return {"x-lk-resource-version": str(v)} if v is not None else {}
+    return {"x-lk-resource-version": str(v)} if _has_usable_version(v) else {}
 
 
 def create_card(cfg: dict, apply: bool, title: str, custom_id: str, external_url: str, lane_id: str | None):
