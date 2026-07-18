@@ -15,8 +15,9 @@ past roughly 1,000 records.
   `childCards` include. Confirm the endpoint, the body, and that `list_cards` actually returns
   `childCards`. If the read is unreliable, the add/remove reconciliation is unsafe and should be
   gated on a trustworthy read of existing children.
-- Blocked state. The code reads and writes `blockedStatus.{isBlocked,reason}`. Confirm the field
-  path and that a PATCH round-trips (block, unblock, change the reason).
+- Blocked state. The code reads `blockedStatus.{isBlocked,reason}` and writes flat `/isBlocked`
+  (replace) + `/blockReason` (add). Confirm the write field paths and that a PATCH round-trips
+  (block, unblock, change the reason).
 - Tag removal and date clearing. The code sends `{op:remove, path:/tags, value}` and
   `{op:replace, path:/plannedStart, value:null}`. Confirm that value-based tag removal and null as
   "clear this date" are accepted.
