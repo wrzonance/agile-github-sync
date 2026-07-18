@@ -91,10 +91,10 @@ def _label_set(labels, ignore: frozenset) -> set[str]:
 
 def _filter_gh_safe_labels(names: frozenset[str], *, key: str, action: str) -> frozenset[str]:
     """Subset of names safe to pass to gh's --add-label/--remove-label; prints one WARN per rejected
-    name (comma or leading quote -- gh CSV-splits the flag value) naming the offender and side."""
+    name (comma, or a '"' anywhere -- gh CSV-splits the flag value) naming the offender and side."""
     safe = frozenset(n for n in names if ghkit.is_gh_label_safe(n))
     for bad in sorted(names - safe):
-        print(f"WARN  [{key}] label {bad!r} contains a comma or leading quote -- gh CSV-splits "
+        print(f"WARN  [{key}] label {bad!r} contains a comma or a double quote -- gh CSV-splits "
               f"--add-label/--remove-label values; skipping {action} on GitHub")
     return safe
 

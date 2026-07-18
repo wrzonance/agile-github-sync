@@ -1,9 +1,11 @@
 """Unit tests for ghkit's label-name safety guard, and for sync.py's reconcile-boundary filter that
 keeps CSV-unsafe label names from ever reaching ghkit.edit_label.
 
-gh's --add-label/--remove-label flag is a pflag StringSlice: it CSV-splits its value, so a label
-name containing a comma or starting with a leading '"' would arrive at gh as multiple or garbled
-labels rather than the one name the caller intended. These tests pin edit_label's guard clause and
+gh's --add-label/--remove-label flag is a pflag StringSlice: it CSV-splits its value using Go's
+encoding/csv Reader in its default (LazyQuotes=false) mode, so a label name containing a comma
+anywhere, or a '"' anywhere (not just a leading one -- a bare quote inside an unquoted CSV field is
+itself a parse error in that mode), would arrive at gh as multiple/garbled labels or fail to parse
+rather than the one name the caller intended. These tests pin edit_label's guard clause and
 is_gh_label_safe's pure/total contract at the module boundary -- no network, no gh CLI -- plus
 sync._filter_gh_safe_labels and sync_metadata's persisted-merge-base arithmetic that must never
 record a label as GitHub-side-applied when it was not actually written. Run: pytest -q
@@ -34,9 +36,10 @@ def test_unsafe_label_leading_quote():
     assert is_gh_label_safe('"quoted') is False
 
 
-def test_safe_label_with_internal_quote():
-    # only a *leading* quote is CSV-parse-significant to the flag value
-    assert is_gh_label_safe('quo"ted') is True
+def test_unsafe_label_with_internal_quote():
+    # Go's encoding/csv Reader (LazyQuotes=false) rejects a bare '"' anywhere inside an unquoted
+    # field, not just at position 0 -- a non-leading quote is just as CSV-parse-significant.
+    assert is_gh_label_safe('quo"ted') is False
 
 
 def test_safe_empty_string():
@@ -106,7 +109,10 @@ def test_filter_gh_safe_labels_drops_unsafe_and_warns(capsys):
     assert "WARN" in out
     assert "42" in out
     assert "a,b" in out or "'a,b'" in out
-    assert "add" in out
+    # NOTE: every WARN line mentions both "--add-label" and "--remove-label" (the flag names quoted
+    # verbatim in the message), so a bare `"add" in out` check would pass regardless of which action
+    # was actually threaded through. Anchor on the full action phrase instead.
+    assert "skipping add on GitHub" in out
 
 
 def test_filter_gh_safe_labels_one_warn_per_rejected_name(capsys):
