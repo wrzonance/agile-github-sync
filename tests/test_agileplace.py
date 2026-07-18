@@ -119,6 +119,14 @@ def test_get_card_fails_loud_when_card_is_null():
             get_card({"token": "t", "host": "h"}, "789")
 
 
+def test_get_card_fails_loud_when_response_is_top_level_null():
+    """A bare top-level `null` body decodes to None from api() -- get_card must fail loud rather
+    than call .get() on None and raise an opaque AttributeError (see issue #8 review finding)."""
+    with patch("agileplace.api", return_value=None):
+        with pytest.raises(SystemExit, match="790"):
+            get_card({"token": "t", "host": "h"}, "790")
+
+
 # --- _card_with_version / patch_card: no unversioned PATCH (issue #8) ------
 
 def test_card_with_version_returns_card_unchanged_when_version_present():
@@ -285,18 +293,25 @@ def test_patch_card_sends_one_patch_with_refetched_version_on_successful_refetch
 
 def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
     """Cross-cutting invariant: whenever patch_card actually issues a PATCH, its
-    x-lk-resource-version header is present and non-empty -- across every apply/version combo."""
+    x-lk-resource-version header is present and non-whitespace -- across every apply/version combo.
+    Version 0 is a legitimate value and must still produce the header "0"."""
     ops = [{"op": "replace", "path": "/laneId", "value": "L"}]
+    # (apply, card, refetch_response, expected_header)
     scenarios = [
-        (True, {"id": "1", "version": 7}, {}),                          # version already present
-        (True, {"id": "2"}, {"card": {"id": "2", "version": 3}}),       # version-less, refetch succeeds
-        (True, {"id": "5", "version": ""}, {"card": {"id": "5", "version": 13}}),  # empty-string version
+        (True, {"id": "1", "version": 7}, {}, "7"),                                       # version already present
+        (True, {"id": "2"}, {"card": {"id": "2", "version": 3}}, "3"),                    # version-less, refetch succeeds
+        (True, {"id": "5", "version": ""}, {"card": {"id": "5", "version": 13}}, "13"),   # empty-string, refetch succeeds
+        (True, {"id": "7", "version": 0}, {}, "0"),                                       # version 0 is legitimate -> "0"
+        (True, {"id": "8", "version": "   "}, {"card": {"id": "8", "version": 9}}, "9"),  # whitespace, refetch succeeds
     ]
-    for apply, card, refetch_response in scenarios:
-        def fake_api(cfg, method, path, body=None, params=None, headers=None, _attempt=0, _refetch=refetch_response):
+    for apply, card, refetch_response, expected in scenarios:
+        def fake_api(cfg, method, path, body=None, params=None, headers=None, _attempt=0,
+                     _refetch=refetch_response, _expected=expected):
             if method == "GET":
                 return _refetch
-            assert headers.get("x-lk-resource-version")  # non-empty, present
+            header = headers.get("x-lk-resource-version")
+            assert header is not None and header.strip()  # present and non-whitespace
+            assert header == _expected
             return {}
         with patch("agileplace.api", side_effect=fake_api):
             patch_card(CFG, apply, card, ops)
@@ -305,12 +320,14 @@ def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
     no_patch_scenarios = [
         (False, {"id": "3"}, None),
         (True, {"id": "4"}, {"card": {"id": "4"}}),
-        (True, {"id": "6", "version": ""}, {"card": {"id": "6", "version": ""}}),  # empty-string double-miss
+        (True, {"id": "6", "version": ""}, {"card": {"id": "6", "version": ""}}),      # empty-string double-miss
+        (True, {"id": "9", "version": "  "}, {"card": {"id": "9", "version": "  "}}),  # whitespace double-miss
     ]
     for apply, card, refetch_response in no_patch_scenarios:
-        def fake_api_no_patch(cfg, method, path, body=None, params=None, headers=None, _attempt=0):
+        def fake_api_no_patch(cfg, method, path, body=None, params=None, headers=None, _attempt=0,
+                              _refetch=refetch_response):
             assert method != "PATCH"
-            return refetch_response or {}
+            return _refetch or {}
         with patch("agileplace.api", side_effect=fake_api_no_patch):
             patch_card(CFG, apply, card, ops)
 

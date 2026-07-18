@@ -154,10 +154,12 @@ def get_card(cfg: dict, card_id: str) -> dict:
     single-card GET wraps the payload as {"card": {...}} (like list_cards' {"cards": [...]}) or
     returns the card fields flat -- defensively unwrap either shape so callers always get a flat
     card dict. See API-VALIDATION.md.
-    A 200 response can still carry {"card": null} (e.g. a race with a delete) -- that must fail
-    loud here rather than handing callers a bare None that crashes downstream with an opaque
-    AttributeError (see issue #8 review finding)."""
+    A 200 response can still carry {"card": null} (e.g. a race with a delete), or even a bare
+    top-level null -- both must fail loud here rather than handing callers a bare None that
+    crashes downstream with an opaque AttributeError (see issue #8 review finding)."""
     data = api(cfg, "GET", f"card/{card_id}")
+    if data is None:
+        raise SystemExit(f"AgilePlace GET card/{card_id} returned no card data (got null)")
     card = data.get("card", data)
     if card is None:
         raise SystemExit(f"AgilePlace GET card/{card_id} returned no card data (got {{'card': null}})")
