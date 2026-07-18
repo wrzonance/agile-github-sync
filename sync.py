@@ -186,9 +186,10 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
     if new_ms != gh_ms:
         ghkit.set_milestone(cfg, apply, issue["number"], new_ms)
     desired_ms_tag = f"{MS_PREFIX}{new_ms}" if new_ms else None
-    if {desired_ms_tag} - {None} != ms_tags:  # normalize: exactly the one desired tag, remove any others
-        for stale in sorted(ms_tags - ({desired_ms_tag} - {None})):
-            tag_ops.append(agileplace.op_tag(stale, add=False))
+    stale = _stale_milestone_tags(ms_tags, prev.get("milestone"), new_ms) - ({desired_ms_tag} - {None})
+    if stale or (desired_ms_tag and desired_ms_tag not in ms_tags):
+        for tag in sorted(stale):
+            tag_ops.append(agileplace.op_tag(tag, add=False))
         if desired_ms_tag and desired_ms_tag not in ms_tags:
             tag_ops.append(agileplace.op_tag(desired_ms_tag, add=True))
 
