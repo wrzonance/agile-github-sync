@@ -308,6 +308,55 @@ def test_sync_metadata_no_gh_rewrite_on_verified_repro_stale_leftover(monkeypatc
     assert issues_state[issue["url"]]["milestone"] == "0.2.0"
 
 
+def test_sync_metadata_no_gh_rewrite_on_coexisting_ambiguous_upgrade_tag(monkeypatch, capsys):
+    """Coexisting-ambiguous worked example (issue #7): base=gh=ap='0.2.0', but the card ALSO carries an
+    unrelated 'milestone:9.9' tag that matches neither anchor. Same shape as the verified-repro case
+    (old_base == new_ms -> nothing superseded this pass) but with the 'other' tag looking like a
+    genuine future upgrade rather than an old leftover -- the point being _stale_milestone_tags cannot
+    (and must not) tell the two apart by value alone, so both must be preserved identically: no
+    GitHub rewrite, and '9.9' is never queued for removal."""
+    issue = _issue(milestone="0.2.0")
+    card = _card(tags=["milestone:0.2.0", "milestone:9.9"])
+    issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
+
+    ms_calls = []
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
+
+    queued = []
+    sync_metadata({}, True, issue, card, frozenset(), issues_state,
+                  lambda c, ops, note: queued.append((c, ops, note)))
+
+    assert ms_calls == []  # gh_ms already correct -> no GitHub rewrite
+    milestone_removes = [op["value"] for entry in queued for op in entry[1]
+                          if op.get("op") == "remove" and op.get("path") == "/tags"]
+    assert "milestone:9.9" not in milestone_removes  # ambiguous 'other' tag preserved, not destroyed
+    assert issues_state[issue["url"]]["milestone"] == "0.2.0"
+
+
+def test_sync_metadata_calls_set_milestone_on_fully_unanchored_upgrade(monkeypatch, capsys):
+    """Fully-unanchored-upgrade worked example (issue #7): base=gh='0.2.0', but the card's ONLY
+    milestone: tag is 'milestone:9.9' -- neither anchor is present on the card at all. There is
+    nothing ambiguous to preserve here: '9.9' is the sole candidate, _card_milestones selects it via
+    the fully-unanchored tie-break, reconcile_value should carry it through as the new value, and
+    since it differs from gh_ms ('0.2.0') ghkit.set_milestone MUST be called with '9.9' -- this is the
+    genuine-upgrade side of the ambiguity that the never-destroy design must still let through."""
+    issue = _issue(milestone="0.2.0")
+    card = _card(tags=["milestone:9.9"])
+    issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
+
+    ms_calls = []
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
+
+    sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
+
+    assert len(ms_calls) == 1
+    (args, kwargs) = ms_calls[0]
+    assert args[3] == "9.9"  # set_milestone(cfg, apply, number, title) -> title is the 4th arg
+    assert issues_state[issue["url"]]["milestone"] == "9.9"
+
+
 def test_sync_metadata_dry_run_never_mutates_state_with_milestone_tags(monkeypatch, capsys):
     """Regression pin for the milestone-block rewrite: apply=False must still never mutate
     issues_state, even when the card carries multiple milestone: tags that now flow through
