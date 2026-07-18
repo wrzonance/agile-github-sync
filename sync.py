@@ -134,28 +134,39 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
         prev.update({"labels": sorted(r.new_base), "milestone": new_ms})
 
 
-def sync_dates(cfg, apply, issue, card, pitem, field_meta, issues_state, queue) -> None:
-    """Bidirectional planned dates (AgilePlace-wins). Only a date whose Project field id is known is
-    synced -- otherwise it is skipped entirely (never advanced), so a missing field can't be read as a
-    deletion next run."""
+def sync_dates(cfg, apply, issue, card, pitem, field_meta, issues_state, queue,
+               unmatched_kinds: frozenset[str] = frozenset()) -> None:
+    """Bidirectional planned dates (AgilePlace-wins). Only a date whose Project field id is known AND
+    not flagged as unmatched (see ghproject.unmatched_date_kinds) is synced -- otherwise it is skipped
+    entirely (never advanced), so a missing/mismatched field can't be read as a deletion next run.
+
+    Merge-base gating: the GH-side merge base (prev[kind]) only advances when the GitHub value is
+    already correct (new == gh_date, nothing to write) or the write is confirmed to have happened
+    (ghproject.set_project_date returned True). A silently-skipped write (e.g. item_id/field_id
+    missing) must never advance the base -- doing so would mask the mismatch forever, since the next
+    run would compare the base against a GitHub value it never actually reached. The AgilePlace-side
+    queue write is unaffected by this gating -- it always fires when the AgilePlace value needs to
+    change."""
     if not pitem:
         return
     prev = issues_state[issue["url"]]
     key = title_key(issue["title"]) or str(issue["number"])
+    item_id = pitem.get("item_id")
     for kind, field_id, ap_field in (("start", field_meta.get("start_field_id"), "plannedStart"),
                                      ("target", field_meta.get("target_field_id"), "plannedFinish")):
-        if not field_id:
-            continue  # field not resolved -> do not sync or advance this date
+        if not field_id or kind in unmatched_kinds:
+            continue  # field not resolved, or resolved-but-unmatched -> do not sync or advance this date
         gh_date = pitem.get(kind)
         ap_date = card.get(ap_field)
         new = reconcile_value(prev.get(kind), gh_date, ap_date, prefer="ap")
+        gh_write_ok = True
         if new != gh_date:
-            ghproject.set_project_date(cfg, apply, field_meta["project_id"], pitem["item_id"], field_id, new)
+            gh_write_ok = ghproject.set_project_date(cfg, apply, field_meta["project_id"], item_id, field_id, new)
         if new != ap_date:
             queue(card, [agileplace.op_planned_date(ap_field, new)], f"{ap_field}={new}")
         if new != gh_date or new != ap_date:
             print(f"date  [{key}] {kind} -> {new or 'unset'}")
-        if apply:
+        if apply and gh_write_ok:
             prev[kind] = new
 
 
