@@ -85,12 +85,18 @@ def test_card_milestones_prefers_base_anchor_regardless_of_sort_position():
     # base "0.2.0" sorts after "0.1.0" but must still win -- this is the issue #7 bug:
     # a stale extra tag must never override the confirmed-synced base value.
     card = {"tags": ["milestone:0.1.0", "milestone:0.2.0"]}
-    assert _card_milestones(card, "0.2.0", "0.2.0")[0] == "0.2.0"
+    candidate, tags = _card_milestones(card, "0.2.0", "0.2.0")
+    assert candidate == "0.2.0"
+    # raw_tags is the full verbatim tag set regardless of which candidate was selected --
+    # the anchor rule must never truncate it down to just the winning tag.
+    assert tags == {"milestone:0.1.0", "milestone:0.2.0"}
 
 
 def test_card_milestones_falls_back_to_gh_anchor_when_base_absent():
     card = {"tags": ["milestone:0.1.0", "milestone:9.9"]}
-    assert _card_milestones(card, "0.2.0", "9.9")[0] == "9.9"
+    candidate, tags = _card_milestones(card, "0.2.0", "9.9")
+    assert candidate == "9.9"
+    assert tags == {"milestone:0.1.0", "milestone:9.9"}
 
 
 def test_card_milestones_falls_back_to_sorted_first_when_fully_unanchored():
@@ -108,20 +114,26 @@ def test_card_milestones_base_wins_over_unrelated_other_tag():
     # base present among suffixes, gh is a third value absent from the card -> base wins,
     # even though "other" sorts before base.
     card = {"tags": ["milestone:0.9.0", "milestone:0.1.0"]}
-    assert _card_milestones(card, "0.9.0", "5.0.0")[0] == "0.9.0"
+    candidate, tags = _card_milestones(card, "0.9.0", "5.0.0")
+    assert candidate == "0.9.0"
+    assert tags == {"milestone:0.9.0", "milestone:0.1.0"}
 
 
 def test_card_milestones_gh_wins_over_unrelated_other_tag():
     # base is absent from the card entirely -> falls through to gh, which is present.
     card = {"tags": ["milestone:9.9", "milestone:0.1.0"]}
-    assert _card_milestones(card, None, "9.9")[0] == "9.9"
+    candidate, tags = _card_milestones(card, None, "9.9")
+    assert candidate == "9.9"
+    assert tags == {"milestone:9.9", "milestone:0.1.0"}
 
 
 def test_card_milestones_verified_repro_base_equals_gh_wins_over_stale_leftover():
     # issue #7's worked example: base and gh agree at "0.2.0"; a stale "0.1.0" leftover
     # tag must not out-sort the anchored value.
     card = {"tags": ["milestone:0.2.0", "milestone:0.1.0"]}
-    assert _card_milestones(card, "0.2.0", "0.2.0")[0] == "0.2.0"
+    candidate, tags = _card_milestones(card, "0.2.0", "0.2.0")
+    assert candidate == "0.2.0"
+    assert tags == {"milestone:0.2.0", "milestone:0.1.0"}
 
 
 def test_card_milestones_fully_unanchored_upgrade_is_selected():
@@ -182,6 +194,17 @@ def test_stale_milestone_tags_includes_old_base_only_when_superseded_and_present
     assert _stale_milestone_tags({old_tag}, None, "9.9") == frozenset()
 
 
+def test_stale_milestone_tags_includes_empty_suffix_tag_when_actually_superseded():
+    # The "every empty-suffix tag is always stale" guarantee must hold with EQUALITY (not just
+    # subset) in the actually-superseded branch too, not only in the old_base-is-None/unchanged
+    # branches -- a regressed implementation that special-cases the empty-suffix scan away
+    # whenever a real supersession is detected must fail this.
+    old_tag = f"{MS_PREFIX}0.2.0"
+    ms_tags = {old_tag, f"{MS_PREFIX}9.9", MS_PREFIX}
+    stale = _stale_milestone_tags(ms_tags, "0.2.0", "9.9")  # old_base != new_ms, old_tag present
+    assert stale == frozenset({old_tag, MS_PREFIX})
+
+
 def test_stale_milestone_tags_preserves_unanchored_other_tags():
     # issue #7's leftover-vs-upgrade ambiguity: a tag matching neither the old base nor the
     # new value is preserved, never destroyed, in the same pass it first appears.
@@ -190,6 +213,20 @@ def test_stale_milestone_tags_preserves_unanchored_other_tags():
     stale = _stale_milestone_tags(ms_tags, "0.2.0", "0.2.0")  # nothing superseded this pass
     assert other not in stale
     assert stale == frozenset()
+
+
+def test_stale_milestone_tags_preserves_unanchored_other_tag_during_actual_supersession():
+    # Same guarantee as above, but pinned in the one scenario the invariant text calls out by
+    # name: an ACTIVE transition (old_base present in ms_tags and genuinely != new_ms). A third,
+    # unrelated non-empty-suffix tag must survive untouched alongside the genuinely-removed old
+    # tag -- a regressed implementation that marks "everything but the new value" stale once a
+    # supersession is detected must fail this.
+    old_tag = f"{MS_PREFIX}0.2.0"
+    other = f"{MS_PREFIX}5.5"
+    ms_tags = {old_tag, f"{MS_PREFIX}9.9", other}
+    stale = _stale_milestone_tags(ms_tags, "0.2.0", "9.9")
+    assert other not in stale
+    assert stale == frozenset({old_tag})
 
 
 # --- lane matching --------------------------------------------------------
