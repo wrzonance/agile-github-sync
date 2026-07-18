@@ -163,10 +163,13 @@ def field_meta(cfg: dict) -> dict | None:
         return None
 
 
-def set_project_date(cfg: dict, apply: bool, project_id: str, item_id: str, field_id: str, date: str | None) -> None:
-    """Set (date=YYYY-MM-DD) or clear (date=None) a Projects v2 date field, through the dry-run gate."""
+def set_project_date(cfg: dict, apply: bool, project_id: str, item_id: str, field_id: str, date: str | None) -> bool:
+    """Set (date=YYYY-MM-DD) or clear (date=None) a Projects v2 date field, through the dry-run gate.
+    Returns True iff a write was actually issued (live PATCH or dry-run print); False when skipped
+    because item_id or field_id is falsy -- callers use this to avoid advancing their merge-base
+    when the GitHub-side write never happened."""
     if not (item_id and field_id):
-        return
+        return False
     args = ["project", "item-edit", "--id", item_id, "--project-id", project_id, "--field-id", field_id]
     args += (["--date", date] if date else ["--clear"])
     if apply:
@@ -174,3 +177,4 @@ def set_project_date(cfg: dict, apply: bool, project_id: str, item_id: str, fiel
         print(f"gh    project item {item_id} date -> {date or 'cleared'}")
     else:
         print(f"DRY   gh project item-edit {item_id} {'--date ' + date if date else '--clear'}")
+    return True

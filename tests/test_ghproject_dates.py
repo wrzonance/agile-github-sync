@@ -193,3 +193,35 @@ def test_unmatched_date_kinds_present_but_empty_value_does_not_flag():
 def test_unmatched_date_kinds_flags_only_the_missing_kind():
     raw = [{"id": "PVTI_1", "content": {"url": "u1"}, "Start": "2026-01-01"}]  # no Target key at all
     assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target") == frozenset({"target"})
+
+
+# --- set_project_date returns bool (True iff a write was actually issued) ----
+# False on the falsy item_id/field_id guard, with no ghkit.run call. True at the end of both the
+# apply (live PATCH) and DRY (print-only) branches.
+
+def test_set_project_date_false_and_no_write_when_item_id_missing():
+    with patch("ghproject.ghkit.run") as run_mock:
+        result = ghproject.set_project_date(_cfg(), True, "PVT_1", None, "SF_1", "2026-01-02")
+    assert result is False
+    run_mock.assert_not_called()
+
+
+def test_set_project_date_false_and_no_write_when_field_id_missing():
+    with patch("ghproject.ghkit.run") as run_mock:
+        result = ghproject.set_project_date(_cfg(), True, "PVT_1", "PVTI_1", None, "2026-01-02")
+    assert result is False
+    run_mock.assert_not_called()
+
+
+def test_set_project_date_true_and_writes_on_apply():
+    with patch("ghproject.ghkit.run") as run_mock:
+        result = ghproject.set_project_date(_cfg(), True, "PVT_1", "PVTI_1", "SF_1", "2026-01-02")
+    assert result is True
+    run_mock.assert_called_once()
+
+
+def test_set_project_date_true_and_no_write_on_dry_run():
+    with patch("ghproject.ghkit.run") as run_mock:
+        result = ghproject.set_project_date(_cfg(), False, "PVT_1", "PVTI_1", "SF_1", "2026-01-02")
+    assert result is True
+    run_mock.assert_not_called()
