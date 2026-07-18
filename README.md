@@ -1,35 +1,42 @@
 # agile-github-sync
 
-Mirrors a GitHub repo's work graph onto an AgilePlace (LeanKit/PlanView) board — **ongoing, agnostic,
-one command**. It reads live GitHub (issues, sub-issues, blocked-by) plus the repo's **GitHub Projects
-v2** board and reflects all of it onto AgilePlace. No project-specific manifest; it derives everything
-from live state.
+This tool keeps an AgilePlace (LeanKit / Planview) board up to date with what is happening in a
+GitHub repository. You run one command, by hand or on a schedule. It reads the repo's issues,
+sub-issues, blocking relationships, and GitHub Projects v2 board, then creates and updates
+AgilePlace cards to match. There is no per-project manifest; everything is derived from the live
+GitHub state.
 
 ## What a run does
 
 With `--apply`, each run:
 
-1. **Creates a card per issue** (epics *and* tasks), matched to the issue by external-link URL (customId
-   fallback).
-2. **Moves each card to the lane for its stage.** Stage is the issue's **GitHub Projects v2 Status**
-   (Backlog / Ready / In progress / In review / Done) — the source of truth — falling back to a
-   label/PR-derived stage only for issues not on the Project. Lanes resolve by title among leaf lanes,
-   **failing closed** (leaving the card put) when ambiguous. If the Project read *fails*, lanes are left
-   untouched for that run rather than mass-moved by the fallback.
-3. **Mirrors sub-issues as parent/child card connections** (add *and* remove, so the hierarchy equals
-   the GitHub graph); LeanKit rolls child progress/dates up to the parent natively.
-4. **Mirrors blocked-by as the card's Blocked state** — a card is blocked while any blocker isn't Done.
-5. **Bidirectionally reconciles metadata and dates** via a 3-way merge against `.sync-state.json`:
-   GitHub **labels + milestone ↔ card tags** (removals propagate both ways); Project **Start/Target date
-   fields ↔ card `plannedStart`/`plannedFinish`** (AgilePlace wins a genuine two-sided conflict).
+1. Creates a card for every issue, epics and tasks alike. Cards are matched to issues by the card's
+   external-link URL, with the card's customId as a fallback.
+2. Moves each card to the lane for its stage. The stage is the issue's Status on the GitHub
+   Projects v2 board (Backlog / Ready / In progress / In review / Done), which is the source of
+   truth. Issues that are not on the Project fall back to a stage derived from labels and open PRs.
+   Lanes are matched by title among leaf lanes; if a match is ambiguous, the card stays where it
+   is. If reading the Project fails outright, no lanes are changed that run, so the fallback cannot
+   mass-move the board.
+3. Mirrors sub-issues as parent/child card connections, adding and removing links so the card
+   hierarchy matches the GitHub graph. LeanKit then rolls child progress and dates up to the parent
+   on its own.
+4. Marks a card blocked while any issue blocking it is not Done, and clears the blocked state
+   otherwise.
+5. Reconciles metadata and dates in both directions using a three-way merge against
+   `.sync-state.json`. GitHub labels and milestone sync with card tags, and removals carry over in
+   both directions. The Project's Start and Target date fields sync with the card's `plannedStart`
+   and `plannedFinish`; if both sides changed the same date, the AgilePlace value wins.
 
-Every mutation to one card is sent as a **single versioned PATCH** (optimistic concurrency). **DRY RUN
-is the default** — `python sync.py` prints every planned action and writes nothing.
+All changes to a card are sent as a single versioned PATCH, so a stale write fails instead of
+silently overwriting someone else's edit. Dry run is the default: `python sync.py` prints every
+planned action and writes nothing.
 
-> **First live run:** the AgilePlace write shapes (connections, blocked, tags, dates) and the
-> `gh project` reads are validated against the live APIs — see **`API-VALIDATION.md`**. Known deferred
-> hardening (pagination beyond ~1k, cross-repo sub-issues, run locking) is tracked in **`HARDENING.md`**.
-> Start with a disposable board/repo.
+> Before the first live run: `API-VALIDATION.md` records which API shapes are confirmed and which
+> still need a one-time check against the live APIs (the AgilePlace connection, blocked-state, tag,
+> and date writes, and the `gh project` reads). Known deferred work (pagination beyond about 1,000
+> records, cross-repo sub-issues, run locking) is tracked in `HARDENING.md`. Start with a
+> disposable board and repo.
 
 ## Point it at a repo
 
@@ -37,46 +44,56 @@ is the default** — `python sync.py` prints every planned action and writes not
 cp .env.example .env
 ```
 
-Fill `TARGET_REPO_PATH` (the local clone), `AGILEPLACE_*`, and `GH_PROJECT_*`; grant the Projects scope
-with `gh auth refresh -s project`. Every `gh` call runs with its working directory set to
-`TARGET_REPO_PATH`, so `gh` resolves the repo from that clone's remote — no hardcoded owner/name.
-Stdlib-only Python (3.10+); the same `python sync.py` runs in PowerShell, cmd, and bash.
+Fill in `TARGET_REPO_PATH` (the local clone), the `AGILEPLACE_*` values, and the `GH_PROJECT_*`
+values, then grant the Projects scope with `gh auth refresh -s project`. Every `gh` call runs with
+its working directory set to `TARGET_REPO_PATH`, so `gh` finds the repo through that clone's
+remote; no owner or repo name is hardcoded here.
 
-**Custom board columns?** Set `STAGE_LANE_MAP` to pin stages to your lanes (multiple lanes per stage —
-first = move target, all = "already in that stage"). See `.env.example`. Without it, stages resolve by
-lane title / cardStatus, failing closed when ambiguous.
+The script is plain Python (3.10+, standard library only) and the same `python sync.py` works in
+PowerShell, cmd, and bash.
+
+If your board columns don't match the standard five stages, set `STAGE_LANE_MAP` to pin stages to
+your lanes. You can list several lanes per stage: the first is where cards get moved, and any of
+them counts as "already in that stage". See `.env.example`. Without the map, lanes are matched by
+title and card status, and an ambiguous match leaves the card alone.
 
 ## Run
 
 ```
-python sync.py            # verbose DRY RUN (no writes)
-python sync.py --apply    # create/move/connect cards, sync metadata + dates (needs a full .env + scopes)
+python sync.py            # dry run: prints what it would do, writes nothing
+python sync.py --apply    # create/move/connect cards and sync metadata and dates (needs a full .env and token scopes)
 ```
 
-Idempotent and safe at any frequency. With no token it runs offline/read-only; if the target repo has
-no reachable remote it prints a notice and does nothing.
+Runs are idempotent, so any schedule frequency is fine. With no token it runs offline and
+read-only. If the target repo has no reachable remote, it prints a notice and does nothing.
 
 ## Keep it always in sync
 
-- **Windows (Task Scheduler):** `powershell -ExecutionPolicy Bypass -File .\Register-BacklogSync.ps1`
-  registers a task that runs `sync.py --apply` **every 30 min, weekdays 07:00–19:00, only while you are
-  logged on** (no stored password); logs to `sync.log`. Remove with `-Unregister`.
-- **Linux/macOS (cron):**
+- Windows (Task Scheduler): `powershell -ExecutionPolicy Bypass -File .\Register-BacklogSync.ps1`
+  registers a task that runs `sync.py --apply` every 30 minutes, weekdays 07:00 to 19:00, only
+  while you are logged on (no stored password). Output goes to `sync.log`. Remove it with
+  `-Unregister`.
+- Linux/macOS (cron):
   ```cron
   */30 7-18 * * 1-5  cd ~/github/agile-github-sync && python sync.py --apply >> sync.log 2>&1
   ```
 
-Run-as prereqs: `python` + `gh` on PATH, `gh auth login` + `gh auth refresh -s project` done, `.env` filled.
+The account running the schedule needs `python` and `gh` on PATH, `gh auth login` plus
+`gh auth refresh -s project` completed, and a filled-in `.env`.
 
 ## Layout
 
-- `sync.py` — orchestration (create/move/connect/block cards; reconcile tags + dates; one PATCH per card).
-- `stages.py` — pure stage derivation, blocked-reason, lane/title matching (unit-tested).
-- `reconcile.py` — pure 3-way set + single-value merges (unit-tested).
-- `ghkit.py` — GitHub via `gh` (issues, sub-issues, open-PR + blocked-by reads, label/milestone writes).
-- `ghproject.py` — GitHub Projects v2 via `gh project` (Status + date reads/writes).
-- `agileplace.py` — AgilePlace io v2 (board, cards, lanes, tags, dates, connections, Blocked).
-- `config.py` — `.env` config; `tests/` — pytest (`pytest -q`).
+- `sync.py`: orchestration. Creates, moves, connects, and blocks cards; reconciles tags and dates;
+  sends one PATCH per card.
+- `stages.py`: pure stage derivation, blocked-reason text, and lane/title matching (unit-tested).
+- `reconcile.py`: pure three-way set and single-value merges (unit-tested).
+- `ghkit.py`: GitHub via the `gh` CLI (issues, sub-issues, open-PR and blocked-by reads,
+  label/milestone writes).
+- `ghproject.py`: GitHub Projects v2 via `gh project` (Status and date reads/writes).
+- `agileplace.py`: AgilePlace io v2 (board, cards, lanes, tags, dates, connections, blocked
+  state).
+- `config.py`: `.env` config. `tests/`: pytest (`pytest -q`).
 
-The **initial** stand-up (labels, milestones, first issues, add-to-Project) is a separate, throwaway
-step that lives **outside** this repo — this tool only maintains the ongoing mirror.
+The one-time initial stand-up (labels, milestones, first issues, adding issues to the Project) is
+a separate throwaway step that lives outside this repo. This tool only maintains the ongoing
+mirror.
