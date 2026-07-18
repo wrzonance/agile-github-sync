@@ -119,7 +119,7 @@ def test_filter_gh_safe_labels_one_warn_per_rejected_name(capsys):
     names = frozenset({"a,1", "b,2", "ok"})
     result = _filter_gh_safe_labels(names, key="k", action="remove")
     assert result == frozenset({"ok"})
-    lines = [l for l in capsys.readouterr().out.splitlines() if l.startswith("WARN")]
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
     assert len(lines) == 2  # exactly one per rejected name, not per retry
 
 
@@ -218,10 +218,10 @@ def test_sync_metadata_skips_unsafe_labels_and_fixes_merge_base(monkeypatch, cap
     assert "x,y" in prev["labels"]       # skipped remove -> still actually on GitHub -> stays in base
 
     out = capsys.readouterr().out
-    warn_lines = [l for l in out.splitlines() if l.startswith("WARN")]
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN")]
     assert len(warn_lines) == 2
-    add_warn = next(l for l in warn_lines if "a,b" in l)      # skipped add -> must say "skipping add"
-    remove_warn = next(l for l in warn_lines if "x,y" in l)   # skipped remove -> must say "skipping remove"
+    add_warn = next(line for line in warn_lines if "a,b" in line)      # skipped add -> must say "skipping add"
+    remove_warn = next(line for line in warn_lines if "x,y" in line)   # skipped remove -> must say "skipping remove"
     # NOTE: every WARN line mentions both "--add-label" and "--remove-label" (the flag names quoted
     # verbatim in the message), so a bare `"add" in line` / `"remove" in line` check would pass no
     # matter which batch a name came from. Anchor on the actual action phrase instead.
@@ -259,10 +259,10 @@ def test_sync_metadata_mixed_safe_and_unsafe_labels_in_same_batch(monkeypatch, c
     assert set(prev["labels"]) == {"new-safe", "x,y"}
 
     out = capsys.readouterr().out
-    warn_lines = [l for l in out.splitlines() if l.startswith("WARN")]
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN")]
     assert len(warn_lines) == 2
-    add_warn = next(l for l in warn_lines if "a,b" in l)
-    remove_warn = next(l for l in warn_lines if "x,y" in l)
+    add_warn = next(line for line in warn_lines if "a,b" in line)
+    remove_warn = next(line for line in warn_lines if "x,y" in line)
     assert "skipping add on GitHub" in add_warn
     assert "skipping remove on GitHub" in remove_warn
 
