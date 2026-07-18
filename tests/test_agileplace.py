@@ -49,11 +49,11 @@ def test_ops_blocked_never_uses_nested_blockedstatus_path():
             assert "blockedStatus" not in op["path"]
 
 
-def test_ops_blocked_unblock_preserves_truthy_reason_text():
-    """The write op must carry the exact reason text through regardless of the blocked flag --
-    unblocking must not silently coerce a truthy reason to ''."""
+def test_ops_blocked_unblock_forces_empty_reason():
+    """An unblocked card carries no reason: even when a truthy reason is passed, unblocking must
+    write "" to /blockReason -- never the self-contradictory isBlocked=False + non-empty reason."""
     ops = ops_blocked(False, "some reason")
-    assert ops[1] == {"op": "add", "path": "/blockReason", "value": "some reason"}
+    assert ops[1] == {"op": "add", "path": "/blockReason", "value": ""}
 
 
 def test_card_is_blocked_reads_nested_blockedstatus_isblocked():
