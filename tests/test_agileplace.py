@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agileplace import ops_blocked  # noqa: E402
+from agileplace import card_block_reason, card_is_blocked, ops_blocked  # noqa: E402
 
 
 def test_ops_blocked_block_with_reason():
@@ -47,3 +47,30 @@ def test_ops_blocked_never_uses_nested_blockedstatus_path():
     for ops in (ops_blocked(True, "reason"), ops_blocked(False, None)):
         for op in ops:
             assert "blockedStatus" not in op["path"]
+
+
+def test_ops_blocked_unblock_preserves_truthy_reason_text():
+    """The write op must carry the exact reason text through regardless of the blocked flag --
+    unblocking must not silently coerce a truthy reason to ''."""
+    ops = ops_blocked(False, "some reason")
+    assert ops[1] == {"op": "add", "path": "/blockReason", "value": "some reason"}
+
+
+def test_card_is_blocked_reads_nested_blockedstatus_isblocked():
+    """card_is_blocked is the READ-side counterpart to ops_blocked's write-side flat shape -- it
+    must keep reading the nested blockedStatus.isBlocked field the AgilePlace API actually returns,
+    never the flat /isBlocked write path."""
+    assert card_is_blocked({"blockedStatus": {"isBlocked": True, "reason": "x"}}) is True
+    assert card_is_blocked({"blockedStatus": {"isBlocked": False, "reason": ""}}) is False
+    assert card_is_blocked({}) is False
+    assert card_is_blocked({"isBlocked": True}) is False  # flat write shape must not be read
+
+
+def test_card_block_reason_reads_nested_blockedstatus_reason():
+    """card_block_reason is the READ-side counterpart to ops_blocked's write-side flat shape -- it
+    must keep reading the nested blockedStatus.reason field, never the flat /blockReason write path,
+    and must coerce a missing/falsy reason to ''."""
+    assert card_block_reason({"blockedStatus": {"isBlocked": True, "reason": "waiting"}}) == "waiting"
+    assert card_block_reason({"blockedStatus": {"isBlocked": False, "reason": None}}) == ""
+    assert card_block_reason({}) == ""
+    assert card_block_reason({"blockReason": "waiting"}) == ""  # flat write shape must not be read
