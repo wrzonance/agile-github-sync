@@ -130,7 +130,8 @@ def open_pr_issue_numbers(cfg: dict) -> set[int]:
                         "-f", f"owner={ctx.owner}", "-f", f"name={ctx.name}"])
         prs = json.loads(out.stdout)["data"]["repository"]["pullRequests"]["nodes"]
         return {n["number"] for pr in prs for n in pr["closingIssuesReferences"]["nodes"]}
-    except (subprocess.CalledProcessError, KeyError, TypeError, json.JSONDecodeError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, KeyError, TypeError,
+            json.JSONDecodeError):
         return set()
 
 

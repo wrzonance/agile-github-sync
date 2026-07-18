@@ -193,6 +193,20 @@ def test_open_pr_issue_numbers_short_circuits_on_no_repo_context(monkeypatch):
     assert called == []  # no gh api call attempted
 
 
+def test_open_pr_issue_numbers_returns_empty_set_on_timeout(monkeypatch):
+    """A stalled `gh api graphql` call must degrade to the documented best-effort empty-set
+    contract, exactly like sub_issue_numbers/blocked_by_map already do -- not propagate
+    subprocess.TimeoutExpired and crash the sync."""
+    monkeypatch.setattr(ghkit, "_repo_context",
+                        lambda cfg: ghkit.RepoContext(owner="acme", name="widgets", host="github.com"))
+
+    def fake_run(cfg, args, **k):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=ghkit.GH_TIMEOUT)
+
+    monkeypatch.setattr(ghkit, "run", fake_run)
+    assert ghkit.open_pr_issue_numbers({}) == set()
+
+
 # --- sub_issue_numbers: argv (num stays -F) + short-circuit -----------------
 
 def test_sub_issue_numbers_uses_raw_string_for_owner_name_typed_for_num(monkeypatch):
