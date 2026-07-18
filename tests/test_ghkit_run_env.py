@@ -76,6 +76,23 @@ def test_run_scrubs_even_when_gh_repo_gh_host_absent(tmp_path, monkeypatch):
     assert captured["env"].get("GH_TOKEN") == "tok-456"
 
 
+def test_run_host_reinjects_resolved_gh_host_over_scrubbed_ambient(tmp_path, monkeypatch):
+    """host= re-adds GH_HOST as the freshly resolved target host (never the ambient value that was
+    scrubbed) so host-selectorless commands like `gh project` reach the right instance. GH_REPO stays
+    scrubbed regardless."""
+    monkeypatch.setenv("GH_REPO", "someone/else")
+    monkeypatch.setenv("GH_HOST", "stale.example.com")
+
+    captured = {}
+    monkeypatch.setattr(subprocess, "run",
+                        lambda argv, **kwargs: (captured.update(kwargs), Mock(stdout=""))[1])
+
+    ghkit.run({"target_repo_path": tmp_path}, ["project", "item-list"], host="ghes.acme.internal")
+
+    assert captured["env"]["GH_HOST"] == "ghes.acme.internal"   # resolved host, not the ambient one
+    assert "GH_REPO" not in captured["env"]                     # repo override still scrubbed
+
+
 # --- _repo_context(): success + fail-closed paths ---------------------------
 
 def _mock_repo_view(monkeypatch, stdout_obj):

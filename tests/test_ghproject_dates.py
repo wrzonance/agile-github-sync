@@ -10,10 +10,18 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import ghkit  # noqa: E402
 import ghproject  # noqa: E402
 from ghproject import (_camel, _field,  # noqa: E402
                        _field_key_seen, parse_items, unmatched_date_kinds)
 from sync import sync_dates  # noqa: E402
+
+
+def _patch_ctx(host="github.com"):
+    """Patch _repo_context so the project read path resolves a host and reaches the gh project call
+    under test (rather than short-circuiting on host resolution)."""
+    return patch("ghproject.ghkit._repo_context",
+                 return_value=ghkit.RepoContext(owner="acme", name="widgets", host=host))
 
 
 # --- _camel -----------------------------------------------------------------
@@ -124,9 +132,9 @@ def _run_success(*_args, **_kwargs):
 
 def test_items_and_raw_matches_items_on_success():
     cfg = _cfg()
-    with patch("ghproject.ghkit.run", side_effect=_run_success):
+    with patch("ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
         via_items = ghproject.items(cfg)
-    with patch("ghproject.ghkit.run", side_effect=_run_success):
+    with patch("ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
         via_pair, raw = ghproject.items_and_raw(cfg)
     assert via_items == via_pair
     assert raw == RAW_ITEMS
@@ -135,27 +143,45 @@ def test_items_and_raw_matches_items_on_success():
 def test_items_and_raw_matches_items_on_subprocess_failure():
     cfg = _cfg()
     err = subprocess.CalledProcessError(1, ["gh"])
-    with patch("ghproject.ghkit.run", side_effect=err):
+    with patch("ghproject.ghkit.run", side_effect=err), _patch_ctx():
         assert ghproject.items(cfg) is None
-    with patch("ghproject.ghkit.run", side_effect=err):
+    with patch("ghproject.ghkit.run", side_effect=err), _patch_ctx():
         assert ghproject.items_and_raw(cfg) == (None, None)
 
 
 def test_items_and_raw_matches_items_on_json_decode_failure():
     cfg = _cfg()
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout="not json")):
+    with patch("ghproject.ghkit.run", return_value=Mock(stdout="not json")), _patch_ctx():
         assert ghproject.items(cfg) is None
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout="not json")):
+    with patch("ghproject.ghkit.run", return_value=Mock(stdout="not json")), _patch_ctx():
         assert ghproject.items_and_raw(cfg) == (None, None)
 
 
 def test_items_and_raw_matches_items_on_key_error():
     cfg = _cfg()
     del cfg["gh_project"]["status_field"]  # parse_items needs p["status_field"] -> KeyError
-    with patch("ghproject.ghkit.run", side_effect=_run_success):
+    with patch("ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
         assert ghproject.items(cfg) is None
-    with patch("ghproject.ghkit.run", side_effect=_run_success):
+    with patch("ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
         assert ghproject.items_and_raw(cfg) == (None, None)
+
+
+def test_fetch_raw_items_fails_closed_when_host_unresolved():
+    # No resolvable target host -> no gh project call is attempted, and the read fails closed.
+    cfg = _cfg()
+    with patch("ghproject.ghkit._repo_context", return_value=None), \
+         patch("ghproject.ghkit.run", side_effect=_run_success) as run_mock:
+        assert ghproject.items(cfg) is None
+        assert ghproject.items_and_raw(cfg) == (None, None)
+    run_mock.assert_not_called()
+
+
+def test_fetch_raw_items_pins_project_call_to_resolved_host():
+    # gh project item-list has no --hostname flag; the resolved host must reach run() as host=.
+    cfg = _cfg()
+    with patch("ghproject.ghkit.run", side_effect=_run_success) as run_mock, _patch_ctx(host="ghes.acme.internal"):
+        ghproject.items_and_raw(cfg)
+    assert run_mock.call_args.kwargs.get("host") == "ghes.acme.internal"
 
 
 def test_items_and_raw_matches_items_when_not_configured():
@@ -262,6 +288,42 @@ def test_set_project_date_true_and_no_write_on_dry_run():
     with patch("ghproject.ghkit.run") as run_mock:
         result = ghproject.set_project_date(_cfg(), False, "PVT_1", "PVTI_1", "SF_1", "2026-01-02")
     assert result is True
+    run_mock.assert_not_called()
+
+
+def test_set_project_date_pins_write_to_host():
+    # gh project item-edit has no --hostname flag; the write must reach run() as host=, never the
+    # default host (writing to a same-number project on the wrong instance).
+    with patch("ghproject.ghkit.run") as run_mock:
+        ghproject.set_project_date(_cfg(), True, "PVT_1", "PVTI_1", "SF_1", "2026-01-02",
+                                   "ghes.acme.internal")
+    assert run_mock.call_args.kwargs.get("host") == "ghes.acme.internal"
+
+
+# --- field_meta: resolves + threads the target host, fails closed -----------
+
+def _field_meta_run(*args, **_kwargs):
+    call = args[1]
+    if call[:2] == ["project", "view"]:
+        return Mock(stdout=json.dumps({"id": "PVT_1"}))
+    if call[:2] == ["project", "field-list"]:
+        return Mock(stdout=json.dumps({"fields": []}))
+    raise AssertionError(f"unexpected gh call: {call}")
+
+
+def test_field_meta_pins_calls_to_host_and_stores_it():
+    with patch("ghproject.ghkit.run", side_effect=_field_meta_run) as run_mock, \
+         _patch_ctx(host="ghes.acme.internal"):
+        meta = ghproject.field_meta(_cfg())
+    assert meta is not None
+    assert meta["host"] == "ghes.acme.internal"
+    assert all(c.kwargs.get("host") == "ghes.acme.internal" for c in run_mock.call_args_list)
+
+
+def test_field_meta_fails_closed_when_host_unresolved():
+    with patch("ghproject.ghkit._repo_context", return_value=None), \
+         patch("ghproject.ghkit.run", side_effect=_field_meta_run) as run_mock:
+        assert ghproject.field_meta(_cfg()) is None
     run_mock.assert_not_called()
 
 

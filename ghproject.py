@@ -73,10 +73,13 @@ def _fetch_raw_items(cfg: dict) -> list | None:
     """Raw `gh project item-list` rows, or None on failure/not-configured."""
     if not configured(cfg):
         return None
+    ctx = ghkit._repo_context(cfg)
+    if ctx is None:  # can't resolve the target host -> fail closed rather than hit the default host
+        return None
     p = cfg["gh_project"]
     try:
         out = ghkit.run(cfg, ["project", "item-list", str(p["number"]), "--owner", p["owner"],
-                              "--format", "json", "--limit", "1000"])
+                              "--format", "json", "--limit", "1000"], host=ctx.host)
         data = json.loads(out.stdout or "{}")
         return data.get("items", [])
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, SystemExit):
@@ -146,16 +149,22 @@ def issue_dates_map(cfg: dict) -> dict[str, dict]:
 
 
 def field_meta(cfg: dict) -> dict | None:
-    """{project_id, status_field_id, status_options{name_lower:id}, start_field_id, target_field_id} for
-    writes (Status in Phase 1b, dates in Phase 4). None on failure. VALIDATE LIVE: gh project shapes."""
+    """{project_id, host, status_field_id, status_options{name_lower:id}, start_field_id, target_field_id}
+    for writes (Status in Phase 1b, dates in Phase 4). None on failure. VALIDATE LIVE: gh project shapes."""
     if not configured(cfg):
+        return None
+    ctx = ghkit._repo_context(cfg)
+    if ctx is None:  # can't resolve the target host -> fail closed rather than hit the default host
         return None
     p = cfg["gh_project"]
     try:
-        proj = ghkit.run(cfg, ["project", "view", str(p["number"]), "--owner", p["owner"], "--format", "json"])
+        proj = ghkit.run(cfg, ["project", "view", str(p["number"]), "--owner", p["owner"], "--format", "json"],
+                         host=ctx.host)
         fl = ghkit.run(cfg, ["project", "field-list", str(p["number"]), "--owner", p["owner"],
-                             "--limit", "200", "--format", "json"])  # default is only 30 fields
-        meta = {"project_id": json.loads(proj.stdout)["id"], "status_field_id": None,
+                             "--limit", "200", "--format", "json"], host=ctx.host)  # default is only 30 fields
+        # host is carried in the meta so the date-write path (set_project_date) pins the same
+        # target host without re-resolving it per write.
+        meta = {"project_id": json.loads(proj.stdout)["id"], "host": ctx.host, "status_field_id": None,
                 "status_options": {}, "start_field_id": None, "target_field_id": None}
         for f in json.loads(fl.stdout).get("fields", []):
             name = (f.get("name") or "").strip().lower()
@@ -172,17 +181,20 @@ def field_meta(cfg: dict) -> dict | None:
         return None
 
 
-def set_project_date(cfg: dict, apply: bool, project_id: str, item_id: str, field_id: str, date: str | None) -> bool:
+def set_project_date(cfg: dict, apply: bool, project_id: str, item_id: str, field_id: str,
+                     date: str | None, host: str | None = None) -> bool:
     """Set (date=YYYY-MM-DD) or clear (date=None) a Projects v2 date field, through the dry-run gate.
     Returns True iff a write was actually issued (live PATCH or dry-run print); False when skipped
     because item_id or field_id is falsy -- callers use this to avoid advancing their merge-base
-    when the GitHub-side write never happened."""
+    when the GitHub-side write never happened. `host` pins the write to the resolved target host
+    (carried in field_meta); `gh project item-edit` has no --hostname flag, so GH_HOST is its only
+    host selector and a write must never fall back to the default host."""
     if not (item_id and field_id):
         return False
     args = ["project", "item-edit", "--id", item_id, "--project-id", project_id, "--field-id", field_id]
     args += (["--date", date] if date else ["--clear"])
     if apply:
-        ghkit.run(cfg, args)
+        ghkit.run(cfg, args, host=host)
         print(f"gh    project item {item_id} date -> {date or 'cleared'}")
     else:
         print(f"DRY   gh project item-edit {item_id} {'--date ' + date if date else '--clear'}")

@@ -188,7 +188,8 @@ def sync_dates(cfg, apply, issue, card, pitem, field_meta, issues_state, queue,
         new = reconcile_value(prev.get(kind), gh_date, ap_date, prefer="ap")
         gh_write_ok = True
         if new != gh_date:
-            gh_write_ok = ghproject.set_project_date(cfg, apply, field_meta["project_id"], item_id, field_id, new)
+            gh_write_ok = ghproject.set_project_date(cfg, apply, field_meta["project_id"], item_id,
+                                                     field_id, new, field_meta.get("host"))
         if new != ap_date:
             queue(card, [agileplace.op_planned_date(ap_field, new)], f"{ap_field}={new}")
         if new != gh_date or new != ap_date:

@@ -36,15 +36,24 @@ class RepoContext(NamedTuple):
     host: str
 
 
-def _gh_subprocess_env() -> dict[str, str]:
+def _gh_subprocess_env(host: str | None = None) -> dict[str, str]:
     """A full copy of the current environment with GH_REPO/GH_HOST removed -- never mutates
     os.environ itself. Everything else (PATH, HOME, GH_TOKEN, GH_CONFIG_DIR, locale vars) passes
     through unchanged; a deny-list copy keeps the blast radius small and auditable versus an
-    allow-list's risk of silently dropping something `gh` actually needs."""
-    return {k: v for k, v in os.environ.items() if k not in _GH_ENV_OVERRIDE_KEYS}
+    allow-list's risk of silently dropping something `gh` actually needs.
+
+    `host`, when given, re-adds GH_HOST as the *freshly resolved* target host (never the ambient
+    value we just scrubbed). This is for host-selectorless commands like `gh project`, which -- unlike
+    `gh api`/`repo`/`issue` -- have no --hostname flag and don't infer the host from the target clone's
+    cwd, so GH_HOST is their only host selector."""
+    env = {k: v for k, v in os.environ.items() if k not in _GH_ENV_OVERRIDE_KEYS}
+    if host:
+        env["GH_HOST"] = host
+    return env
 
 
-def run(cfg: dict, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
+def run(cfg: dict, args: list[str], *, check: bool = True,
+        host: str | None = None) -> subprocess.CompletedProcess:
     target = cfg.get("target_repo_path")
     if target is None:
         raise SystemExit("TARGET_REPO_PATH is not set (.env or environment) -- cannot target the repo")
@@ -53,7 +62,7 @@ def run(cfg: dict, args: list[str], *, check: bool = True) -> subprocess.Complet
     try:
         return subprocess.run(["gh", *args], cwd=str(target), check=check, capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=GH_TIMEOUT,
-                              env=_gh_subprocess_env())
+                              env=_gh_subprocess_env(host))
     except subprocess.CalledProcessError as exc:
         # Surface gh's own message; captured-and-discarded stderr makes every failure opaque.
         if exc.stderr:
