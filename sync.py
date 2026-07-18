@@ -98,6 +98,16 @@ def _label_set(labels, ignore: frozenset) -> set[str]:
     return {l for l in labels if l not in ignore and not l.startswith(MS_PREFIX)}
 
 
+def _filter_gh_safe_labels(names: frozenset[str], *, key: str, action: str) -> frozenset[str]:
+    """Subset of names safe to pass to gh's --add-label/--remove-label; prints one WARN per rejected
+    name (comma, or a '"' anywhere -- gh CSV-splits the flag value) naming the offender and side."""
+    safe = frozenset(n for n in names if ghkit.is_gh_label_safe(n))
+    for bad in sorted(names - safe):
+        print(f"WARN  [{key}] label {bad!r} contains a comma or a double quote -- gh CSV-splits "
+              f"--add-label/--remove-label values; skipping {action} on GitHub")
+    return safe
+
+
 def _card_milestones(card: dict) -> tuple[str | None, set[str]]:
     """(current milestone value, all raw milestone: tags). Deterministic: the current value is the
     lexicographically-first non-empty suffix; extras/empties are stale tags to be cleaned up."""
@@ -114,10 +124,19 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
     ap_label_tags = _label_set((t for t in agileplace.card_tags(card) if not t.startswith(MS_PREFIX)), ignore)
     base_labels = _label_set(prev.get("labels", []), ignore)
     r = reconcile(base_labels, gh_labels, ap_label_tags)
-    for item in sorted(r.gh_add):
+    key = title_key(issue["title"]) or str(issue["number"])
+
+    gh_add_safe = _filter_gh_safe_labels(r.gh_add, key=key, action="add")
+    gh_remove_safe = _filter_gh_safe_labels(r.gh_remove, key=key, action="remove")
+    for item in sorted(gh_add_safe):
         ghkit.edit_label(cfg, apply, issue["number"], item, add=True)
-    for item in sorted(r.gh_remove):
+    for item in sorted(gh_remove_safe):
         ghkit.edit_label(cfg, apply, issue["number"], item, add=False)
+    # A name skipped from an add was never actually written to GitHub -> pull it back out of the new
+    # base; a name skipped from a remove is still actually on GitHub -> keep it in the new base. The
+    # two terms never overlap: gh_add/gh_remove are disjoint set-differences of the same final/gh_now
+    # pair (reconcile.py), so a name can't be skipped from both an add and a remove in the same run.
+    new_base = (r.new_base - (r.gh_add - gh_add_safe)) | (r.gh_remove - gh_remove_safe)
     tag_ops = [agileplace.op_tag(t, add=True) for t in sorted(r.ap_add)]
     tag_ops += [agileplace.op_tag(t, add=False) for t in sorted(r.ap_remove)]
 
@@ -135,12 +154,11 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
 
     if tag_ops:
         queue(card, tag_ops, "tags/milestone")
-    if r.gh_add or r.gh_remove or r.ap_add or r.ap_remove or new_ms != gh_ms or tag_ops:
-        key = title_key(issue["title"]) or str(issue["number"])
-        print(f"meta  [{key}] labels gh+{len(r.gh_add)}/-{len(r.gh_remove)} ap+{len(r.ap_add)}/-{len(r.ap_remove)}"
-              f" milestone={new_ms}")
+    if gh_add_safe or gh_remove_safe or r.ap_add or r.ap_remove or new_ms != gh_ms or tag_ops:
+        print(f"meta  [{key}] labels gh+{len(gh_add_safe)}/-{len(gh_remove_safe)}"
+              f" ap+{len(r.ap_add)}/-{len(r.ap_remove)} milestone={new_ms}")
     if apply:
-        prev.update({"labels": sorted(r.new_base), "milestone": new_ms})
+        prev.update({"labels": sorted(new_base), "milestone": new_ms})
 
 
 def sync_dates(cfg, apply, issue, card, pitem, field_meta, issues_state, queue,

@@ -120,8 +120,22 @@ def blocked_by_map(cfg: dict, issue_numbers: list[int]) -> dict[int, list[int]] 
     return result
 
 
+def is_gh_label_safe(name: str) -> bool:
+    """False iff name would be corrupted (or rejected) by gh's --add-label/--remove-label pflag
+    StringSlice flag, which CSV-splits its value via Go's encoding/csv Reader in its default
+    (LazyQuotes=false) mode: a comma anywhere splits one name into several, and a '"' ANYWHERE --
+    not just a leading one -- is a hard parse error for that reader (a bare quote inside an unquoted
+    field is rejected outright, regardless of position), so any embedded quote must be treated as
+    unsafe too."""
+    return "," not in name and '"' not in name
+
+
 def edit_label(cfg: dict, apply: bool, number: int, label: str, *, add: bool) -> None:
     """Add or remove one label on an issue, through the dry-run gate."""
+    if not is_gh_label_safe(label):
+        raise ValueError(f"edit_label: unsafe label name {label!r} would be CSV-split by gh's "
+                          f"--add-label/--remove-label flag -- caller must pre-filter via "
+                          f"is_gh_label_safe() before calling")
     flag = "--add-label" if add else "--remove-label"
     if apply:
         run(cfg, ["issue", "edit", str(number), flag, label])
