@@ -10,6 +10,7 @@ is_gh_label_safe's pure/total contract at the module boundary -- no network, no 
 sync._filter_gh_safe_labels and sync_metadata's persisted-merge-base arithmetic that must never
 record a label as GitHub-side-applied when it was not actually written. Run: pytest -q
 """
+import copy
 import sys
 from pathlib import Path
 
@@ -412,6 +413,84 @@ def test_sync_metadata_dry_run_never_mutates_state_with_milestone_tags(monkeypat
     sync_metadata({}, False, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
     assert issues_state[issue["url"]] == before  # apply=False -> no state mutation
+
+
+# --- sync_metadata boundary invariants (issue #3, Task 2/4 wiring): no input --
+# --- mutation, tags_to_remove is a fresh local accumulator each call, and -----
+# --- combined add+remove tag ops are queued as exactly one PATCH per card ----
+
+def test_sync_metadata_never_mutates_card_input(monkeypatch, capsys):
+    """sync_metadata must never mutate the `card` dict it's handed -- callers (sync.py's card_by_url/
+    card_by_cid caches, and the pending-ops accumulator keyed by the same object) rely on the exact
+    same card surviving unchanged for the rest of the run. Both a tag add (ap_add) and a tag remove
+    (ap_remove) fire in this scenario, exercising both op-builders' read paths without ever writing
+    back into `card`."""
+    issue = _issue(labels=["new-label"])
+    card = _card(tags=["stale-tag"])
+    before = copy.deepcopy(card)
+    issues_state = {issue["url"]: {"labels": ["stale-tag"], "milestone": None}}
+
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+
+    sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
+
+    assert card == before             # no key added/changed/removed
+    assert card["tags"] == ["stale-tag"]  # the raw tags array itself is untouched, not just re-equal
+
+
+def test_sync_metadata_tags_to_remove_is_fresh_each_call(monkeypatch, capsys):
+    """tags_to_remove is accumulated into a `set()` local to sync_metadata's own call frame -- never a
+    shared/mutable default that could leak removals computed for one issue's card into the next call.
+    Call 1 (issue A) genuinely removes a stale tag; call 2 (issue B, an unrelated card that needs no
+    removes at all) must queue zero remove ops -- proving call 1's accumulator did not survive into
+    call 2."""
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+
+    issue_a = _issue(number=1, labels=["new-label"])
+    card_a = _card(tags=["stale-tag"])
+    issues_state = {issue_a["url"]: {"labels": ["stale-tag"], "milestone": None}}
+
+    queued_a = []
+    sync_metadata({}, True, issue_a, card_a, frozenset(), issues_state,
+                  lambda c, ops, note: queued_a.append(ops))
+    assert any(op.get("op") == "remove" for ops in queued_a for op in ops)  # call 1 really removed
+
+    issue_b = _issue(number=2, labels=["keep"])
+    card_b = _card(tags=["keep"])
+    issues_state[issue_b["url"]] = {"labels": ["keep"], "milestone": None}
+
+    queued_b = []
+    sync_metadata({}, True, issue_b, card_b, frozenset(), issues_state,
+                  lambda c, ops, note: queued_b.append(ops))
+
+    assert queued_b == []  # nothing to add/remove for issue B -> no leakage from call 1's accumulator
+
+
+def test_sync_metadata_queues_combined_add_and_remove_as_one_patch(monkeypatch, capsys):
+    """When the same pass needs both a tag add (ap_add) and a tag remove (ap_remove), sync_metadata
+    must combine them into ONE tag_ops list and call queue() exactly once for tags/milestone -- never
+    split across an add-queue call and a separate remove-queue call -- so the batch collapses into a
+    single versioned PATCH per card (agileplace.patch_card) rather than fragmenting ops that a
+    fragmented caller could accidentally interleave with other cards' queue() calls."""
+    issue = _issue(labels=["new-label"])
+    card = _card(tags=["stale-tag"])
+    issues_state = {issue["url"]: {"labels": ["stale-tag"], "milestone": None}}
+
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+
+    queue_calls = []
+    sync_metadata({}, True, issue, card, frozenset(), issues_state,
+                  lambda c, ops, note: queue_calls.append((c, ops, note)))
+
+    tag_calls = [call for call in queue_calls if call[2] == "tags/milestone"]
+    assert len(tag_calls) == 1  # exactly one queue() call carries the tag ops for this card
+    _, ops, _ = tag_calls[0]
+    assert {op["op"] for op in ops} == {"add", "remove"}         # both kinds combined in that one call
+    assert sum(1 for op in ops if op["op"] == "add") == 1
+    assert sum(1 for op in ops if op["op"] == "remove") == 1
 
 
 def test_sync_metadata_backward_compatible_on_safe_labels(monkeypatch, capsys):
