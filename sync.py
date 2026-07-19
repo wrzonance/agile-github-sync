@@ -167,7 +167,7 @@ def _card_milestones(card: dict, base: str | None, gh: str | None) -> tuple[str 
 
 
 def _stale_milestone_tags(ms_tags: set[str], old_base: str | None, new_ms: str | None) -> frozenset[str]:
-    """Subset of ms_tags (the 2nd _card_milestones return) safe to remove via op_tag(add=False) this
+    """Subset of ms_tags (the 2nd _card_milestones return) safe to remove via ops_tag_remove this
     pass. Postcondition: result <= ms_tags always -- never proposes removing a tag that was never on
     the card. Included:
       - new_ms is None (reconcile resolved the milestone to UNSET this pass -- GitHub cleared it, or
@@ -217,8 +217,8 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
     # two terms never overlap: gh_add/gh_remove are disjoint set-differences of the same final/gh_now
     # pair (reconcile.py), so a name can't be skipped from both an add and a remove in the same run.
     new_base = (r.new_base - (r.gh_add - gh_add_safe)) | (r.gh_remove - gh_remove_safe)
-    tag_ops = [agileplace.op_tag(t, add=True) for t in sorted(r.ap_add)]
-    tag_ops += [agileplace.op_tag(t, add=False) for t in sorted(r.ap_remove)]
+    tags_to_remove: set[str] = set(r.ap_remove)
+    tag_ops = [agileplace.op_tag(t) for t in sorted(r.ap_add)]
 
     gh_ms = issue.get("milestone")
     ap_ms, ms_tags = _card_milestones(card, prev.get("milestone"), gh_ms)
@@ -228,11 +228,11 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
     desired_ms_tag = f"{MS_PREFIX}{new_ms}" if new_ms else None
     stale = _stale_milestone_tags(ms_tags, prev.get("milestone"), new_ms) - ({desired_ms_tag} - {None})
     if stale or (desired_ms_tag and desired_ms_tag not in ms_tags):
-        for tag in sorted(stale):
-            tag_ops.append(agileplace.op_tag(tag, add=False))
+        tags_to_remove |= stale
         if desired_ms_tag and desired_ms_tag not in ms_tags:
-            tag_ops.append(agileplace.op_tag(desired_ms_tag, add=True))
+            tag_ops.append(agileplace.op_tag(desired_ms_tag))
 
+    tag_ops += agileplace.ops_tag_remove(card.get("tags") or [], tags_to_remove)
     if tag_ops:
         queue(card, tag_ops, "tags/milestone")
     if gh_add_safe or gh_remove_safe or r.ap_add or r.ap_remove or new_ms != gh_ms or tag_ops:
@@ -317,17 +317,27 @@ def main() -> None:
     state = load_state(target, str(cfg["board_id"])) if online else {"issues": {}}
     issues_state = state.setdefault("issues", {})
 
-    # Projects v2: tri-state. A configured-but-FAILED read must not silently fall back and mass-move lanes.
+    # Projects v2: tri-state. A configured-but-FAILED read must not silently fall back and mass-move
+    # lanes -- and neither may a technically-successful read that yields zero recognized statuses
+    # despite the Project actually having issue-linked items (misspelled GH_PROJECT_STATUS_FIELD, or a
+    # gh output-shape change): that is the same mass-move reached through a different door (issue #5).
     if ghproject.configured(cfg):
         pit, raw_items = ghproject.items_and_raw(cfg)
-        project_read_failed = pit is None
+        call_failed = pit is None
         project_items = pit or {}
     else:
-        project_read_failed, project_items, raw_items = False, {}, []
+        call_failed, project_items, raw_items = False, {}, []
     project_status = {u: v["status"] for u, v in project_items.items() if v.get("status")}
+    zero_status_despite_items = (ghproject.configured(cfg) and not call_failed
+                                  and bool(project_items) and not project_status)
+    project_read_failed = call_failed or zero_status_despite_items
     field_meta = ghproject.field_meta(cfg) if (ghproject.configured(cfg) and not project_read_failed) else None
     move_lanes = not project_read_failed
-    if project_read_failed:
+    if zero_status_despite_items:
+        print(f"WARN  Projects v2 has {len(project_items)} issue item(s) but none carry a recognized "
+              f"'{cfg['gh_project']['status_field']}' Status -- check GH_PROJECT_STATUS_FIELD; "
+              f"leaving lanes untouched this run")
+    elif project_read_failed:
         print("WARN  Projects v2 read FAILED -- leaving lanes untouched this run (Status is the source of truth)")
     elif ghproject.configured(cfg):
         print(f"projects v2: {len(project_status)} items carry Status{'; dates enabled' if field_meta else ''}")
@@ -366,16 +376,19 @@ def main() -> None:
         if card_for(issue):
             continue
         key = title_key(issue["title"]) or str(issue["number"])
-        stage = resolve_issue_stage(issue, project_status)
-        lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
+        stage = resolve_issue_stage(issue, project_status)  # informational only when the read failed
+        lane = None
+        if not project_read_failed:
+            lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
         created = agileplace.create_card(cfg, apply, issue_card_title(issue), key, issue["url"],
                                          lane["id"] if lane else None)
         if apply and created.get("id"):
             card_by_url[issue["url"]] = created
             if key:
                 card_by_cid[key] = created
-        print(f"{'made ' if apply else 'DRY  '} card [{key}] stage={stage}"
-              f"{' lane=' + agileplace.lane_title(lane) if lane else ''}")
+        lane_note = (f" lane={agileplace.lane_title(lane)}" if lane
+                     else " lane=deferred (Projects v2 read failed)" if project_read_failed else "")
+        print(f"{'made ' if apply else 'DRY  '} card [{key}] stage={stage}{lane_note}")
 
     # 2) per issue: base reset if card changed; lane; metadata; dates
     for issue in issues:

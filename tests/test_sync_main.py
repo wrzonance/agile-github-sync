@@ -83,15 +83,15 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     cards = [card] if existing_cards is _UNSET else list(existing_cards)
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))
     patch_card_mock = stack.enter_context(patch("agileplace.patch_card"))
-    create_card_mock = stack.enter_context(patch("agileplace.create_card", return_value={"id": "NEW1"}))
+    create_card_mock = stack.enter_context(patch("agileplace.create_card", return_value={}))
     return stack, run_mock, patch_card_mock, create_card_mock
 
 
 def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_issues_state=None,
-                    open_pr_return=_UNSET, lanes_return=(), card=None, existing_cards=_UNSET):
+                   open_pr_return=_UNSET, lanes_return=(), card=None, existing_cards=_UNSET):
     """seed_issues_state pre-populates the on-disk state file's issues[ISSUE_URL] before main() runs --
     used to simulate a kind that previously read real values (see ghproject.unmatched_date_kinds's
-    known_kinds gate)."""
+    known_kinds gate). existing_cards is forwarded to _mock_io (see there)."""
     cfg = _cfg(tmp_path)
     state_file = tmp_path / ".sync-state.json"
     if seed_issues_state is not None:
@@ -158,7 +158,7 @@ def test_no_warn_and_no_skip_on_first_rollout_with_no_known_date_history(tmp_pat
     raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}, "unrelated": "x"}]
     parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
                           "start": None, "target": None}}
-    state, run_mock, patch_card_mock, _ = _run_main_once(tmp_path, (parsed, raw_items), _field_meta())
+    state, run_mock, _, _ = _run_main_once(tmp_path, (parsed, raw_items), _field_meta())
 
     out = capsys.readouterr().out
     assert "WARN  Projects v2" not in out
@@ -295,3 +295,100 @@ def test_ensure_card_creation_uses_stage_unaffected_by_open_pr_read_failure(tmp_
     assert "stage=In review lane=In review" in out
     create_card_mock.assert_called_once()
     assert create_card_mock.call_args.args[-1] == "L2"  # created straight into the In review lane
+
+
+# --- issue #5: fail-closed gate widened to zero-recognized-statuses-despite-items, and extended to
+# gate new-card lane assignment (not just existing-card lane moves) -------------------------------
+
+def _zero_status_inputs():
+    """A technically-successful item-list read: the Project has one issue-linked item (item_id/number
+    populated) but no candidate key for the configured Status field resolved to a value -- the
+    misspelled-GH_PROJECT_STATUS_FIELD / gh output-shape-drift signature this issue targets. project_status
+    ends up {} even though project_items is non-empty."""
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": None, "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL, "number": 1}, "unrelated": "x"}]
+    return parsed, raw_items
+
+
+def test_zero_recognized_statuses_treated_as_failed_read(tmp_path, capsys):
+    _, _, patch_card_mock, create_card_mock = _run_main_once(
+        tmp_path, _zero_status_inputs(), field_meta_return=None)
+
+    out = capsys.readouterr().out
+    assert ("WARN  Projects v2 has 1 issue item(s) but none carry a recognized 'Status' Status -- "
+            "check GH_PROJECT_STATUS_FIELD") in out
+    patch_card_mock.assert_not_called()         # no lane-move (or any) op reached the existing card
+    create_card_mock.assert_not_called()        # card already existed -- nothing created this run
+
+
+def test_new_card_gets_no_lane_when_statuses_unrecognized(tmp_path, capsys):
+    _, _, _, create_card_mock = _run_main_once(
+        tmp_path, _zero_status_inputs(), field_meta_return=None, existing_cards=[])
+
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.args[-1] is None, (
+        "new card must be created laneless when the Project read yields zero recognized statuses")
+
+
+def test_new_card_gets_no_lane_when_project_read_outright_fails(tmp_path, capsys):
+    _, _, _, create_card_mock = _run_main_once(
+        tmp_path, (None, None), field_meta_return=None, existing_cards=[])
+
+    out = capsys.readouterr().out
+    assert "WARN  Projects v2 read FAILED -- leaving lanes untouched this run (Status is the source of truth)" in out, (
+        "the outright-failure WARN string must be printed byte-for-byte on the (None, None) call-failed path")
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.args[-1] is None, (
+        "new card must be created laneless when the Project item-list call fails outright")
+
+
+def test_zero_issue_linked_items_does_not_trip_zero_status_warn(tmp_path, capsys):
+    """False-positive guard: a Project whose configured board legitimately has zero issue-linked items
+    (every row is a draft/PR, so project_items == {}) must NOT be mistaken for the
+    zero-recognized-statuses failure mode -- that WARN, and the fail-closed lane gating that goes with
+    it, exist only for a NON-empty item set with no recognized Status. An empty item set must leave
+    move_lanes True (lane resolution still attempted for new cards)."""
+    raw_items = [{"id": "PVTI_9", "content": {}}]  # draft item: no linked issue/PR at all
+    parsed: dict = {}  # ghproject.items_and_raw resolved zero issue-linked items -- not a failure
+    fake_lane = {"id": "L1", "title": "Planning"}
+
+    with patch("agileplace.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+        _, _, _, create_card_mock = _run_main_once(
+            tmp_path, (parsed, raw_items), field_meta_return=None, existing_cards=[])
+
+    out = capsys.readouterr().out
+    assert "WARN  Projects v2 has" not in out, "zero issue-linked items must never trip the zero-status WARN"
+    assert "WARN  Projects v2 read FAILED" not in out
+    resolve_mock.assert_called_once()          # lane resolution was attempted -- move_lanes stayed True
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.args[-1] == "L1", (
+        "new card must get a real lane when the Project legitimately has zero issue-linked items")
+
+
+def test_new_card_lane_resolution_is_never_called_when_project_read_failed(tmp_path, capsys):
+    """Pins the `if not project_read_failed:` gate directly on the new-card path, rather than relying
+    on agileplace.board_layout being mocked to []. resolve_lane_for_stage is mocked to return a REAL
+    lane -- if the gate were ever dropped (or turned into 'call it, then null the result'), this would
+    fail even though board_layout is empty, unlike a test that only asserts the final lane_id."""
+    fake_lane = {"id": "L1", "title": "Planning"}
+    with patch("agileplace.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+        _, _, _, create_card_mock = _run_main_once(
+            tmp_path, _zero_status_inputs(), field_meta_return=None, existing_cards=[])
+
+    resolve_mock.assert_not_called()
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.args[-1] is None, (
+        "new card must be created laneless -- resolve_lane_for_stage must not even be consulted")
+
+
+def test_existing_card_lane_resolution_is_never_called_when_project_read_failed(tmp_path, capsys):
+    """Analogous pin for the existing-card loop's `if move_lanes:` gate: resolve_lane_for_stage is
+    mocked to return a REAL lane, so a dropped/weakened gate would surface as a call that this test
+    catches, unlike asserting patch_card_mock alone (which empty `lanes` already satisfies for free)."""
+    fake_lane = {"id": "L1", "title": "Planning"}
+    with patch("agileplace.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+        _, _, patch_card_mock, _ = _run_main_once(
+            tmp_path, _zero_status_inputs(), field_meta_return=None)
+
+    resolve_mock.assert_not_called()
+    patch_card_mock.assert_not_called()

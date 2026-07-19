@@ -49,15 +49,23 @@ def _field_key_seen(item: dict, name: str, *alts: str) -> bool:
     return any(key in item for key in _field_candidates(name, *alts))
 
 
+_NON_ISSUE_CONTENT_TYPES = frozenset({"PullRequest", "DraftIssue"})
+
+
 def parse_items(items: list, status_field: str = "Status", start_field: str = "Start",
                 target_field: str = "Target") -> dict[str, dict]:
     """Map issue URL -> {item_id, number, status, start, target} from `gh project item-list` JSON.
-    Skips non-issue content (draft items / PRs without a URL are simply absent)."""
+    Skips non-issue content: draft items carry no URL at all, but Pull Requests DO -- `gh project
+    item-list` populates content.url for a linked PR just like it does for an Issue, so a PR row
+    must be excluded explicitly by content.type rather than assumed absent by URL alone. A row
+    whose content.type key is missing entirely is treated as an Issue (some fixtures/gh output
+    paths never populate it), so only a content.type explicitly naming a non-issue kind is
+    excluded."""
     result = {}
     for it in items:
         content = it.get("content") or {}
         url = content.get("url")
-        if not url:
+        if not url or content.get("type") in _NON_ISSUE_CONTENT_TYPES:
             continue
         result[url] = {
             "item_id": it.get("id"),
