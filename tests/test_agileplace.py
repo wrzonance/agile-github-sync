@@ -48,6 +48,21 @@ def test_list_cards_honors_server_page_size_clamp_and_uses_contiguous_offsets():
     assert all(call.kwargs["params"]["limit"] == 200 for call in api_mock.call_args_list)
 
 
+def test_list_cards_retains_clamped_limit_when_later_metadata_omits_it():
+    pages = [
+        {"cards": [{"id": str(i)} for i in range(25)],
+         "pageMeta": {"limit": 25}},
+        {"cards": [{"id": str(i)} for i in range(25, 50)], "pageMeta": {}},
+        {"cards": [{"id": str(i)} for i in range(50, 60)], "pageMeta": {}},
+    ]
+
+    with patch("agileplace.api", side_effect=pages) as api_mock:
+        cards = list_cards(CFG)
+
+    assert [card["id"] for card in cards] == [str(i) for i in range(60)]
+    assert [call.kwargs["params"]["offset"] for call in api_mock.call_args_list] == [0, 25, 50]
+
+
 def test_list_cards_stops_at_sane_total_records_even_when_final_page_is_full():
     pages = [
         {"cards": [{"id": str(i)} for i in range(25)],
@@ -77,6 +92,65 @@ def test_list_cards_ignores_total_records_smaller_than_cards_already_received():
     assert [call.kwargs["params"]["offset"] for call in api_mock.call_args_list] == [0, 25]
 
 
+def test_list_cards_invalidates_conflicting_total_instead_of_stopping_early():
+    pages = [
+        {"cards": [{"id": str(i)} for i in range(25)],
+         "pageMeta": {"limit": 25, "totalRecords": 100}},
+        {"cards": [{"id": str(i)} for i in range(25, 50)],
+         "pageMeta": {"limit": 25, "totalRecords": 50}},
+        {"cards": [{"id": str(i)} for i in range(50, 60)],
+         "pageMeta": {"limit": 25}},
+    ]
+
+    with patch("agileplace.api", side_effect=pages) as api_mock:
+        cards = list_cards(CFG)
+
+    assert len(cards) == 60
+    assert [call.kwargs["params"]["offset"] for call in api_mock.call_args_list] == [0, 25, 50]
+
+
+def test_list_cards_invalidates_retained_total_once_received_cards_exceed_it():
+    pages = [
+        {"cards": [{"id": str(i)} for i in range(25)],
+         "pageMeta": {"limit": 25, "totalRecords": 40}},
+        {"cards": [{"id": str(i)} for i in range(25, 50)],
+         "pageMeta": {"limit": 25}},
+        {"cards": [{"id": str(i)} for i in range(50, 60)],
+         "pageMeta": {"limit": 25}},
+    ]
+
+    with patch("agileplace.api", side_effect=pages) as api_mock:
+        cards = list_cards(CFG)
+
+    assert len(cards) == 60
+    assert [call.kwargs["params"]["offset"] for call in api_mock.call_args_list] == [0, 25, 50]
+
+
+def test_list_cards_fails_loud_on_empty_page_before_retained_total():
+    pages = [
+        {"cards": [{"id": str(i)} for i in range(25)],
+         "pageMeta": {"limit": 25, "totalRecords": 100}},
+        {"cards": [], "pageMeta": {"limit": 25, "totalRecords": 100}},
+    ]
+
+    with patch("agileplace.api", side_effect=pages):
+        with pytest.raises(SystemExit, match=r"ended at 25 before totalRecords 100"):
+            list_cards(CFG)
+
+
+def test_list_cards_fails_loud_on_short_page_before_retained_total():
+    pages = [
+        {"cards": [{"id": str(i)} for i in range(25)],
+         "pageMeta": {"limit": 25, "totalRecords": 100}},
+        {"cards": [{"id": str(i)} for i in range(25, 35)],
+         "pageMeta": {"limit": 25, "totalRecords": 100}},
+    ]
+
+    with patch("agileplace.api", side_effect=pages):
+        with pytest.raises(SystemExit, match=r"ended at 35 before totalRecords 100"):
+            list_cards(CFG)
+
+
 def test_list_cards_fails_loud_when_hostile_page_meta_never_terminates():
     hostile_page = {
         "cards": [{"id": "same-card"}],
@@ -86,7 +160,7 @@ def test_list_cards_fails_loud_when_hostile_page_meta_never_terminates():
     with (
         patch("agileplace.MAX_CARD_PAGE_REQUESTS", 3),
         patch("agileplace.api", return_value=hostile_page) as api_mock,
-        pytest.raises(SystemExit, match="pagination exceeded.*3 requests"),
+        pytest.raises(SystemExit, match=r"pagination exceeded.*3 requests"),
     ):
         list_cards(CFG)
 

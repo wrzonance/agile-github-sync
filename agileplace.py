@@ -140,6 +140,14 @@ def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dic
 
 # --- cards (reads) --------------------------------------------------------
 
+def _raise_if_before_total(offset: int, expected_total: int | None) -> None:
+    if expected_total is not None and offset < expected_total:
+        raise SystemExit(
+            f"AgilePlace card pagination ended at {offset} before totalRecords {expected_total} "
+            "-- refusing to continue with a partial board snapshot"
+        )
+
+
 def list_cards(cfg: dict) -> list[dict]:
     """All cards on the board, paginated to exhaustion. Requests childCards so connection reconciliation
     can see the existing hierarchy (VALIDATE LIVE: `include` param name + payload shape).
@@ -148,6 +156,9 @@ def list_cards(cfg: dict) -> list[dict]:
     returned and short-page detection uses the response's effective limit. Pagination fails closed
     after MAX_CARD_PAGE_REQUESTS rather than returning a partial card set to reconciliation."""
     cards, offset, limit = [], 0, 200
+    effective_limit = None
+    retained_total = None
+    trust_total = True
     for _request_count in range(1, MAX_CARD_PAGE_REQUESTS + 1):
         data = api(cfg, "GET", "card", params={"board": cfg["board_id"], "limit": limit,
                                                 "offset": offset, "include": "childCards"})
@@ -155,16 +166,33 @@ def list_cards(cfg: dict) -> list[dict]:
         cards.extend(page)
         page_meta = data.get("pageMeta")
         page_meta = page_meta if isinstance(page_meta, dict) else {}
-        total = page_meta.get("totalRecords")
         next_offset = offset + len(page)
-        sane_total = (total if isinstance(total, int) and not isinstance(total, bool)
-                      and total >= next_offset else None)
+        total_before_page = retained_total
+        if trust_total and retained_total is not None and retained_total < next_offset:
+            retained_total = None
+            trust_total = False
+        if trust_total and "totalRecords" in page_meta:
+            total = page_meta["totalRecords"]
+            valid_total = (isinstance(total, int) and not isinstance(total, bool)
+                           and total >= next_offset)
+            if valid_total and retained_total is None:
+                retained_total = total
+            elif retained_total is not None and (not valid_total or total != retained_total):
+                retained_total = None
+                trust_total = False
         server_limit = page_meta.get("limit")
-        effective_limit = (min(limit, server_limit)
-                           if isinstance(server_limit, int) and not isinstance(server_limit, bool)
-                           and server_limit > 0 else limit)
+        if (isinstance(server_limit, int) and not isinstance(server_limit, bool)
+                and server_limit > 0):
+            effective_limit = min(limit, server_limit)
         offset = next_offset
-        if not page or (sane_total is not None and offset >= sane_total) or len(page) < effective_limit:
+        if not page:
+            expected_total = total_before_page if total_before_page is not None else retained_total
+            _raise_if_before_total(offset, expected_total)
+            return cards
+        if retained_total is not None and offset >= retained_total:
+            return cards
+        if effective_limit is not None and len(page) < effective_limit:
+            _raise_if_before_total(offset, retained_total)
             return cards
     raise SystemExit(
         f"AgilePlace card pagination exceeded defensive limit of {MAX_CARD_PAGE_REQUESTS} requests "
