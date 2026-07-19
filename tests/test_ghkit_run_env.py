@@ -282,7 +282,10 @@ def test_blocked_by_map_uses_hostname_and_resolved_owner_name(monkeypatch):
 
     def fake_run(cfg, args, **k):
         captured_args["args"] = args
-        return Mock(stdout="3\n")
+        return Mock(stdout=json.dumps([[{
+            "number": 3,
+            "repository_url": "https://ghes.acme.internal/api/v3/repos/acme/widgets",
+        }]]))
 
     monkeypatch.setattr(ghkit, "run", fake_run)
     result = ghkit.blocked_by_map({}, [10])
@@ -291,6 +294,7 @@ def test_blocked_by_map_uses_hostname_and_resolved_owner_name(monkeypatch):
     args = captured_args["args"]
     assert "--hostname" in args and args[args.index("--hostname") + 1] == "ghes.acme.internal"
     assert "repos/acme/widgets/issues/10/dependencies/blocked_by" in args
+    assert "--paginate" in args and "--slurp" in args
 
 
 def test_blocked_by_map_short_circuits_on_no_repo_context(monkeypatch):

@@ -8,6 +8,16 @@ project's current size of about 50 issues. Do the `[first-live-run]` items on a 
 and repo before pointing the tool at anything real. The `[scale]` items only start to bite well
 past roughly 1,000 records.
 
+## Implemented defensive contracts
+
+- Blocked-by dependencies are qualified by repository before their issue numbers enter the sync.
+  `ghkit.blocked_by_map` accepts either an embedded `repository` identity or the documented
+  `repository_url`, retains only blockers from the configured target repository, and warns with the
+  foreign `owner/repo#number` when it skips a cross-repo blocker. A missing or malformed identity
+  makes the whole blocked-by snapshot incomplete so existing card blocked states remain untouched.
+  This is defensive parsing; whether GitHub permits creating cross-repository dependency edges has
+  not been verified against the live API.
+
 ## [first-live-run]: confirm the exact API behavior (see also API-VALIDATION.md)
 
 - Card connections. `connect_children` and `disconnect_children` POST/DELETE `card/connections`
