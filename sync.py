@@ -94,6 +94,26 @@ def resolve_issue_stage(issue: dict, project_status: dict) -> str:
     return (normalize_status(raw) if raw else None) or issue_stage(issue)
 
 
+def _protect_open_pr_stage(stage: str, current_lane_id: str, lanes: list, milestone: str,
+                            stage_map: dict | None, *, open_pr_read_failed: bool,
+                            has_explicit_status: bool) -> str:
+    """Guard against demoting a card OUT of 'In review' purely because this run's open-PR read
+    failed (ghkit.open_pr_issue_numbers returned None): a transient GitHub API hiccup must never
+    silently walk a card backward on a vanished signal. Pure, no I/O, never mutates its arguments.
+
+    Freezes the stage at 'In review' only when ALL of: the read failed, there's no explicit Projects
+    v2 Status for this issue (a human's explicit call always wins over the guard), the computed stage
+    isn't already 'In review', and the card's current lane is already one of the acceptable lanes for
+    'In review' (i.e. the card is already sitting in review -- this never PROMOTES a card into review,
+    it only freezes one already there). Every other case passes `stage` through unchanged."""
+    if not open_pr_read_failed or has_explicit_status or stage == "In review":
+        return stage
+    _, acceptable = agileplace.resolve_lane_for_stage(lanes, "In review", milestone, stage_map)
+    if str(current_lane_id) in {str(i) for i in acceptable}:
+        return "In review"
+    return stage
+
+
 def _label_set(labels, ignore: frozenset) -> set[str]:
     return {l for l in labels if l not in ignore and not l.startswith(MS_PREFIX)}
 

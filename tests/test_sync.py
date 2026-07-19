@@ -2,6 +2,7 @@
 
 These need no network or gh -- they pin the invariants the live sync depends on. Run: pytest -q
 """
+import json
 import sys
 from pathlib import Path
 
@@ -12,7 +13,8 @@ from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
 from stages import (blocked_reason, epic_key_for_task, issue_stage,  # noqa: E402
                     lane_matches_stage, normalize_status, title_key)
-from sync import MS_PREFIX, _card_milestones, _stale_milestone_tags, issue_card_title, resolve_issue_stage  # noqa: E402
+from sync import (MS_PREFIX, _card_milestones, _protect_open_pr_stage,  # noqa: E402
+                  _stale_milestone_tags, issue_card_title, resolve_issue_stage)
 
 
 def _board_lanes():
@@ -392,6 +394,50 @@ def test_resolve_issue_stage_prefers_project_status_then_labels():
     assert resolve_issue_stage(issue, {"u1": "In review"}) == "In review"   # Project Status wins
     assert resolve_issue_stage(issue, {}) == "In progress"                   # fallback: label
     assert resolve_issue_stage({"url": "u2", "state": "OPEN", "labels": []}, {}) == "Backlog"
+
+
+def test_protect_open_pr_stage_passthrough_when_read_succeeded():
+    L = _board_lanes()
+    # current lane is "ur" (In review), which would otherwise get frozen -- but the read succeeded,
+    # so the guard must never engage: the stage argument comes back unchanged.
+    assert _protect_open_pr_stage("In progress", "ur", L, "", None,
+                                   open_pr_read_failed=False, has_explicit_status=False) == "In progress"
+
+
+def test_protect_open_pr_stage_passthrough_when_status_explicit():
+    L = _board_lanes()
+    # read failed and the lane already matches "In review", but a human set Projects v2 Status
+    # explicitly this run -- that always wins over the guard.
+    assert _protect_open_pr_stage("In progress", "ur", L, "", None,
+                                   open_pr_read_failed=True, has_explicit_status=True) == "In progress"
+
+
+def test_protect_open_pr_stage_noop_when_stage_already_in_review():
+    L = _board_lanes()
+    assert _protect_open_pr_stage("In review", "ur", L, "", None,
+                                   open_pr_read_failed=True, has_explicit_status=False) == "In review"
+
+
+def test_protect_open_pr_stage_passthrough_when_lane_not_already_in_review():
+    L = _board_lanes()
+    # current lane "dn" (Doing Now / In progress) is not in the "In review" acceptable set --
+    # the guard must never PROMOTE a card into In review, only freeze one already there.
+    assert _protect_open_pr_stage("In progress", "dn", L, "", None,
+                                   open_pr_read_failed=True, has_explicit_status=False) == "In progress"
+
+
+def test_protect_open_pr_stage_freezes_in_review_lane_on_read_failure():
+    L = _board_lanes()
+    assert _protect_open_pr_stage("In progress", "ur", L, "", None,
+                                   open_pr_read_failed=True, has_explicit_status=False) == "In review"
+
+
+def test_protect_open_pr_stage_is_pure_no_mutation():
+    L = _board_lanes()
+    lanes_before = json.loads(json.dumps(L))
+    _protect_open_pr_stage("In progress", "ur", L, "", None,
+                            open_pr_read_failed=True, has_explicit_status=False)
+    assert L == lanes_before
 
 
 def test_blocked_reason():
