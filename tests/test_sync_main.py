@@ -147,7 +147,7 @@ def test_no_warn_and_no_skip_on_first_rollout_with_no_known_date_history(tmp_pat
     raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}, "unrelated": "x"}]
     parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
                           "start": None, "target": None}}
-    state, run_mock, patch_card_mock, _ = _run_main_once(tmp_path, (parsed, raw_items), _field_meta())
+    state, run_mock, _, _ = _run_main_once(tmp_path, (parsed, raw_items), _field_meta())
 
     out = capsys.readouterr().out
     assert "WARN  Projects v2" not in out
@@ -184,7 +184,7 @@ def _zero_status_inputs():
 
 
 def test_zero_recognized_statuses_treated_as_failed_read(tmp_path, capsys):
-    state, run_mock, patch_card_mock, create_card_mock = _run_main_once(
+    _, _, patch_card_mock, create_card_mock = _run_main_once(
         tmp_path, _zero_status_inputs(), field_meta_return=None)
 
     out = capsys.readouterr().out
