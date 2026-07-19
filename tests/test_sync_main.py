@@ -55,25 +55,34 @@ def _cfg(tmp_path):
     }
 
 
-def _mock_io(card, items_and_raw_return, field_meta_return):
+_UNSET = object()
+
+
+def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSET, lanes_return=()):
     """ExitStack of patches covering every I/O boundary main() touches for one run. Returns the stack
-    plus the ghkit.run and agileplace.patch_card mocks (for call-site assertions)."""
+    plus the ghkit.run and agileplace.patch_card mocks (for call-site assertions).
+
+    open_pr_return defaults to set() (successful, empty read); pass None explicitly to simulate a
+    failed ghkit.open_pr_issue_numbers() read (issue #14). lanes_return defaults to no lanes (the
+    lane-move step is then always a no-op); pass real lane dicts to exercise lane-move decisions."""
     stack = ExitStack()
     stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
     stack.enter_context(patch("ghkit.list_issues", return_value=[_issue()]))
-    stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
+    stack.enter_context(patch("ghkit.open_pr_issue_numbers",
+                              return_value=set() if open_pr_return is _UNSET else open_pr_return))
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
     run_mock = stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
     stack.enter_context(patch("ghproject.configured", return_value=True))
     stack.enter_context(patch("ghproject.items_and_raw", return_value=items_and_raw_return))
     stack.enter_context(patch("ghproject.field_meta", return_value=field_meta_return))
-    stack.enter_context(patch("agileplace.board_layout", return_value=[]))
+    stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes_return)))
     stack.enter_context(patch("agileplace.list_cards", return_value=[card]))
     patch_card_mock = stack.enter_context(patch("agileplace.patch_card"))
     return stack, run_mock, patch_card_mock
 
 
-def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_issues_state=None):
+def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_issues_state=None,
+                    open_pr_return=_UNSET, lanes_return=(), card=None):
     """seed_issues_state pre-populates the on-disk state file's issues[ISSUE_URL] before main() runs --
     used to simulate a kind that previously read real values (see ghproject.unmatched_date_kinds's
     known_kinds gate)."""
@@ -82,8 +91,9 @@ def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_
     if seed_issues_state is not None:
         state_file.write_text(json.dumps({"schema": 2, "target": "acme/repo", "board": "42",
                                           "issues": {ISSUE_URL: seed_issues_state}}), encoding="utf-8")
-    card = _card()
-    stack, run_mock, patch_card_mock = _mock_io(card, items_and_raw_return, field_meta_return)
+    card = card if card is not None else _card()
+    stack, run_mock, patch_card_mock = _mock_io(card, items_and_raw_return, field_meta_return,
+                                                 open_pr_return=open_pr_return, lanes_return=lanes_return)
     with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
@@ -162,3 +172,30 @@ def test_no_warn_and_no_crash_when_field_meta_is_none(tmp_path, capsys):
     run_mock.assert_not_called()
     patch_card_mock.assert_not_called()
     assert "start" not in state["issues"][ISSUE_URL]
+
+
+# --- open-PR read failure (issue #14): degrade, don't crash or fabricate a positive signal ---------
+
+_LANES = [
+    {"id": "L1", "title": "Backlog", "cardStatus": "notStarted"},
+    {"id": "L2", "title": "In review", "cardStatus": "started"},
+]
+
+
+def test_open_pr_read_failure_does_not_crash_and_leaves_has_open_pr_false(tmp_path, capsys):
+    # _issue() has no labels/assignees, so issue_stage() only reaches "In review" via has_open_pr.
+    # If open_pr_issue_numbers() returning None ever got treated as "every issue's PR is open" (or
+    # crashed on `number in None`), the card would be moved out of its current Backlog lane.
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": None, "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    card = _card()
+    card["laneId"] = "L1"
+
+    state, run_mock, patch_card_mock = _run_main_once(
+        tmp_path, (parsed, raw_items), field_meta_return=None,
+        open_pr_return=None, lanes_return=_LANES, card=card)
+
+    out = capsys.readouterr().out
+    assert "open-PR read FAILED" in out
+    patch_card_mock.assert_not_called()  # card stayed in its Backlog lane, never moved to "In review"
+    assert state["issues"][ISSUE_URL]["card_id"] == "C1"  # run completed and persisted state normally

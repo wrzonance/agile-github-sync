@@ -273,8 +273,12 @@ def main() -> None:
 
     issues = ghkit.list_issues(cfg)
     open_pr = ghkit.open_pr_issue_numbers(cfg)
-    for i in issues:
-        i["has_open_pr"] = i["number"] in open_pr
+    open_pr_read_failed = open_pr is None
+    if open_pr_read_failed:
+        print("WARN  open-PR read FAILED -- leaving PR-derived 'In review' stages untouched this run")
+    else:
+        for i in issues:
+            i["has_open_pr"] = i["number"] in open_pr
     by_number = {i["number"]: i for i in issues}
     by_key = {title_key(i["title"]) or str(i["number"]): i for i in issues}
     epics = [i for i in issues if "type:epic" in i["labels"]]
