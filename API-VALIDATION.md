@@ -15,7 +15,7 @@ the live GitHub APIs on 2026-07-18.
 | Add tag | `{op:"add", path:"/tags/-", value:<str>}` | Node client: "appends the tag... existing tags are preserved" |
 | Move lane | `{op:"replace", path:"/laneId", value:<laneId>}` | Node client (lane change via `card.update`) |
 | Optimistic concurrency | `x-lk-resource-version` header (card `version`) | Core-concepts doc: version via the `x-lk-resource-version` header or a `/version` test op |
-| List cards | `GET /io/card?limit&offset`, read `pageMeta.totalRecords` | Docs: `pageMeta:{totalRecords,offset,limit,startRow,endRow}`; the code paginates to exhaustion |
+| List cards | `GET /io/card?limit&offset`, read `pageMeta.totalRecords` and `pageMeta.limit` | Docs: `pageMeta:{totalRecords,offset,limit,startRow,endRow}`; the code advances by the returned card count, honors a server-clamped limit, and fails closed at a defensive request ceiling |
 | Board layout | `GET /io/board/{id}` returns `lanes[]` with `id/title/cardStatus/parentLaneId/isDefaultDropLane` | io v2 board schema; `cardStatus` has only three values (`notStarted`, `started`, `finished`), so In progress and In review are told apart by lane title |
 | Tags representation | array of plain strings | the add op's `value` is a string; `card_tags()` reads strings |
 
