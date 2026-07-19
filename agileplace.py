@@ -4,6 +4,9 @@ Auth: AGILEPLACE_TOKEN (Bearer). Tokens have NO scopes -- never commit or log on
 issues by external-link URL (customId fallback). Lanes resolve to a stage by TITLE among LEAF lanes,
 failing closed when ambiguous. ALL mutations to one card are batched into a single versioned JSON-Patch
 (op-builders + patch_card) so the resource version can't go stale mid-run (optimistic concurrency).
+patch_card never sends an unversioned PATCH: a card missing `version` is refetched once first
+(_card_with_version); if the refetch is also version-less, the PATCH is skipped and a WARN is
+printed instead of risking a silent stale overwrite (issue #8).
 API shapes marked "VALIDATE LIVE" follow current Planview docs but are confirmed at first live run.
 """
 from __future__ import annotations
@@ -146,6 +149,23 @@ def list_cards(cfg: dict) -> list[dict]:
     return cards
 
 
+def get_card(cfg: dict, card_id: str) -> dict:
+    """Fetch a single card fresh (GET /io/card/{id}). VALIDATE LIVE: docs don't confirm whether the
+    single-card GET wraps the payload as {"card": {...}} (like list_cards' {"cards": [...]}) or
+    returns the card fields flat -- defensively unwrap either shape so callers always get a flat
+    card dict. See API-VALIDATION.md.
+    A 200 response can still carry {"card": null} (e.g. a race with a delete), or even a bare
+    top-level null -- both must fail loud here rather than handing callers a bare None that
+    crashes downstream with an opaque AttributeError (see issue #8 review finding)."""
+    data = api(cfg, "GET", f"card/{card_id}")
+    if data is None:
+        raise SystemExit(f"AgilePlace GET card/{card_id} returned no card data (got null)")
+    card = data.get("card", data)
+    if card is None:
+        raise SystemExit(f"AgilePlace GET card/{card_id} returned no card data (got {{'card': null}})")
+    return card
+
+
 def card_external_urls(card: dict) -> list[str]:
     links = card.get("externalLinks") or ([card["externalLink"]] if card.get("externalLink") else [])
     return [(l or {}).get("url", "") for l in links if l]
@@ -204,16 +224,51 @@ def ops_blocked(blocked: bool, reason: str | None) -> list[dict]:
 
 def patch_card(cfg: dict, apply: bool, card: dict, ops: list[dict], note: str = "") -> dict:
     """Send ONE JSON Patch for a card with its resource version (optimistic concurrency). Batching every
-    op for a card into a single PATCH is what prevents the version going stale between writes."""
+    op for a card into a single PATCH is what prevents the version going stale between writes.
+    Never sends a PATCH without a resource version: if `card` arrives without one, a fresh refetch is
+    attempted first; if that refetch also has no version, the PATCH is skipped entirely (see
+    _card_with_version)."""
     if not ops:
         return {}
-    return mutate(cfg, apply, "PATCH", f"card/{card['id']}", body=ops,
-                  headers=_version_headers(card), note=note or f"patch card {card['id']} ({len(ops)} ops)")
+    versioned = _card_with_version(cfg, apply, card)
+    if versioned is None:
+        return {}
+    return mutate(cfg, apply, "PATCH", f"card/{versioned['id']}", body=ops,
+                  headers=_version_headers(versioned), note=note or f"patch card {versioned['id']} ({len(ops)} ops)")
+
+
+def _has_usable_version(version) -> bool:
+    """A resource version is usable when it is present AND non-empty. `None` is the ordinary
+    "missing" case; a present-but-empty/whitespace string counts as missing too (some card payloads
+    can carry version="" ), since either would otherwise produce a blank x-lk-resource-version header.
+    An int/str 0 is a legitimate version number and must stay usable."""
+    if version is None:
+        return False
+    if isinstance(version, str) and version.strip() == "":
+        return False
+    return True
+
+
+def _card_with_version(cfg: dict, apply: bool, card: dict) -> dict | None:
+    """Guarantee `card` carries a usable resource version before patch_card is allowed to PATCH it.
+    Returns `card` unchanged (zero network calls) when a usable version is already present or apply
+    is False -- dry runs never trigger a refetch. Otherwise refetches the card fresh: on success
+    returns a NEW dict (never mutates `card`) with the refetched version filled in; if the refetch
+    also has no usable version, returns None and prints one WARN naming the card so the caller can
+    refuse to send an unversioned PATCH instead of risking a silent stale overwrite."""
+    if _has_usable_version(card.get("version")) or not apply:
+        return card
+    fresh = get_card(cfg, card["id"])
+    if not _has_usable_version(fresh.get("version")):
+        print(f"WARN  card {card['id']} has no resource version after refetch -- "
+              f"refusing unversioned PATCH, skipping ops")
+        return None
+    return {**card, "version": fresh["version"]}
 
 
 def _version_headers(card: dict) -> dict:
     v = card.get("version")
-    return {"x-lk-resource-version": str(v)} if v is not None else {}
+    return {"x-lk-resource-version": str(v)} if _has_usable_version(v) else {}
 
 
 def create_card(cfg: dict, apply: bool, title: str, custom_id: str, external_url: str, lane_id: str | None):

@@ -37,6 +37,23 @@ at `github.com/LeanKit/leankit-node-client`.
    `x-lk-resource-version` header produces a clean conflict (HTTP 409 or 428) rather than a silent
    stale overwrite. The current code sends the version but does not retry on conflict, so a
    conflict surfaces as a failed run; add refetch-and-recompute if that proves noisy.
+4. Single-card GET response shape (`agileplace.get_card`, `GET /io/card/{id}`, issue #8). Docs
+   don't confirm whether this wraps the payload as `{"card": {...}}` (like `list_cards`' `cards`
+   array) or returns the card fields flat. `get_card` defensively unwraps either shape
+   (`data.get("card", data)`), so both possibilities are handled without a human needing to pick
+   one first. Confirm on a live card and, if it's always one shape, the unwrap can be simplified.
+5. Card create response `version` field presence (`agileplace.create_card`, `POST /io/card`, issue
+   #8). Docs don't confirm whether the create response includes a resource `version` for the new
+   card. If it does, a card created earlier in the same run could skip `_card_with_version`'s
+   refetch and PATCH immediately with the version from the create response. Until confirmed,
+   `patch_card` treats every version-less card the same way regardless of origin: refetch via
+   `get_card`, and refuse the PATCH with a WARN if the refetch is also version-less (see `[live-check]`
+   item 4 and `_card_with_version` in `agileplace.py`). Confirming this field would let a follow-up
+   pass the create response's version straight through instead of paying for an extra refetch.
+
+Together, items 4 and 5 are what closes the fail-open optimistic-concurrency gap from issue #8
+(`patch_card` no longer ever sends an unversioned PATCH) pending those two live confirmations --
+today the code fails closed (refetch-or-skip-with-WARN) rather than assuming either shape.
 
 ## Model 2 additions, also [live-check]
 
