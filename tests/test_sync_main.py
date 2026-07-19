@@ -236,3 +236,32 @@ def test_zero_issue_linked_items_does_not_trip_zero_status_warn(tmp_path, capsys
     create_card_mock.assert_called_once()
     assert create_card_mock.call_args.args[-1] == "L1", (
         "new card must get a real lane when the Project legitimately has zero issue-linked items")
+
+
+def test_new_card_lane_resolution_is_never_called_when_project_read_failed(tmp_path, capsys):
+    """Pins the `if not project_read_failed:` gate directly on the new-card path, rather than relying
+    on agileplace.board_layout being mocked to []. resolve_lane_for_stage is mocked to return a REAL
+    lane -- if the gate were ever dropped (or turned into 'call it, then null the result'), this would
+    fail even though board_layout is empty, unlike a test that only asserts the final lane_id."""
+    fake_lane = {"id": "L1", "title": "Planning"}
+    with patch("agileplace.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+        _, _, _, create_card_mock = _run_main_once(
+            tmp_path, _zero_status_inputs(), field_meta_return=None, existing_cards=[])
+
+    resolve_mock.assert_not_called()
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.args[-1] is None, (
+        "new card must be created laneless -- resolve_lane_for_stage must not even be consulted")
+
+
+def test_existing_card_lane_resolution_is_never_called_when_project_read_failed(tmp_path, capsys):
+    """Analogous pin for the existing-card loop's `if move_lanes:` gate: resolve_lane_for_stage is
+    mocked to return a REAL lane, so a dropped/weakened gate would surface as a call that this test
+    catches, unlike asserting patch_card_mock alone (which empty `lanes` already satisfies for free)."""
+    fake_lane = {"id": "L1", "title": "Planning"}
+    with patch("agileplace.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+        _, _, patch_card_mock, _ = _run_main_once(
+            tmp_path, _zero_status_inputs(), field_meta_return=None)
+
+    resolve_mock.assert_not_called()
+    patch_card_mock.assert_not_called()

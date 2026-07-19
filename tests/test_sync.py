@@ -379,6 +379,31 @@ def test_parse_items_maps_by_url_and_skips_urlless():
                    "start": "2026-01-02", "target": "2026-01-09"}
 
 
+def test_parse_items_skips_pull_request_content_despite_having_a_url():
+    # issue #5 follow-up: gh project item-list populates content.url for linked Pull Requests too,
+    # not just Issues -- a PR row must never be counted as an issue-linked item (it would otherwise
+    # pollute project_status / zero_status_despite_items and the lane-move mass-move gate).
+    items = [
+        {"id": "PVTI_1",
+         "content": {"type": "Issue", "number": 5, "url": "https://github.com/o/r/issues/5"},
+         "status": "In progress"},
+        {"id": "PVTI_2",
+         "content": {"type": "PullRequest", "number": 9, "url": "https://github.com/o/r/pull/9"},
+         "status": "In review"},
+    ]
+    parsed = parse_items(items, "Status", "Start", "Target")
+    assert set(parsed) == {"https://github.com/o/r/issues/5"}
+
+
+def test_parse_items_treats_missing_content_type_as_an_issue():
+    # backward compatibility: some fixtures/gh output paths never populate content.type at all -- an
+    # absent type must not be mistaken for a PullRequest/DraftIssue exclusion.
+    items = [{"id": "PVTI_1", "content": {"url": "https://github.com/o/r/issues/5"},
+             "status": "In progress"}]
+    parsed = parse_items(items, "Status", "Start", "Target")
+    assert set(parsed) == {"https://github.com/o/r/issues/5"}
+
+
 # --- Model 2 per-issue helpers -------------------------------------------
 
 def test_issue_card_title_strips_key_prefix():
