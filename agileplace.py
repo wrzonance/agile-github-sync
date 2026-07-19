@@ -23,6 +23,7 @@ from stages import STAGE_CARD_STATUS, lane_matches_stage
 
 REQUEST_TIMEOUT = 30      # seconds per request
 MAX_RETRY_SLEEP = 60      # cap a hostile/large Retry-After so a run can't stall for hours
+MAX_CARD_PAGE_REQUESTS = 1_000  # absolute guard against absent/hostile pagination metadata
 
 
 def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None, _attempt=0):
@@ -141,18 +142,34 @@ def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dic
 
 def list_cards(cfg: dict) -> list[dict]:
     """All cards on the board, paginated to exhaustion. Requests childCards so connection reconciliation
-    can see the existing hierarchy (VALIDATE LIVE: `include` param name + payload shape)."""
+    can see the existing hierarchy (VALIDATE LIVE: `include` param name + payload shape).
+
+    AgilePlace may clamp the requested page size, so offsets advance by the number of cards actually
+    returned and short-page detection uses the response's effective limit. Pagination fails closed
+    after MAX_CARD_PAGE_REQUESTS rather than returning a partial card set to reconciliation."""
     cards, offset, limit = [], 0, 200
-    while True:
+    for _request_count in range(1, MAX_CARD_PAGE_REQUESTS + 1):
         data = api(cfg, "GET", "card", params={"board": cfg["board_id"], "limit": limit,
                                                 "offset": offset, "include": "childCards"})
         page = data.get("cards", [])
         cards.extend(page)
-        total = (data.get("pageMeta") or {}).get("totalRecords")
-        offset += limit
-        if not page or (total is not None and offset >= total) or len(page) < limit:
-            break
-    return cards
+        page_meta = data.get("pageMeta")
+        page_meta = page_meta if isinstance(page_meta, dict) else {}
+        total = page_meta.get("totalRecords")
+        next_offset = offset + len(page)
+        sane_total = (total if isinstance(total, int) and not isinstance(total, bool)
+                      and total >= next_offset else None)
+        server_limit = page_meta.get("limit")
+        effective_limit = (min(limit, server_limit)
+                           if isinstance(server_limit, int) and not isinstance(server_limit, bool)
+                           and server_limit > 0 else limit)
+        offset = next_offset
+        if not page or (sane_total is not None and offset >= sane_total) or len(page) < effective_limit:
+            return cards
+    raise SystemExit(
+        f"AgilePlace card pagination exceeded defensive limit of {MAX_CARD_PAGE_REQUESTS} requests "
+        f"after receiving {len(cards)} cards -- refusing to continue with a partial board snapshot"
+    )
 
 
 def get_card(cfg: dict, card_id: str) -> dict:
