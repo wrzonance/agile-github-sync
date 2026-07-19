@@ -17,7 +17,9 @@ from agileplace import (  # noqa: E402
     create_card,
     disconnect_children,
     get_card,
+    op_tag,
     ops_blocked,
+    ops_tag_remove,
     patch_card,
 )
 
@@ -69,6 +71,59 @@ def test_ops_blocked_unblock_forces_empty_reason():
     write "" to /blockReason -- never the self-contradictory isBlocked=False + non-empty reason."""
     ops = ops_blocked(False, "some reason")
     assert ops[1] == {"op": "add", "path": "/blockReason", "value": ""}
+
+
+# --- op_tag / ops_tag_remove: index-based tag removal (issue #3) ----------
+
+def test_op_tag_returns_append_op_unchanged():
+    """Tag add is a non-goal for issue #3 -- op_tag must still return the same /tags/- append op."""
+    assert op_tag("foo") == {"op": "add", "path": "/tags/-", "value": "foo"}
+
+
+def test_ops_tag_remove_two_of_four_tags_produces_descending_index_ops():
+    """The issue's explicit acceptance scenario: removing 2 tags from a 4-tag card produces the
+    correct index-based remove ops, in descending index order within the single batch."""
+    current_tags = ["alpha", "beta", "gamma", "delta"]
+    ops = ops_tag_remove(current_tags, {"beta", "delta"})
+    assert ops == [
+        {"op": "remove", "path": "/tags/3"},
+        {"op": "remove", "path": "/tags/1"},
+    ]
+
+
+def test_ops_tag_remove_raises_on_tag_not_present():
+    """A name in tags_to_remove that isn't in current_tags signals a real upstream bug -- fail loud
+    rather than silently no-op (which would let sync.py persist state claiming the tag is gone)."""
+    with pytest.raises(ValueError, match="missing-tag"):
+        ops_tag_remove(["alpha", "beta"], {"missing-tag"})
+
+
+def test_ops_tag_remove_duplicate_tag_value_removes_every_occurrence():
+    """A tag value appearing at multiple indices yields one remove op per occurrence, all still
+    sorted descending together -- not just the first match."""
+    current_tags = ["dup", "alpha", "dup", "beta"]
+    ops = ops_tag_remove(current_tags, {"dup"})
+    assert ops == [
+        {"op": "remove", "path": "/tags/2"},
+        {"op": "remove", "path": "/tags/0"},
+    ]
+
+
+def test_ops_tag_remove_empty_set_returns_empty_list():
+    assert ops_tag_remove(["alpha", "beta"], set()) == []
+
+
+def test_ops_tag_remove_interleaved_with_op_tag_add_stays_consistent():
+    """Covers the issue's 'interleaved add+remove in one patch stays consistent' criterion: adds
+    and removes combined into one ops list, with the remove ops still strictly descending among
+    themselves and never carrying a `value` member."""
+    current_tags = ["alpha", "beta", "gamma", "delta"]
+    tag_ops = [op_tag("new-tag")] + ops_tag_remove(current_tags, {"beta", "delta"})
+    assert tag_ops[0] == {"op": "add", "path": "/tags/-", "value": "new-tag"}
+    remove_ops = tag_ops[1:]
+    assert all(op["op"] == "remove" and "value" not in op for op in remove_ops)
+    indices = [int(op["path"].rsplit("/", 1)[1]) for op in remove_ops]
+    assert indices == sorted(indices, reverse=True)
 
 
 def test_card_is_blocked_reads_nested_blockedstatus_isblocked():

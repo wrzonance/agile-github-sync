@@ -25,11 +25,19 @@ at `github.com/LeanKit/leankit-node-client`.
 
 ## [live-check]: verify once with real keys, on a disposable card
 
-1. Tag removal. The code sends `{op:"remove", path:"/tags", value:<str>}`, LeanKit's documented
-   value-based removal (standard RFC-6902 remove is index-based). Confirm an add-then-remove
-   round-trip clears the tag. If the call is rejected, the fallback is removal by index
-   (`/tags/{i}`) computed from the card's current tags, applying removals in descending index
-   order within one patch.
+1. Tag removal. The code now sends standard RFC-6902 index-based removal --
+   `{op:"remove", path:"/tags/{i}"}`, no `value` member -- with indices computed from the card's
+   current tags and removals applied in descending index order within one patch (`agileplace.py`'s
+   `ops_tag_remove`), so an earlier removal in the batch never shifts a later op's target index.
+   This replaces an earlier, undocumented value-based form (`{op:"remove", path:"/tags",
+   value:<str>}`) that this doc previously (and incorrectly) attributed to "LeanKit's documented
+   value-based removal" -- no public LeanKit docs describe that shape. The evidence for the
+   index-based form: the Node client README documents tag *add* only (silent on remove); RFC 6902
+   itself says "the 'remove' operation removes the value at the target location" with no `value`
+   member; and source-index quotes of the update-card doc show index-based tag ops (e.g. `/tags/1`).
+   Still needs a human-run live check: confirm an add-then-remove round-trip on a disposable card
+   actually clears the tag (not attempted here -- no live AgilePlace credentials available/authorized
+   for this task).
 2. External link add (init `04`). `{op:"add", path:"/externalLink", value:{label,url}}` on a card
    that has no link yet. Confirm `add` succeeds on the absent property (the code uses `add`, not
    `replace`).

@@ -194,6 +194,13 @@ def _card(tags=None):
     return {"id": "c1", "tags": tags or []}
 
 
+def _removed_tag_names(card_tags, ops):
+    """Map index-based /tags/{i} remove ops (no `value` member -- issue #3) back to the tag names
+    they targeted, using the card's original (pre-removal) tags list for the index lookup."""
+    return {card_tags[int(op["path"].rsplit("/", 1)[1])]
+            for op in ops if op.get("op") == "remove" and op["path"].startswith("/tags/")}
+
+
 def test_sync_metadata_skips_unsafe_labels_and_fixes_merge_base(monkeypatch, capsys):
     """base has an unsafe label GitHub still carries ('x,y'); AgilePlace introduces a new unsafe
     label ('a,b'). Reconcile would want to add 'a,b' on GitHub and remove 'x,y' from GitHub -- both
@@ -302,8 +309,8 @@ def test_sync_metadata_no_gh_rewrite_on_verified_repro_stale_leftover(monkeypatc
                   lambda c, ops, note: queued.append((c, ops, note)))
 
     assert ms_calls == []  # gh_ms already correct -> no GitHub rewrite
-    milestone_removes = [op["value"] for entry in queued for op in entry[1]
-                          if op.get("op") == "remove" and op.get("path") == "/tags"]
+    card_tags = card["tags"]
+    milestone_removes = {name for entry in queued for name in _removed_tag_names(card_tags, entry[1])}
     assert "milestone:0.1.0" not in milestone_removes  # stale leftover preserved this pass
     assert issues_state[issue["url"]]["milestone"] == "0.2.0"
 
@@ -328,8 +335,8 @@ def test_sync_metadata_no_gh_rewrite_on_coexisting_ambiguous_upgrade_tag(monkeyp
                   lambda c, ops, note: queued.append((c, ops, note)))
 
     assert ms_calls == []  # gh_ms already correct -> no GitHub rewrite
-    milestone_removes = [op["value"] for entry in queued for op in entry[1]
-                          if op.get("op") == "remove" and op.get("path") == "/tags"]
+    card_tags = card["tags"]
+    milestone_removes = {name for entry in queued for name in _removed_tag_names(card_tags, entry[1])}
     assert "milestone:9.9" not in milestone_removes  # ambiguous 'other' tag preserved, not destroyed
     assert issues_state[issue["url"]]["milestone"] == "0.2.0"
 
@@ -379,8 +386,7 @@ def test_sync_metadata_cleared_milestone_not_resurrected_next_pass(monkeypatch, 
                   lambda c, ops, note: queued.append(ops))
     assert ms_calls == []  # gh already cleared -> no rewrite this pass either
     assert issues_state[issue["url"]]["milestone"] is None  # clear persisted as the new base
-    removed = {op["value"] for ops in queued for op in ops
-               if op.get("op") == "remove" and op.get("path") == "/tags"}
+    removed = {name for ops in queued for name in _removed_tag_names(card_tags, ops)}
     # BOTH milestone tags must be queued for removal -- the leftover is not spared once new_ms is None
     assert removed == set(card_tags)
     card_after = {"id": card["id"], "tags": [t for t in card_tags if t not in removed]}

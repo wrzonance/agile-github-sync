@@ -203,9 +203,41 @@ def op_lane(lane_id: str) -> dict:
     return {"op": "replace", "path": "/laneId", "value": lane_id}
 
 
-def op_tag(tag: str, *, add: bool) -> dict:
-    # add appends at /tags/-; remove is by value at /tags (VALIDATE LIVE).
-    return {"op": "add", "path": "/tags/-", "value": tag} if add else {"op": "remove", "path": "/tags", "value": tag}
+def op_tag(tag: str) -> dict:
+    # Appends at /tags/- -- confirmed against the LeanKit Node client docs. Tag removal is a
+    # separate op-builder (see ops_tag_remove below): RFC 6902's remove op has no `value` member,
+    # so removal must be index-based, not value-based (issue #3).
+    return {"op": "add", "path": "/tags/-", "value": tag}
+
+
+def ops_tag_remove(current_tags: list[str], tags_to_remove: set[str]) -> list[dict]:
+    """Build RFC-6902 index-based remove ops -- {"op": "remove", "path": f"/tags/{i}"}, no `value`
+    member -- for every index in `current_tags` whose value is in `tags_to_remove`, sorted in
+    DESCENDING index order so multiple removals stay correct when batched into one PATCH: an
+    earlier removal must never shift a later op's target index (RFC 6902 applies ops sequentially
+    to the evolving document). `current_tags` MUST be the card's raw, unfiltered tags array
+    (card.get("tags") or []) -- NOT card_tags()'s deduped set -- or computed indices won't match
+    what AgilePlace actually holds. A tag value appearing at multiple indices yields one remove op
+    per occurrence, not just the first.
+
+    Every name in `tags_to_remove` is expected to be present in `current_tags` -- callers derive
+    their removal names from card_tags(card) against this same card snapshot, so a miss here
+    signals a real bug upstream, not a benign no-op: raises ValueError naming every unmatched tag
+    (plus current_tags, for context) rather than silently letting the caller believe the tag is
+    gone when it never was. Returns [] for an empty tags_to_remove.
+
+    Issue #3: replaces the undocumented value-based {"op":"remove","path":"/tags","value":tag} --
+    no public LeanKit docs describe it, and RFC 6902's remove op has no `value` member.
+    """
+    if not tags_to_remove:
+        return []
+    missing = tags_to_remove - set(current_tags)
+    if missing:
+        raise ValueError(
+            f"ops_tag_remove: tag(s) {sorted(missing)} not found in current_tags {current_tags!r}"
+        )
+    indices = [i for i, t in enumerate(current_tags) if t in tags_to_remove]
+    return [{"op": "remove", "path": f"/tags/{i}"} for i in sorted(indices, reverse=True)]
 
 
 def op_planned_date(field: str, date: str | None) -> dict:
