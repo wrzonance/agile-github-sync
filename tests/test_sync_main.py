@@ -207,6 +207,32 @@ def test_new_card_gets_no_lane_when_project_read_outright_fails(tmp_path, capsys
     _, _, _, create_card_mock = _run_main_once(
         tmp_path, (None, None), field_meta_return=None, existing_cards=[])
 
+    out = capsys.readouterr().out
+    assert "WARN  Projects v2 read FAILED -- leaving lanes untouched this run (Status is the source of truth)" in out, (
+        "the outright-failure WARN string must be printed byte-for-byte on the (None, None) call-failed path")
     create_card_mock.assert_called_once()
     assert create_card_mock.call_args.args[-1] is None, (
         "new card must be created laneless when the Project item-list call fails outright")
+
+
+def test_zero_issue_linked_items_does_not_trip_zero_status_warn(tmp_path, capsys):
+    """False-positive guard: a Project whose configured board legitimately has zero issue-linked items
+    (every row is a draft/PR, so project_items == {}) must NOT be mistaken for the
+    zero-recognized-statuses failure mode -- that WARN, and the fail-closed lane gating that goes with
+    it, exist only for a NON-empty item set with no recognized Status. An empty item set must leave
+    move_lanes True (lane resolution still attempted for new cards)."""
+    raw_items = [{"id": "PVTI_9", "content": {}}]  # draft item: no linked issue/PR at all
+    parsed: dict = {}  # ghproject.items_and_raw resolved zero issue-linked items -- not a failure
+    fake_lane = {"id": "L1", "title": "Planning"}
+
+    with patch("agileplace.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+        _, _, _, create_card_mock = _run_main_once(
+            tmp_path, (parsed, raw_items), field_meta_return=None, existing_cards=[])
+
+    out = capsys.readouterr().out
+    assert "WARN  Projects v2 has" not in out, "zero issue-linked items must never trip the zero-status WARN"
+    assert "WARN  Projects v2 read FAILED" not in out
+    resolve_mock.assert_called_once()          # lane resolution was attempted -- move_lanes stayed True
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.args[-1] == "L1", (
+        "new card must get a real lane when the Project legitimately has zero issue-linked items")
