@@ -16,9 +16,19 @@ STATE_FILE = REPO_DIR / ".sync-state.json"
 # are filtered from BOTH sides and the base before reconciling. Extend via .env LABEL_SYNC_IGNORE.
 DEFAULT_IGNORE = ("agent:in-progress", "agent:in-review", "agent:ready")
 
+# Never let .env inject a gh repo/host override (issue #15): ghkit.py strips these from every gh
+# subprocess's env regardless of source, and this blocklist keeps them from ever reaching
+# os.environ.setdefault in the first place. Declared independently of ghkit.py's own
+# _GH_ENV_OVERRIDE_KEYS -- only two call sites total, and the two modules have no existing import
+# relationship in either direction; sharing one constant for two string literals would be
+# over-abstraction for no benefit.
+_ENV_LOADER_BLOCKLIST = frozenset({"GH_REPO", "GH_HOST"})
+
 
 def load_env_file() -> None:
-    """Load KEY=VALUE lines from ./.env; real environment variables win over it."""
+    """Load KEY=VALUE lines from ./.env; real environment variables win over it. GH_REPO/GH_HOST are
+    never set this way (see _ENV_LOADER_BLOCKLIST) -- they must never silently retarget which repo/host
+    every gh call operates against."""
     if not ENV_FILE.exists():
         return
     for line in ENV_FILE.read_text().splitlines():
@@ -26,9 +36,10 @@ def load_env_file() -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
+        key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if value:
-            os.environ.setdefault(key.strip(), value)
+        if value and key not in _ENV_LOADER_BLOCKLIST:
+            os.environ.setdefault(key, value)
 
 
 def parse_stage_lane_map(raw: str) -> dict[str, list[str]]:

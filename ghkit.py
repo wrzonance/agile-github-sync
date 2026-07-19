@@ -8,14 +8,52 @@ NOTE: the GitHub calls here are validated at first live run (no remote is reacha
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+from typing import NamedTuple
+from urllib.parse import urlparse
 
 
 GH_TIMEOUT = 60  # seconds; bounds every gh call so a stall can't hang the sync
 
+# Per `gh help environment`: "GH_REPO: specify the GitHub repository ... for commands that otherwise
+# operate on a local repository" -- exactly `repo view`/`issue list`/`issue edit`, the commands this
+# module relies on to resolve from TARGET_REPO_PATH's own remote. GH_HOST similarly overrides which
+# host every gh call targets. A stale value in the calling shell/scheduler environment (or injected by
+# config.load_env_file()) would silently retarget every read AND write onto the wrong repo/host while
+# every internal consistency check still passes -- so both are stripped from the subprocess env on
+# every call, regardless of source. GH_TOKEN is deliberately NOT stripped: it is how auth flows and
+# scrubbing it would break every call outright.
+_GH_ENV_OVERRIDE_KEYS = frozenset({"GH_REPO", "GH_HOST"})
 
-def run(cfg: dict, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
+
+class RepoContext(NamedTuple):
+    """The repo + host every gh api/graphql call must agree on, resolved fresh (never cached, never
+    env-sourced) from one `gh repo view` call so name and host can never disagree with each other."""
+    owner: str
+    name: str
+    host: str
+
+
+def _gh_subprocess_env(host: str | None = None) -> dict[str, str]:
+    """A full copy of the current environment with GH_REPO/GH_HOST removed -- never mutates
+    os.environ itself. Everything else (PATH, HOME, GH_TOKEN, GH_CONFIG_DIR, locale vars) passes
+    through unchanged; a deny-list copy keeps the blast radius small and auditable versus an
+    allow-list's risk of silently dropping something `gh` actually needs.
+
+    `host`, when given, re-adds GH_HOST as the *freshly resolved* target host (never the ambient
+    value we just scrubbed). This is for host-selectorless commands like `gh project`, which -- unlike
+    `gh api`/`repo`/`issue` -- have no --hostname flag and don't infer the host from the target clone's
+    cwd, so GH_HOST is their only host selector."""
+    env = {k: v for k, v in os.environ.items() if k not in _GH_ENV_OVERRIDE_KEYS}
+    if host:
+        env["GH_HOST"] = host
+    return env
+
+
+def run(cfg: dict, args: list[str], *, check: bool = True,
+        host: str | None = None) -> subprocess.CompletedProcess:
     target = cfg.get("target_repo_path")
     if target is None:
         raise SystemExit("TARGET_REPO_PATH is not set (.env or environment) -- cannot target the repo")
@@ -23,7 +61,8 @@ def run(cfg: dict, args: list[str], *, check: bool = True) -> subprocess.Complet
         raise SystemExit(f"TARGET_REPO_PATH does not exist or is not a directory: {target}")
     try:
         return subprocess.run(["gh", *args], cwd=str(target), check=check, capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", timeout=GH_TIMEOUT)
+                              text=True, encoding="utf-8", errors="replace", timeout=GH_TIMEOUT,
+                              env=_gh_subprocess_env(host))
     except subprocess.CalledProcessError as exc:
         # Surface gh's own message; captured-and-discarded stderr makes every failure opaque.
         if exc.stderr:
@@ -36,6 +75,32 @@ def repo_name(cfg: dict) -> str | None:
         return run(cfg, ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]).stdout.strip() or None
     except (subprocess.CalledProcessError, FileNotFoundError, SystemExit):
         return None
+
+
+def _repo_context(cfg: dict) -> RepoContext | None:
+    """Resolve owner/name/host from one `gh repo view` call so all three can never disagree.
+    None on any failure (gh error, timeout, malformed/missing JSON fields, unparseable host) --
+    callers already treat repo_name()-returning-None as "don't proceed"; this just extends that same
+    fail-closed contract to also cover host resolution."""
+    try:
+        out = run(cfg, ["repo", "view", "--json", "nameWithOwner,url"])
+        data = json.loads(out.stdout)
+        name_with_owner = data["nameWithOwner"]
+        url = data["url"]
+        # urlparse() raises ValueError on malformed URLs (e.g. an unmatched IPv6
+        # bracket) -- keep it inside the try so that too follows the fail-closed path.
+        host = urlparse(url).hostname if isinstance(url, str) else None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError,
+            SystemExit, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+    if not isinstance(name_with_owner, str) or name_with_owner.count("/") != 1:
+        return None
+    owner, name = name_with_owner.split("/", 1)
+    if not owner or not name:
+        return None
+    if not host:
+        return None
+    return RepoContext(owner=owner, name=name, host=host)
 
 
 def list_issues(cfg: dict) -> list[dict]:
@@ -68,15 +133,16 @@ def open_pr_issue_numbers(cfg: dict) -> set[int]:
     returns empty on any error so the label-based signal still drives 'In review'."""
     q = """query($owner:String!,$name:String!){repository(owner:$owner,name:$name){
       pullRequests(states:OPEN,first:100){nodes{closingIssuesReferences(first:20){nodes{number}}}}}}"""
-    repo = repo_name(cfg)
-    if not repo or "/" not in repo:
+    ctx = _repo_context(cfg)
+    if ctx is None:
         return set()
-    owner, name = repo.split("/", 1)
     try:
-        out = run(cfg, ["api", "graphql", "-f", f"query={q}", "-F", f"owner={owner}", "-F", f"name={name}"])
+        out = run(cfg, ["api", "graphql", "--hostname", ctx.host, "-f", f"query={q}",
+                        "-f", f"owner={ctx.owner}", "-f", f"name={ctx.name}"])
         prs = json.loads(out.stdout)["data"]["repository"]["pullRequests"]["nodes"]
         return {n["number"] for pr in prs for n in pr["closingIssuesReferences"]["nodes"]}
-    except (subprocess.CalledProcessError, KeyError, TypeError, json.JSONDecodeError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, KeyError, TypeError,
+            json.JSONDecodeError):
         return set()
 
 
@@ -85,15 +151,14 @@ def sub_issue_numbers(cfg: dict, epic_number: int) -> list[int] | None:
     the epic genuinely has no native children); **None on query failure** (GHES/permission/schema), so
     the caller can warn before falling back to the title convention rather than silently mis-associating.
     """
-    repo = repo_name(cfg)
-    if not repo or "/" not in repo:
+    ctx = _repo_context(cfg)
+    if ctx is None:
         return None
-    owner, name = repo.split("/", 1)
     q = """query($owner:String!,$name:String!,$num:Int!){repository(owner:$owner,name:$name){
       issue(number:$num){subIssues(first:100){nodes{number}}}}}"""
     try:
-        out = run(cfg, ["api", "graphql", "-f", f"query={q}", "-F", f"owner={owner}",
-                        "-F", f"name={name}", "-F", f"num={epic_number}"])
+        out = run(cfg, ["api", "graphql", "--hostname", ctx.host, "-f", f"query={q}",
+                        "-f", f"owner={ctx.owner}", "-f", f"name={ctx.name}", "-F", f"num={epic_number}"])
         nodes = json.loads(out.stdout)["data"]["repository"]["issue"]["subIssues"]["nodes"]
         return [n["number"] for n in nodes]
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, KeyError, TypeError, json.JSONDecodeError):
@@ -104,13 +169,14 @@ def blocked_by_map(cfg: dict, issue_numbers: list[int]) -> dict[int, list[int]] 
     """{issue_number: [blocker_issue_numbers]} from GitHub's issue-dependencies REST API. **None** when
     the endpoint isn't available (dependencies then skipped entirely). VALIDATE LIVE: the exact
     endpoint/shape (issue dependencies are a newer GitHub feature)."""
-    repo = repo_name(cfg)
-    if not repo:
+    ctx = _repo_context(cfg)
+    if ctx is None:
         return None
     result: dict[int, list[int]] = {}
     for n in issue_numbers:
         try:
-            out = run(cfg, ["api", f"repos/{repo}/issues/{n}/dependencies/blocked_by",
+            out = run(cfg, ["api", "--hostname", ctx.host,
+                            f"repos/{ctx.owner}/{ctx.name}/issues/{n}/dependencies/blocked_by",
                             "--paginate", "--jq", ".[].number"], check=True)
             nums = [int(x) for x in out.stdout.split() if x.strip().isdigit()]
             if nums:
