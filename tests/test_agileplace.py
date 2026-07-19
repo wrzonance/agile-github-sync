@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agileplace import (  # noqa: E402
     _card_with_version,
+    _has_index_tag_remove,
     card_block_reason,
     card_is_blocked,
     connect_children,
@@ -316,6 +317,56 @@ def test_card_with_version_never_mutates_input_card():
     with patch("agileplace.api", return_value={"card": {"id": "42"}}):
         _card_with_version(CFG, True, miss_card)
     assert miss_card == before
+
+
+# --- refetch must not pair stale tag indices with a fresh version (issue #3) --
+
+def test_has_index_tag_remove_detects_only_index_based_removes():
+    """Index-based /tags/{i} removes are position-dependent; appends (/tags/-) and value-carrying
+    ops are not -- only the former must gate the stale-snapshot guard."""
+    assert _has_index_tag_remove([{"op": "remove", "path": "/tags/0"}])
+    assert _has_index_tag_remove(
+        [{"op": "add", "path": "/tags/-", "value": "x"}, {"op": "remove", "path": "/tags/2"}]
+    )
+    assert not _has_index_tag_remove([{"op": "add", "path": "/tags/-", "value": "x"}])
+    assert not _has_index_tag_remove([{"op": "replace", "path": "/laneId", "value": "L1"}])
+    assert not _has_index_tag_remove([])
+
+
+def test_card_with_version_refetch_allows_index_removes_when_tags_unchanged():
+    """Version-less card + index tag-remove ops: if the refetched tags MATCH the snapshot, the
+    indices are still valid -> proceed with the fresh version."""
+    card = {"id": "7", "tags": ["a", "b", "c"]}
+    ops = [{"op": "remove", "path": "/tags/1"}]
+    refetched = {"card": {"id": "7", "tags": ["a", "b", "c"], "version": 5}}
+    with patch("agileplace.api", return_value=refetched):
+        result = _card_with_version(CFG, True, card, ops)
+    assert result == {"id": "7", "tags": ["a", "b", "c"], "version": 5}
+
+
+def test_card_with_version_refetch_refuses_index_removes_when_tags_shifted(capsys):
+    """Version-less card + index tag-remove ops: if the tags array shifted since the snapshot, the
+    fresh version would let a stale /tags/{i} delete the WRONG tag -> fail closed with a WARN."""
+    card = {"id": "7", "tags": ["a", "b", "c"]}
+    ops = [{"op": "remove", "path": "/tags/2"}]  # index 2 was "c" in the snapshot
+    refetched = {"card": {"id": "7", "tags": ["z", "a", "b", "c"], "version": 5}}  # inserted at front
+    with patch("agileplace.api", return_value=refetched):
+        result = _card_with_version(CFG, True, card, ops)
+    assert result is None
+    warn_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warn_lines) == 1
+    assert "7" in warn_lines[0]
+
+
+def test_card_with_version_refetch_allows_shifted_tags_when_no_index_remove():
+    """Tags shifting is only dangerous for index-based removes; an append-only batch stays safe even
+    if the tags array changed between snapshot and refetch."""
+    card = {"id": "7", "tags": ["a"]}
+    ops = [{"op": "add", "path": "/tags/-", "value": "new"}]
+    refetched = {"card": {"id": "7", "tags": ["a", "b"], "version": 5}}
+    with patch("agileplace.api", return_value=refetched):
+        result = _card_with_version(CFG, True, card, ops)
+    assert result == {"id": "7", "tags": ["a"], "version": 5}
 
 
 def test_patch_card_version_present_is_byte_identical_to_pre_fix_behavior():

@@ -275,11 +275,24 @@ def patch_card(cfg: dict, apply: bool, card: dict, ops: list[dict], note: str = 
     _card_with_version)."""
     if not ops:
         return {}
-    versioned = _card_with_version(cfg, apply, card)
+    versioned = _card_with_version(cfg, apply, card, ops)
     if versioned is None:
         return {}
     return mutate(cfg, apply, "PATCH", f"card/{versioned['id']}", body=ops,
                   headers=_version_headers(versioned), note=note or f"patch card {versioned['id']} ({len(ops)} ops)")
+
+
+def _has_index_tag_remove(ops: list[dict]) -> bool:
+    """True when `ops` contains an index-based tag remove ({"op":"remove","path":"/tags/<i>"}).
+    Such ops (ops_tag_remove) encode positions in a specific tags snapshot, so their correctness
+    depends on the sent resource version still describing that exact array. The append form
+    (/tags/-) and value-carrying ops are position-independent and never match here."""
+    return any(
+        op.get("op") == "remove"
+        and op.get("path", "").startswith("/tags/")
+        and op.get("path") != "/tags/-"
+        for op in ops
+    )
 
 
 def _has_usable_version(version) -> bool:
@@ -294,19 +307,29 @@ def _has_usable_version(version) -> bool:
     return True
 
 
-def _card_with_version(cfg: dict, apply: bool, card: dict) -> dict | None:
+def _card_with_version(cfg: dict, apply: bool, card: dict, ops: list[dict] | None = None) -> dict | None:
     """Guarantee `card` carries a usable resource version before patch_card is allowed to PATCH it.
     Returns `card` unchanged (zero network calls) when a usable version is already present or apply
     is False -- dry runs never trigger a refetch. Otherwise refetches the card fresh: on success
     returns a NEW dict (never mutates `card`) with the refetched version filled in; if the refetch
     also has no usable version, returns None and prints one WARN naming the card so the caller can
-    refuse to send an unversioned PATCH instead of risking a silent stale overwrite."""
+    refuse to send an unversioned PATCH instead of risking a silent stale overwrite.
+
+    The refetch fills in a fresh resource version but keeps `card`'s original tags snapshot. Index-based
+    tag removes (ops_tag_remove) were computed against that snapshot, so pairing them with a version
+    the server may have bumped since would pass optimistic concurrency yet delete the WRONG tag if the
+    tags array shifted meanwhile. When the batch carries such ops AND the refetched tags differ from the
+    snapshot, fail closed: return None with a WARN rather than risk a silent mis-deletion (issue #3)."""
     if _has_usable_version(card.get("version")) or not apply:
         return card
     fresh = get_card(cfg, card["id"])
     if not _has_usable_version(fresh.get("version")):
         print(f"WARN  card {card['id']} has no resource version after refetch -- "
               f"refusing unversioned PATCH, skipping ops")
+        return None
+    if ops and _has_index_tag_remove(ops) and (card.get("tags") or []) != (fresh.get("tags") or []):
+        print(f"WARN  card {card['id']} tags changed between snapshot and version refetch -- "
+              f"refusing PATCH with stale tag indices, skipping ops")
         return None
     return {**card, "version": fresh["version"]}
 
