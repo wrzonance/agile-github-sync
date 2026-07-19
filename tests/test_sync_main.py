@@ -22,6 +22,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import sync  # noqa: E402
@@ -59,7 +61,7 @@ _UNSET = object()
 
 
 def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSET, lanes_return=(),
-             existing_cards=_UNSET):
+             existing_cards=_UNSET, issue_return=_UNSET):
     """ExitStack of patches covering every I/O boundary main() touches for one run. Returns the stack
     plus the ghkit.run, agileplace.patch_card, and agileplace.create_card mocks (for call-site
     assertions).
@@ -68,10 +70,12 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     failed ghkit.open_pr_issue_numbers() read (issue #14). lanes_return defaults to no lanes (the
     lane-move step is then always a no-op); pass real lane dicts to exercise lane-move decisions.
     existing_cards defaults to [card] (the issue already has a matching card); pass [] to force the
-    "ensure a card per issue" creation path instead of the lane-move path."""
+    "ensure a card per issue" creation path instead of the lane-move path. issue_return defaults to
+    _issue(); pass a complete issue dict to exercise different live metadata."""
     stack = ExitStack()
     stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
-    stack.enter_context(patch("ghkit.list_issues", return_value=[_issue()]))
+    issue = _issue() if issue_return is _UNSET else issue_return
+    stack.enter_context(patch("ghkit.list_issues", return_value=[issue]))
     stack.enter_context(patch("ghkit.open_pr_issue_numbers",
                               return_value=set() if open_pr_return is _UNSET else open_pr_return))
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
@@ -107,6 +111,65 @@ def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_
     return json.loads(state_file.read_text(encoding="utf-8")), run_mock, patch_card_mock, create_card_mock
 
 
+# --- state schema and legacy merge-base migration (issue #13) -------------------------------
+
+def test_load_state_refuses_explicit_wrong_schema(tmp_path):
+    state_file = tmp_path / ".sync-state.json"
+    state_file.write_text(json.dumps({
+        "schema": sync.STATE_SCHEMA - 1,
+        "target": "acme/repo",
+        "board": "42",
+        "issues": {},
+    }), encoding="utf-8")
+
+    with patch("sync.STATE_FILE", state_file), pytest.raises(SystemExit) as raised:
+        sync.load_state("acme/repo", "42")
+
+    message = str(raised.value)
+    assert f"uses state schema {sync.STATE_SCHEMA - 1}" in message
+    assert f"requires schema {sync.STATE_SCHEMA}" in message
+    assert "Inspect or delete it, then re-run." in message
+
+
+def test_legacy_state_resets_merge_base_before_relearning_live_metadata(tmp_path):
+    state_file = tmp_path / ".sync-state.json"
+    state_file.write_text(json.dumps({
+        "target": "acme/repo",
+        "board": "42",
+        "issues": {
+            ISSUE_URL: {
+                "labels": ["bug"],
+                "milestone": "1.0",
+                "start": "2026-01-01",
+                "target": "2026-01-09",
+            },
+        },
+    }), encoding="utf-8")
+    issue = {**_issue(), "labels": ["bug"], "milestone": "1.0"}
+    parsed = {ISSUE_URL: {
+        "item_id": "PVTI_1", "number": 1, "status": "In progress",
+        "start": None, "target": None,
+    }}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    stack, run_mock, patch_card_mock, _ = _mock_io(
+        _card(), (parsed, raw_items), field_meta_return=None, issue_return=issue)
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    assert state["schema"] == sync.STATE_SCHEMA
+    assert state["issues"][ISSUE_URL] == {
+        "card_id": "C1", "labels": ["bug"], "milestone": "1.0",
+    }
+    run_mock.assert_not_called()  # live GitHub metadata was retained, never removed
+    patch_card_mock.assert_called_once()
+    ops = patch_card_mock.call_args.args[3]
+    assert all(op["op"] != "remove" for op in ops)
+    assert {op.get("value") for op in ops} == {"bug", "milestone:1.0"}
+
+
 # --- merge-base advance invariant, end-to-end through two real main() runs -----------------------
 
 def test_merge_base_advances_only_after_confirmed_write_across_two_main_runs(tmp_path, capsys):
@@ -139,7 +202,7 @@ def test_unmatched_kinds_warns_and_skips_both_date_kinds(tmp_path, capsys):
                           "start": None, "target": None}}
     state, run_mock, patch_card_mock, _ = _run_main_once(
         tmp_path, (parsed, raw_items), _field_meta(),
-        seed_issues_state={"start": "2026-01-01", "target": "2026-01-09"})
+        seed_issues_state={"card_id": "C1", "start": "2026-01-01", "target": "2026-01-09"})
 
     out = capsys.readouterr().out
     assert "WARN  Projects v2 'start' field resolved but no item ever exposed a matching key" in out

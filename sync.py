@@ -41,6 +41,9 @@ def load_state(target: str, board: str) -> dict:
         raise SystemExit(f"ERROR: {STATE_FILE} is for target {state.get('target')}/board {state.get('board')}, "
                          f"but configured for {target}/board {board}. Move or delete it, then re-run.")
     state.setdefault("schema", STATE_SCHEMA)
+    if state["schema"] != STATE_SCHEMA:
+        raise SystemExit(f"ERROR: {STATE_FILE} uses state schema {state['schema']!r}, but this sync "
+                         f"requires schema {STATE_SCHEMA}. Inspect or delete it, then re-run.")
     state.setdefault("issues", {})
     return state
 
@@ -398,10 +401,8 @@ def main() -> None:
             continue  # freshly dry-run-created (no id yet), or unresolved
         cid = str(card["id"])
         st = issues_state.setdefault(issue["url"], {})
-        if st.get("card_id") is None:
-            st["card_id"] = cid                       # fresh / migrated -> keep any existing base
-        elif st["card_id"] != cid:
-            issues_state[issue["url"]] = {"card_id": cid}  # card was replaced -> reset merge base
+        if st.get("card_id") != cid:
+            issues_state[issue["url"]] = {"card_id": cid}  # fresh/migrated/replaced -> reset merge base
 
         stage = resolve_issue_stage(issue, project_status)
         if move_lanes:
