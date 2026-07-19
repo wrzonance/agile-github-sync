@@ -16,8 +16,11 @@ With `--apply`, each run:
    Projects v2 board (Backlog / Ready / In progress / In review / Done), which is the source of
    truth. Issues that are not on the Project fall back to a stage derived from labels and open PRs.
    Lanes are matched by title among leaf lanes; if a match is ambiguous, the card stays where it
-   is. If reading the Project fails outright, no lanes are changed that run, so the fallback cannot
-   mass-move the board.
+   is. If reading the Project fails outright -- or technically succeeds but yields zero recognized
+   statuses for a Project that does have issue-linked items (e.g. a misconfigured
+   `GH_PROJECT_STATUS_FIELD`) -- no lanes are changed that run, so the fallback cannot mass-move the
+   board. New cards created during such a run are left laneless rather than fallback-laned; a later
+   run lanes them normally once the read succeeds.
 3. Mirrors sub-issues as parent/child card connections, adding and removing links so the card
    hierarchy matches the GitHub graph. LeanKit then rolls child progress and dates up to the parent
    on its own.
