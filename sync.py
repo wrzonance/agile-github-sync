@@ -44,7 +44,11 @@ def load_state(target: str, board: str) -> dict:
     if state["schema"] != STATE_SCHEMA:
         raise SystemExit(f"ERROR: {STATE_FILE} uses state schema {state['schema']!r}, but this sync "
                          f"requires schema {STATE_SCHEMA}. Inspect or delete it, then re-run.")
-    state.setdefault("issues", {})
+    issues = state.setdefault("issues", {})
+    # An entry without a card identity has no trustworthy merge base. Reset it before callers use
+    # even its date-history signals; main() binds the live card id before reconciliation.
+    state["issues"] = {url: entry if entry.get("card_id") is not None else {}
+                       for url, entry in issues.items()}
     return state
 
 
