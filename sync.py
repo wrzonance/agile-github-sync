@@ -89,9 +89,18 @@ def issue_card_title(issue: dict) -> str:
     return t
 
 
+def explicit_stage_status(issue: dict, project_status: dict) -> str | None:
+    """The canonical stage this issue's Projects v2 Status maps to, or None when there's no Status set
+    OR it's a custom option name that doesn't match one of our five stages -- i.e. exactly the case
+    where resolve_issue_stage() has to fall back to label/PR derivation instead of a human's explicit
+    call. Callers must use this (not raw truthiness of project_status[url]) to decide whether an
+    issue's stage actually came from an explicit Status -- a truthy-but-unrecognized raw value (e.g.
+    a custom 'Triage' option) is NOT an explicit canonical call."""
+    return normalize_status(project_status.get(issue["url"]))
+
+
 def resolve_issue_stage(issue: dict, project_status: dict) -> str:
-    raw = project_status.get(issue["url"])
-    return (normalize_status(raw) if raw else None) or issue_stage(issue)
+    return explicit_stage_status(issue, project_status) or issue_stage(issue)
 
 
 def _protect_open_pr_stage(stage: str, current_lane_id: str, lanes: list, milestone: str,
@@ -108,7 +117,7 @@ def _protect_open_pr_stage(stage: str, current_lane_id: str, lanes: list, milest
     it only freezes one already there). Every other case passes `stage` through unchanged."""
     if not open_pr_read_failed or has_explicit_status or stage == "In review":
         return stage
-    _, acceptable = agileplace.resolve_lane_for_stage(lanes, "In review", milestone, stage_map)
+    _, acceptable = agileplace.resolve_lane_for_stage(lanes, "In review", milestone, stage_map, quiet=True)
     if str(current_lane_id) in {str(i) for i in acceptable}:
         return "In review"
     return stage
@@ -382,7 +391,7 @@ def main() -> None:
         stage = resolve_issue_stage(issue, project_status)
         if move_lanes:
             current = str(card.get("laneId") or (card.get("lane") or {}).get("id") or "")
-            has_explicit_status = bool(project_status.get(issue["url"]))
+            has_explicit_status = explicit_stage_status(issue, project_status) is not None
             lane_stage = _protect_open_pr_stage(stage, current, lanes, issue.get("milestone") or "", smap,
                                                  open_pr_read_failed=open_pr_read_failed,
                                                  has_explicit_status=has_explicit_status)

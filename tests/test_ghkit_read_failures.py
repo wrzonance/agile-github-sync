@@ -51,6 +51,22 @@ def test_repo_name_returns_none_on_called_process_error(monkeypatch):
     assert ghkit.repo_name({}) is None
 
 
+def test_repo_name_returns_none_on_file_not_found_error(monkeypatch):
+    def fail(cfg, args, **k):
+        raise FileNotFoundError("gh: command not found")
+
+    monkeypatch.setattr(ghkit, "run", fail)
+    assert ghkit.repo_name({}) is None
+
+
+def test_repo_name_returns_none_on_system_exit(monkeypatch):
+    def fail(cfg, args, **k):
+        raise SystemExit("gh: fatal error")
+
+    monkeypatch.setattr(ghkit, "run", fail)
+    assert ghkit.repo_name({}) is None
+
+
 def test_repo_name_returns_str_on_success(monkeypatch):
     monkeypatch.setattr(ghkit, "run", lambda cfg, args, **k: Mock(stdout="acme/widgets\n"))
     assert ghkit.repo_name({}) == "acme/widgets"
