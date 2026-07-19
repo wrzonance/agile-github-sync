@@ -80,6 +80,15 @@ def test_op_tag_returns_append_op_unchanged():
     assert op_tag("foo") == {"op": "add", "path": "/tags/-", "value": "foo"}
 
 
+def test_op_tag_rejects_add_kwarg():
+    """Pins the invariant that op_tag has no `add` kwarg -- a regression that reintroduces
+    `def op_tag(tag, add=True)` would default every existing call site (sync.py's two call sites,
+    and test_op_tag_returns_append_op_unchanged above) to add=True and stay green, silently
+    resurrecting a path back to the undocumented value-based remove op issue #3 removed."""
+    with pytest.raises(TypeError):
+        op_tag("foo", add=False)
+
+
 def test_ops_tag_remove_two_of_four_tags_produces_descending_index_ops():
     """The issue's explicit acceptance scenario: removing 2 tags from a 4-tag card produces the
     correct index-based remove ops, in descending index order within the single batch."""
