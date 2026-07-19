@@ -156,13 +156,26 @@ def get_card(cfg: dict, card_id: str) -> dict:
     card dict. See API-VALIDATION.md.
     A 200 response can still carry {"card": null} (e.g. a race with a delete), or even a bare
     top-level null -- both must fail loud here rather than handing callers a bare None that
-    crashes downstream with an opaque AttributeError (see issue #8 review finding)."""
+    crashes downstream with an opaque AttributeError (see issue #8 review finding).
+    The exact shape being unconfirmed also means a non-dict, non-null body (a bare list, string,
+    number, or bool) is plausible -- that must fail loud too, rather than reaching `.get()` and
+    raising an opaque AttributeError (see issue #3 review finding)."""
     data = api(cfg, "GET", f"card/{card_id}")
     if data is None:
         raise SystemExit(f"AgilePlace GET card/{card_id} returned no card data (got null)")
+    if not isinstance(data, dict):
+        raise SystemExit(
+            f"AgilePlace GET card/{card_id} returned unexpected JSON type "
+            f"({type(data).__name__}, expected an object)"
+        )
     card = data.get("card", data)
     if card is None:
         raise SystemExit(f"AgilePlace GET card/{card_id} returned no card data (got {{'card': null}})")
+    if not isinstance(card, dict):
+        raise SystemExit(
+            f"AgilePlace GET card/{card_id} returned unexpected card JSON type "
+            f"({type(card).__name__}, expected an object)"
+        )
     return card
 
 

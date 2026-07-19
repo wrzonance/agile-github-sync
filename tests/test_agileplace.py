@@ -191,6 +191,38 @@ def test_get_card_fails_loud_when_response_is_top_level_null():
             get_card({"token": "t", "host": "h"}, "790")
 
 
+def test_get_card_fails_loud_when_response_is_a_bare_list():
+    """The single-card GET's exact shape is unconfirmed (VALIDATE LIVE) -- a non-dict, non-null
+    JSON body (e.g. a bare list) must not reach `.get()` and raise an opaque AttributeError.
+    get_card must fail loud with a message naming the card id (issue #3 review finding)."""
+    with patch("agileplace.api", return_value=[]):
+        with pytest.raises(SystemExit, match="791"):
+            get_card({"token": "t", "host": "h"}, "791")
+
+
+def test_get_card_fails_loud_when_response_is_a_string():
+    """Same as the bare-list case, for a scalar (string) top-level JSON body."""
+    with patch("agileplace.api", return_value="oops"):
+        with pytest.raises(SystemExit, match="792"):
+            get_card({"token": "t", "host": "h"}, "792")
+
+
+def test_get_card_fails_loud_when_response_is_a_bool():
+    """Same as the bare-list case, for a bool top-level JSON body -- bool is a subclass of int in
+    Python but must still be treated as "not a dict" here, never silently accepted."""
+    with patch("agileplace.api", return_value=True):
+        with pytest.raises(SystemExit, match="793"):
+            get_card({"token": "t", "host": "h"}, "793")
+
+
+def test_get_card_fails_loud_when_wrapped_card_value_is_not_a_dict():
+    """A {"card": ...} wrapper whose value is itself a non-dict, non-null JSON type (e.g. a list)
+    must also fail loud rather than handing callers a non-dict "card" that crashes downstream."""
+    with patch("agileplace.api", return_value={"card": []}):
+        with pytest.raises(SystemExit, match="794"):
+            get_card({"token": "t", "host": "h"}, "794")
+
+
 # --- _card_with_version / patch_card: no unversioned PATCH (issue #8) ------
 
 def test_card_with_version_returns_card_unchanged_when_version_present():
