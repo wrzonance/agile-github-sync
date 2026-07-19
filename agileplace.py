@@ -156,13 +156,26 @@ def get_card(cfg: dict, card_id: str) -> dict:
     card dict. See API-VALIDATION.md.
     A 200 response can still carry {"card": null} (e.g. a race with a delete), or even a bare
     top-level null -- both must fail loud here rather than handing callers a bare None that
-    crashes downstream with an opaque AttributeError (see issue #8 review finding)."""
+    crashes downstream with an opaque AttributeError (see issue #8 review finding).
+    The exact shape being unconfirmed also means a non-dict, non-null body (a bare list, string,
+    number, or bool) is plausible -- that must fail loud too, rather than reaching `.get()` and
+    raising an opaque AttributeError (see issue #3 review finding)."""
     data = api(cfg, "GET", f"card/{card_id}")
     if data is None:
         raise SystemExit(f"AgilePlace GET card/{card_id} returned no card data (got null)")
+    if not isinstance(data, dict):
+        raise SystemExit(
+            f"AgilePlace GET card/{card_id} returned unexpected JSON type "
+            f"({type(data).__name__}, expected an object)"
+        )
     card = data.get("card", data)
     if card is None:
         raise SystemExit(f"AgilePlace GET card/{card_id} returned no card data (got {{'card': null}})")
+    if not isinstance(card, dict):
+        raise SystemExit(
+            f"AgilePlace GET card/{card_id} returned unexpected card JSON type "
+            f"({type(card).__name__}, expected an object)"
+        )
     return card
 
 
@@ -203,9 +216,41 @@ def op_lane(lane_id: str) -> dict:
     return {"op": "replace", "path": "/laneId", "value": lane_id}
 
 
-def op_tag(tag: str, *, add: bool) -> dict:
-    # add appends at /tags/-; remove is by value at /tags (VALIDATE LIVE).
-    return {"op": "add", "path": "/tags/-", "value": tag} if add else {"op": "remove", "path": "/tags", "value": tag}
+def op_tag(tag: str) -> dict:
+    # Appends at /tags/- -- confirmed against the LeanKit Node client docs. Tag removal is a
+    # separate op-builder (see ops_tag_remove below): RFC 6902's remove op has no `value` member,
+    # so removal must be index-based, not value-based (issue #3).
+    return {"op": "add", "path": "/tags/-", "value": tag}
+
+
+def ops_tag_remove(current_tags: list[str], tags_to_remove: set[str]) -> list[dict]:
+    """Build RFC-6902 index-based remove ops -- {"op": "remove", "path": f"/tags/{i}"}, no `value`
+    member -- for every index in `current_tags` whose value is in `tags_to_remove`, sorted in
+    DESCENDING index order so multiple removals stay correct when batched into one PATCH: an
+    earlier removal must never shift a later op's target index (RFC 6902 applies ops sequentially
+    to the evolving document). `current_tags` MUST be the card's raw, unfiltered tags array
+    (card.get("tags") or []) -- NOT card_tags()'s deduped set -- or computed indices won't match
+    what AgilePlace actually holds. A tag value appearing at multiple indices yields one remove op
+    per occurrence, not just the first.
+
+    Every name in `tags_to_remove` is expected to be present in `current_tags` -- callers derive
+    their removal names from card_tags(card) against this same card snapshot, so a miss here
+    signals a real bug upstream, not a benign no-op: raises ValueError naming every unmatched tag
+    (plus current_tags, for context) rather than silently letting the caller believe the tag is
+    gone when it never was. Returns [] for an empty tags_to_remove.
+
+    Issue #3: replaces the undocumented value-based {"op":"remove","path":"/tags","value":tag} --
+    no public LeanKit docs describe it, and RFC 6902's remove op has no `value` member.
+    """
+    if not tags_to_remove:
+        return []
+    missing = tags_to_remove - set(current_tags)
+    if missing:
+        raise ValueError(
+            f"ops_tag_remove: tag(s) {sorted(missing)} not found in current_tags {current_tags!r}"
+        )
+    indices = [i for i, t in enumerate(current_tags) if t in tags_to_remove]
+    return [{"op": "remove", "path": f"/tags/{i}"} for i in sorted(indices, reverse=True)]
 
 
 def op_planned_date(field: str, date: str | None) -> dict:
@@ -230,11 +275,24 @@ def patch_card(cfg: dict, apply: bool, card: dict, ops: list[dict], note: str = 
     _card_with_version)."""
     if not ops:
         return {}
-    versioned = _card_with_version(cfg, apply, card)
+    versioned = _card_with_version(cfg, apply, card, ops)
     if versioned is None:
         return {}
     return mutate(cfg, apply, "PATCH", f"card/{versioned['id']}", body=ops,
                   headers=_version_headers(versioned), note=note or f"patch card {versioned['id']} ({len(ops)} ops)")
+
+
+def _has_index_tag_remove(ops: list[dict]) -> bool:
+    """True when `ops` contains an index-based tag remove ({"op":"remove","path":"/tags/<i>"}).
+    Such ops (ops_tag_remove) encode positions in a specific tags snapshot, so their correctness
+    depends on the sent resource version still describing that exact array. The append form
+    (/tags/-) and value-carrying ops are position-independent and never match here."""
+    return any(
+        op.get("op") == "remove"
+        and op.get("path", "").startswith("/tags/")
+        and op.get("path") != "/tags/-"
+        for op in ops
+    )
 
 
 def _has_usable_version(version) -> bool:
@@ -249,19 +307,29 @@ def _has_usable_version(version) -> bool:
     return True
 
 
-def _card_with_version(cfg: dict, apply: bool, card: dict) -> dict | None:
+def _card_with_version(cfg: dict, apply: bool, card: dict, ops: list[dict] | None = None) -> dict | None:
     """Guarantee `card` carries a usable resource version before patch_card is allowed to PATCH it.
     Returns `card` unchanged (zero network calls) when a usable version is already present or apply
     is False -- dry runs never trigger a refetch. Otherwise refetches the card fresh: on success
     returns a NEW dict (never mutates `card`) with the refetched version filled in; if the refetch
     also has no usable version, returns None and prints one WARN naming the card so the caller can
-    refuse to send an unversioned PATCH instead of risking a silent stale overwrite."""
+    refuse to send an unversioned PATCH instead of risking a silent stale overwrite.
+
+    The refetch fills in a fresh resource version but keeps `card`'s original tags snapshot. Index-based
+    tag removes (ops_tag_remove) were computed against that snapshot, so pairing them with a version
+    the server may have bumped since would pass optimistic concurrency yet delete the WRONG tag if the
+    tags array shifted meanwhile. When the batch carries such ops AND the refetched tags differ from the
+    snapshot, fail closed: return None with a WARN rather than risk a silent mis-deletion (issue #3)."""
     if _has_usable_version(card.get("version")) or not apply:
         return card
     fresh = get_card(cfg, card["id"])
     if not _has_usable_version(fresh.get("version")):
         print(f"WARN  card {card['id']} has no resource version after refetch -- "
               f"refusing unversioned PATCH, skipping ops")
+        return None
+    if ops and _has_index_tag_remove(ops) and (card.get("tags") or []) != (fresh.get("tags") or []):
+        print(f"WARN  card {card['id']} tags changed between snapshot and version refetch -- "
+              f"refusing PATCH with stale tag indices, skipping ops")
         return None
     return {**card, "version": fresh["version"]}
 

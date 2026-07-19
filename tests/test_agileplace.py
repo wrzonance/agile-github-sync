@@ -11,13 +11,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agileplace import (  # noqa: E402
     _card_with_version,
+    _has_index_tag_remove,
     card_block_reason,
     card_is_blocked,
     connect_children,
     create_card,
     disconnect_children,
     get_card,
+    op_tag,
     ops_blocked,
+    ops_tag_remove,
     patch_card,
 )
 
@@ -69,6 +72,68 @@ def test_ops_blocked_unblock_forces_empty_reason():
     write "" to /blockReason -- never the self-contradictory isBlocked=False + non-empty reason."""
     ops = ops_blocked(False, "some reason")
     assert ops[1] == {"op": "add", "path": "/blockReason", "value": ""}
+
+
+# --- op_tag / ops_tag_remove: index-based tag removal (issue #3) ----------
+
+def test_op_tag_returns_append_op_unchanged():
+    """Tag add is a non-goal for issue #3 -- op_tag must still return the same /tags/- append op."""
+    assert op_tag("foo") == {"op": "add", "path": "/tags/-", "value": "foo"}
+
+
+def test_op_tag_rejects_add_kwarg():
+    """Pins the invariant that op_tag has no `add` kwarg -- a regression that reintroduces
+    `def op_tag(tag, add=True)` would default every existing call site (sync.py's two call sites,
+    and test_op_tag_returns_append_op_unchanged above) to add=True and stay green, silently
+    resurrecting a path back to the undocumented value-based remove op issue #3 removed."""
+    with pytest.raises(TypeError):
+        op_tag("foo", add=False)
+
+
+def test_ops_tag_remove_two_of_four_tags_produces_descending_index_ops():
+    """The issue's explicit acceptance scenario: removing 2 tags from a 4-tag card produces the
+    correct index-based remove ops, in descending index order within the single batch."""
+    current_tags = ["alpha", "beta", "gamma", "delta"]
+    ops = ops_tag_remove(current_tags, {"beta", "delta"})
+    assert ops == [
+        {"op": "remove", "path": "/tags/3"},
+        {"op": "remove", "path": "/tags/1"},
+    ]
+
+
+def test_ops_tag_remove_raises_on_tag_not_present():
+    """A name in tags_to_remove that isn't in current_tags signals a real upstream bug -- fail loud
+    rather than silently no-op (which would let sync.py persist state claiming the tag is gone)."""
+    with pytest.raises(ValueError, match="missing-tag"):
+        ops_tag_remove(["alpha", "beta"], {"missing-tag"})
+
+
+def test_ops_tag_remove_duplicate_tag_value_removes_every_occurrence():
+    """A tag value appearing at multiple indices yields one remove op per occurrence, all still
+    sorted descending together -- not just the first match."""
+    current_tags = ["dup", "alpha", "dup", "beta"]
+    ops = ops_tag_remove(current_tags, {"dup"})
+    assert ops == [
+        {"op": "remove", "path": "/tags/2"},
+        {"op": "remove", "path": "/tags/0"},
+    ]
+
+
+def test_ops_tag_remove_empty_set_returns_empty_list():
+    assert ops_tag_remove(["alpha", "beta"], set()) == []
+
+
+def test_ops_tag_remove_interleaved_with_op_tag_add_stays_consistent():
+    """Covers the issue's 'interleaved add+remove in one patch stays consistent' criterion: adds
+    and removes combined into one ops list, with the remove ops still strictly descending among
+    themselves and never carrying a `value` member."""
+    current_tags = ["alpha", "beta", "gamma", "delta"]
+    tag_ops = [op_tag("new-tag")] + ops_tag_remove(current_tags, {"beta", "delta"})
+    assert tag_ops[0] == {"op": "add", "path": "/tags/-", "value": "new-tag"}
+    remove_ops = tag_ops[1:]
+    assert all(op["op"] == "remove" and "value" not in op for op in remove_ops)
+    indices = [int(op["path"].rsplit("/", 1)[1]) for op in remove_ops]
+    assert indices == sorted(indices, reverse=True)
 
 
 def test_card_is_blocked_reads_nested_blockedstatus_isblocked():
@@ -125,6 +190,38 @@ def test_get_card_fails_loud_when_response_is_top_level_null():
     with patch("agileplace.api", return_value=None):
         with pytest.raises(SystemExit, match="790"):
             get_card({"token": "t", "host": "h"}, "790")
+
+
+def test_get_card_fails_loud_when_response_is_a_bare_list():
+    """The single-card GET's exact shape is unconfirmed (VALIDATE LIVE) -- a non-dict, non-null
+    JSON body (e.g. a bare list) must not reach `.get()` and raise an opaque AttributeError.
+    get_card must fail loud with a message naming the card id (issue #3 review finding)."""
+    with patch("agileplace.api", return_value=[]):
+        with pytest.raises(SystemExit, match="791"):
+            get_card({"token": "t", "host": "h"}, "791")
+
+
+def test_get_card_fails_loud_when_response_is_a_string():
+    """Same as the bare-list case, for a scalar (string) top-level JSON body."""
+    with patch("agileplace.api", return_value="oops"):
+        with pytest.raises(SystemExit, match="792"):
+            get_card({"token": "t", "host": "h"}, "792")
+
+
+def test_get_card_fails_loud_when_response_is_a_bool():
+    """Same as the bare-list case, for a bool top-level JSON body -- bool is a subclass of int in
+    Python but must still be treated as "not a dict" here, never silently accepted."""
+    with patch("agileplace.api", return_value=True):
+        with pytest.raises(SystemExit, match="793"):
+            get_card({"token": "t", "host": "h"}, "793")
+
+
+def test_get_card_fails_loud_when_wrapped_card_value_is_not_a_dict():
+    """A {"card": ...} wrapper whose value is itself a non-dict, non-null JSON type (e.g. a list)
+    must also fail loud rather than handing callers a non-dict "card" that crashes downstream."""
+    with patch("agileplace.api", return_value={"card": []}):
+        with pytest.raises(SystemExit, match="794"):
+            get_card({"token": "t", "host": "h"}, "794")
 
 
 # --- _card_with_version / patch_card: no unversioned PATCH (issue #8) ------
@@ -220,6 +317,56 @@ def test_card_with_version_never_mutates_input_card():
     with patch("agileplace.api", return_value={"card": {"id": "42"}}):
         _card_with_version(CFG, True, miss_card)
     assert miss_card == before
+
+
+# --- refetch must not pair stale tag indices with a fresh version (issue #3) --
+
+def test_has_index_tag_remove_detects_only_index_based_removes():
+    """Index-based /tags/{i} removes are position-dependent; appends (/tags/-) and value-carrying
+    ops are not -- only the former must gate the stale-snapshot guard."""
+    assert _has_index_tag_remove([{"op": "remove", "path": "/tags/0"}])
+    assert _has_index_tag_remove(
+        [{"op": "add", "path": "/tags/-", "value": "x"}, {"op": "remove", "path": "/tags/2"}]
+    )
+    assert not _has_index_tag_remove([{"op": "add", "path": "/tags/-", "value": "x"}])
+    assert not _has_index_tag_remove([{"op": "replace", "path": "/laneId", "value": "L1"}])
+    assert not _has_index_tag_remove([])
+
+
+def test_card_with_version_refetch_allows_index_removes_when_tags_unchanged():
+    """Version-less card + index tag-remove ops: if the refetched tags MATCH the snapshot, the
+    indices are still valid -> proceed with the fresh version."""
+    card = {"id": "7", "tags": ["a", "b", "c"]}
+    ops = [{"op": "remove", "path": "/tags/1"}]
+    refetched = {"card": {"id": "7", "tags": ["a", "b", "c"], "version": 5}}
+    with patch("agileplace.api", return_value=refetched):
+        result = _card_with_version(CFG, True, card, ops)
+    assert result == {"id": "7", "tags": ["a", "b", "c"], "version": 5}
+
+
+def test_card_with_version_refetch_refuses_index_removes_when_tags_shifted(capsys):
+    """Version-less card + index tag-remove ops: if the tags array shifted since the snapshot, the
+    fresh version would let a stale /tags/{i} delete the WRONG tag -> fail closed with a WARN."""
+    card = {"id": "7", "tags": ["a", "b", "c"]}
+    ops = [{"op": "remove", "path": "/tags/2"}]  # index 2 was "c" in the snapshot
+    refetched = {"card": {"id": "7", "tags": ["z", "a", "b", "c"], "version": 5}}  # inserted at front
+    with patch("agileplace.api", return_value=refetched):
+        result = _card_with_version(CFG, True, card, ops)
+    assert result is None
+    warn_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warn_lines) == 1
+    assert "7" in warn_lines[0]
+
+
+def test_card_with_version_refetch_allows_shifted_tags_when_no_index_remove():
+    """Tags shifting is only dangerous for index-based removes; an append-only batch stays safe even
+    if the tags array changed between snapshot and refetch."""
+    card = {"id": "7", "tags": ["a"]}
+    ops = [{"op": "add", "path": "/tags/-", "value": "new"}]
+    refetched = {"card": {"id": "7", "tags": ["a", "b"], "version": 5}}
+    with patch("agileplace.api", return_value=refetched):
+        result = _card_with_version(CFG, True, card, ops)
+    assert result == {"id": "7", "tags": ["a"], "version": 5}
 
 
 def test_patch_card_version_present_is_byte_identical_to_pre_fix_behavior():

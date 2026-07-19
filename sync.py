@@ -136,7 +136,7 @@ def _card_milestones(card: dict, base: str | None, gh: str | None) -> tuple[str 
 
 
 def _stale_milestone_tags(ms_tags: set[str], old_base: str | None, new_ms: str | None) -> frozenset[str]:
-    """Subset of ms_tags (the 2nd _card_milestones return) safe to remove via op_tag(add=False) this
+    """Subset of ms_tags (the 2nd _card_milestones return) safe to remove via ops_tag_remove this
     pass. Postcondition: result <= ms_tags always -- never proposes removing a tag that was never on
     the card. Included:
       - new_ms is None (reconcile resolved the milestone to UNSET this pass -- GitHub cleared it, or
@@ -186,8 +186,8 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
     # two terms never overlap: gh_add/gh_remove are disjoint set-differences of the same final/gh_now
     # pair (reconcile.py), so a name can't be skipped from both an add and a remove in the same run.
     new_base = (r.new_base - (r.gh_add - gh_add_safe)) | (r.gh_remove - gh_remove_safe)
-    tag_ops = [agileplace.op_tag(t, add=True) for t in sorted(r.ap_add)]
-    tag_ops += [agileplace.op_tag(t, add=False) for t in sorted(r.ap_remove)]
+    tags_to_remove: set[str] = set(r.ap_remove)
+    tag_ops = [agileplace.op_tag(t) for t in sorted(r.ap_add)]
 
     gh_ms = issue.get("milestone")
     ap_ms, ms_tags = _card_milestones(card, prev.get("milestone"), gh_ms)
@@ -197,11 +197,11 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
     desired_ms_tag = f"{MS_PREFIX}{new_ms}" if new_ms else None
     stale = _stale_milestone_tags(ms_tags, prev.get("milestone"), new_ms) - ({desired_ms_tag} - {None})
     if stale or (desired_ms_tag and desired_ms_tag not in ms_tags):
-        for tag in sorted(stale):
-            tag_ops.append(agileplace.op_tag(tag, add=False))
+        tags_to_remove |= stale
         if desired_ms_tag and desired_ms_tag not in ms_tags:
-            tag_ops.append(agileplace.op_tag(desired_ms_tag, add=True))
+            tag_ops.append(agileplace.op_tag(desired_ms_tag))
 
+    tag_ops += agileplace.ops_tag_remove(card.get("tags") or [], tags_to_remove)
     if tag_ops:
         queue(card, tag_ops, "tags/milestone")
     if gh_add_safe or gh_remove_safe or r.ap_add or r.ap_remove or new_ms != gh_ms or tag_ops:
