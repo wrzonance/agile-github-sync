@@ -401,10 +401,8 @@ def main() -> None:
             continue  # freshly dry-run-created (no id yet), or unresolved
         cid = str(card["id"])
         st = issues_state.setdefault(issue["url"], {})
-        if st.get("card_id") is None:
-            issues_state[issue["url"]] = {"card_id": cid}  # fresh / migrated -> reset untrusted base
-        elif st["card_id"] != cid:
-            issues_state[issue["url"]] = {"card_id": cid}  # card was replaced -> reset merge base
+        if st.get("card_id") != cid:
+            issues_state[issue["url"]] = {"card_id": cid}  # fresh/migrated/replaced -> reset merge base
 
         stage = resolve_issue_stage(issue, project_status)
         if move_lanes:
