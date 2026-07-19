@@ -98,9 +98,14 @@ def _leaf_lanes(lanes: list) -> list:
     return [l for l in lanes if l["id"] not in parent_ids]
 
 
-def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dict | None = None):
+def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dict | None = None, *,
+                            quiet: bool = False):
     """(target_lane_or_None, acceptable_lane_ids). STAGE_LANE_MAP wins (first = target, all = in-stage);
-    else infer by lane title then cardStatus, failing CLOSED on ambiguity. Leaf lanes only."""
+    else infer by lane title then cardStatus, failing CLOSED on ambiguity. Leaf lanes only.
+
+    quiet=True suppresses the STAGE_LANE_MAP-misconfiguration WARN -- for callers that evaluate this
+    purely as an internal membership check (not the actual, decisive lane-move call), so one
+    misconfiguration doesn't print a duplicate WARN per such check."""
     leaves = _leaf_lanes(lanes)
     by_id = {l["id"]: l for l in lanes}
 
@@ -116,7 +121,8 @@ def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dic
                     ordered.append(lane)
         if ordered:
             return ordered[0], {l["id"] for l in ordered}
-        print(f"WARN  STAGE_LANE_MAP lists {stage_map[stage]} for '{stage}' but none match a leaf lane -- inferring")
+        if not quiet:
+            print(f"WARN  STAGE_LANE_MAP lists {stage_map[stage]} for '{stage}' but none match a leaf lane -- inferring")
 
     cands = [l for l in leaves if lane_matches_stage(lane_title(l), stage)]
     if not cands:

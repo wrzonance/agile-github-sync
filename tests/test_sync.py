@@ -2,6 +2,7 @@
 
 These need no network or gh -- they pin the invariants the live sync depends on. Run: pytest -q
 """
+import json
 import sys
 from pathlib import Path
 
@@ -12,7 +13,9 @@ from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
 from stages import (blocked_reason, epic_key_for_task, issue_stage,  # noqa: E402
                     lane_matches_stage, normalize_status, title_key)
-from sync import MS_PREFIX, _card_milestones, _stale_milestone_tags, issue_card_title, resolve_issue_stage  # noqa: E402
+from sync import (MS_PREFIX, _card_milestones, _protect_open_pr_stage,  # noqa: E402
+                  _stale_milestone_tags, explicit_stage_status, issue_card_title,
+                  resolve_issue_stage)
 
 
 def _board_lanes():
@@ -355,6 +358,15 @@ def test_stage_lane_map_unknown_lane_falls_back_to_inference():
     assert lane["id"] == "rs"
 
 
+def test_stage_lane_map_unknown_lane_warns_by_default_but_not_when_quiet(capsys):
+    smap = {"Ready": ["Nonexistent Lane"]}
+    resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
+    assert "WARN  STAGE_LANE_MAP" in capsys.readouterr().out       # default: decisive calls still warn
+
+    resolve_lane_for_stage(_board_lanes(), "Ready", "", smap, quiet=True)
+    assert "WARN" not in capsys.readouterr().out                  # quiet: internal checks stay silent
+
+
 # --- Projects v2 (Phase 1: Status source) --------------------------------
 
 def test_normalize_status():
@@ -417,6 +429,89 @@ def test_resolve_issue_stage_prefers_project_status_then_labels():
     assert resolve_issue_stage(issue, {"u1": "In review"}) == "In review"   # Project Status wins
     assert resolve_issue_stage(issue, {}) == "In progress"                   # fallback: label
     assert resolve_issue_stage({"url": "u2", "state": "OPEN", "labels": []}, {}) == "Backlog"
+
+
+def test_resolve_issue_stage_falls_back_to_labels_on_unrecognized_custom_status_option():
+    # A custom board Status option name (e.g. "Triage") that doesn't map to one of our five canonical
+    # stages must fall back to label/PR derivation exactly like having no Status at all -- it must
+    # never be silently treated as an explicit "Backlog"/etc call.
+    issue = {"url": "u1", "state": "OPEN", "labels": ["agent:in-progress"]}
+    assert resolve_issue_stage(issue, {"u1": "Triage"}) == "In progress"
+
+
+def test_explicit_stage_status_none_when_missing_or_unrecognized():
+    issue = {"url": "u1", "state": "OPEN", "labels": []}
+    assert explicit_stage_status(issue, {}) is None                    # no Status at all
+    assert explicit_stage_status(issue, {"u1": "Triage"}) is None      # truthy but unmapped custom option
+    assert explicit_stage_status(issue, {"u1": "in review"}) == "In review"  # case-insensitive canonical
+
+
+def test_protect_open_pr_stage_passthrough_when_read_succeeded():
+    L = _board_lanes()
+    # current lane is "ur" (In review), which would otherwise get frozen -- but the read succeeded,
+    # so the guard must never engage: the stage argument comes back unchanged.
+    assert _protect_open_pr_stage("In progress", "ur", L, "", None,
+                                   open_pr_read_failed=False, has_explicit_status=False) == "In progress"
+
+
+def test_protect_open_pr_stage_passthrough_when_status_explicit():
+    L = _board_lanes()
+    # read failed and the lane already matches "In review", but a human set Projects v2 Status
+    # explicitly this run -- that always wins over the guard.
+    assert _protect_open_pr_stage("In progress", "ur", L, "", None,
+                                   open_pr_read_failed=True, has_explicit_status=True) == "In progress"
+
+
+def test_protect_open_pr_stage_noop_when_stage_already_in_review():
+    L = _board_lanes()
+    assert _protect_open_pr_stage("In review", "ur", L, "", None,
+                                   open_pr_read_failed=True, has_explicit_status=False) == "In review"
+
+
+def test_protect_open_pr_stage_passthrough_when_lane_not_already_in_review():
+    L = _board_lanes()
+    # current lane "dn" (Doing Now / In progress) is not in the "In review" acceptable set --
+    # the guard must never PROMOTE a card into In review, only freeze one already there.
+    assert _protect_open_pr_stage("In progress", "dn", L, "", None,
+                                   open_pr_read_failed=True, has_explicit_status=False) == "In progress"
+
+
+def test_protect_open_pr_stage_freezes_in_review_lane_on_read_failure():
+    L = _board_lanes()
+    assert _protect_open_pr_stage("In progress", "ur", L, "", None,
+                                   open_pr_read_failed=True, has_explicit_status=False) == "In review"
+
+
+def test_protect_open_pr_stage_passthrough_when_issue_closed():
+    L = _board_lanes()
+    # A CLOSED issue resolves to "Done" from the authoritative state signal (stages.py), NOT from the
+    # lost has_open_pr signal -- so the guard must never freeze it back into "In review" and strand a
+    # finished card in review during a persistent open-PR read failure.
+    assert _protect_open_pr_stage("Done", "ur", L, "", None,
+                                   open_pr_read_failed=True, has_explicit_status=False,
+                                   issue_closed=True) == "Done"
+
+
+def test_protect_open_pr_stage_is_pure_no_mutation():
+    L = _board_lanes()
+    lanes_before = json.loads(json.dumps(L))
+    _protect_open_pr_stage("In progress", "ur", L, "", None,
+                            open_pr_read_failed=True, has_explicit_status=False)
+    assert L == lanes_before
+
+
+def test_protect_open_pr_stage_prints_no_warn_on_misconfigured_stage_lane_map(capsys):
+    # The guard's internal "is the current lane already acceptable for In review" check must be a
+    # quiet, side-effect-free evaluation (per its own docstring) -- it must never surface the
+    # STAGE_LANE_MAP-inference WARN that resolve_lane_for_stage() prints for real, decisive lane-move
+    # calls. Otherwise a single misconfiguration prints one duplicate WARN per issue in a run, since
+    # main() invokes this guard once per issue whose stage != "In review" and Status isn't explicit.
+    L = _board_lanes()
+    bad_map = {"In review": ["Typo Lane Name"]}
+    _protect_open_pr_stage("In progress", "ur", L, "", bad_map,
+                            open_pr_read_failed=True, has_explicit_status=False)
+    out = capsys.readouterr().out
+    assert "WARN" not in out
 
 
 def test_blocked_reason():

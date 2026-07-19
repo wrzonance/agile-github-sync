@@ -187,6 +187,17 @@ def test_repo_context_none_on_timeout(monkeypatch):
     assert ghkit._repo_context({}) is None
 
 
+# --- repo_name(): fail-closed paths -----------------------------------------
+
+def test_repo_name_returns_none_on_timeout(monkeypatch):
+    """A stalled `gh repo view` call must degrade to the documented str | None fail-closed
+    contract -- not propagate subprocess.TimeoutExpired and crash the sync."""
+    def fail(cfg, args, **k):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=60)
+    monkeypatch.setattr(ghkit, "run", fail)
+    assert ghkit.repo_name({}) is None
+
+
 # --- open_pr_issue_numbers: argv + short-circuit ----------------------------
 
 def test_open_pr_issue_numbers_uses_raw_string_vars_and_hostname(monkeypatch):
@@ -213,14 +224,14 @@ def test_open_pr_issue_numbers_short_circuits_on_no_repo_context(monkeypatch):
     monkeypatch.setattr(ghkit, "_repo_context", lambda cfg: None)
     called = []
     monkeypatch.setattr(ghkit, "run", lambda cfg, args, **k: called.append(args))
-    assert ghkit.open_pr_issue_numbers({}) == set()
+    assert ghkit.open_pr_issue_numbers({}) is None
     assert called == []  # no gh api call attempted
 
 
-def test_open_pr_issue_numbers_returns_empty_set_on_timeout(monkeypatch):
-    """A stalled `gh api graphql` call must degrade to the documented best-effort empty-set
-    contract, exactly like sub_issue_numbers/blocked_by_map already do -- not propagate
-    subprocess.TimeoutExpired and crash the sync."""
+def test_open_pr_issue_numbers_returns_none_on_timeout(monkeypatch):
+    """A stalled `gh api graphql` call must degrade to the documented tri-state None-on-failure
+    contract -- not propagate subprocess.TimeoutExpired and crash the sync, and not silently fail
+    open to an empty set that a caller could mistake for "no open PRs"."""
     monkeypatch.setattr(ghkit, "_repo_context",
                         lambda cfg: ghkit.RepoContext(owner="acme", name="widgets", host="github.com"))
 
@@ -228,7 +239,7 @@ def test_open_pr_issue_numbers_returns_empty_set_on_timeout(monkeypatch):
         raise subprocess.TimeoutExpired(cmd=args, timeout=ghkit.GH_TIMEOUT)
 
     monkeypatch.setattr(ghkit, "run", fake_run)
-    assert ghkit.open_pr_issue_numbers({}) == set()
+    assert ghkit.open_pr_issue_numbers({}) is None
 
 
 # --- sub_issue_numbers: argv (num stays -F) + short-circuit -----------------

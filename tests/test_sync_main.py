@@ -55,30 +55,40 @@ def _cfg(tmp_path):
     }
 
 
-def _mock_io(card, items_and_raw_return, field_meta_return, existing_cards=None):
+_UNSET = object()
+
+
+def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSET, lanes_return=(),
+             existing_cards=_UNSET):
     """ExitStack of patches covering every I/O boundary main() touches for one run. Returns the stack
     plus the ghkit.run, agileplace.patch_card, and agileplace.create_card mocks (for call-site
-    assertions). `existing_cards` defaults to [card] (the common "card already exists" scenario); pass
-    [] to exercise the new-card-creation loop instead."""
+    assertions).
+
+    open_pr_return defaults to set() (successful, empty read); pass None explicitly to simulate a
+    failed ghkit.open_pr_issue_numbers() read (issue #14). lanes_return defaults to no lanes (the
+    lane-move step is then always a no-op); pass real lane dicts to exercise lane-move decisions.
+    existing_cards defaults to [card] (the issue already has a matching card); pass [] to force the
+    "ensure a card per issue" creation path instead of the lane-move path."""
     stack = ExitStack()
     stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
     stack.enter_context(patch("ghkit.list_issues", return_value=[_issue()]))
-    stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
+    stack.enter_context(patch("ghkit.open_pr_issue_numbers",
+                              return_value=set() if open_pr_return is _UNSET else open_pr_return))
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
     run_mock = stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
     stack.enter_context(patch("ghproject.configured", return_value=True))
     stack.enter_context(patch("ghproject.items_and_raw", return_value=items_and_raw_return))
     stack.enter_context(patch("ghproject.field_meta", return_value=field_meta_return))
-    stack.enter_context(patch("agileplace.board_layout", return_value=[]))
-    stack.enter_context(patch("agileplace.list_cards",
-                              return_value=[card] if existing_cards is None else existing_cards))
+    stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes_return)))
+    cards = [card] if existing_cards is _UNSET else list(existing_cards)
+    stack.enter_context(patch("agileplace.list_cards", return_value=cards))
     patch_card_mock = stack.enter_context(patch("agileplace.patch_card"))
     create_card_mock = stack.enter_context(patch("agileplace.create_card", return_value={}))
     return stack, run_mock, patch_card_mock, create_card_mock
 
 
 def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_issues_state=None,
-                   existing_cards=None):
+                   open_pr_return=_UNSET, lanes_return=(), card=None, existing_cards=_UNSET):
     """seed_issues_state pre-populates the on-disk state file's issues[ISSUE_URL] before main() runs --
     used to simulate a kind that previously read real values (see ghproject.unmatched_date_kinds's
     known_kinds gate). existing_cards is forwarded to _mock_io (see there)."""
@@ -87,9 +97,10 @@ def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_
     if seed_issues_state is not None:
         state_file.write_text(json.dumps({"schema": 2, "target": "acme/repo", "board": "42",
                                           "issues": {ISSUE_URL: seed_issues_state}}), encoding="utf-8")
-    card = _card()
+    card = card if card is not None else _card()
     stack, run_mock, patch_card_mock, create_card_mock = _mock_io(
-        card, items_and_raw_return, field_meta_return, existing_cards=existing_cards)
+        card, items_and_raw_return, field_meta_return, open_pr_return=open_pr_return,
+        lanes_return=lanes_return, existing_cards=existing_cards)
     with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
@@ -168,6 +179,122 @@ def test_no_warn_and_no_crash_when_field_meta_is_none(tmp_path, capsys):
     run_mock.assert_not_called()
     patch_card_mock.assert_not_called()
     assert "start" not in state["issues"][ISSUE_URL]
+
+
+# --- open-PR read failure (issue #14): degrade, don't crash or fabricate a positive signal ---------
+
+_LANES = [
+    {"id": "L1", "title": "Backlog", "cardStatus": "notStarted"},
+    {"id": "L2", "title": "In review", "cardStatus": "started"},
+]
+
+
+def test_open_pr_read_failure_does_not_crash_and_leaves_has_open_pr_false(tmp_path, capsys):
+    # _issue() has no labels/assignees, so issue_stage() only reaches "In review" via has_open_pr.
+    # If open_pr_issue_numbers() returning None ever got treated as "every issue's PR is open" (or
+    # crashed on `number in None`), the card would be moved out of its current Backlog lane.
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": None, "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    card = _card()
+    card["laneId"] = "L1"
+
+    state, run_mock, patch_card_mock, _ = _run_main_once(
+        tmp_path, (parsed, raw_items), field_meta_return=None,
+        open_pr_return=None, lanes_return=_LANES, card=card)
+
+    out = capsys.readouterr().out
+    assert "open-PR read FAILED" in out
+    patch_card_mock.assert_not_called()  # card stayed in its Backlog lane, never moved to "In review"
+    assert state["issues"][ISSUE_URL]["card_id"] == "C1"  # run completed and persisted state normally
+
+
+def test_open_pr_read_failure_freezes_card_already_in_review_lane(tmp_path, capsys):
+    # Card is ALREADY sitting in the "In review" lane (from a prior run where the PR was open). This
+    # run's open-PR read fails, so has_open_pr is never set -> issue_stage() falls all the way back to
+    # "Backlog" (no labels/assignees). Without the _protect_open_pr_stage guard wired into the
+    # existing-card lane-move site, main() would demote this card to "Backlog" on a transient read
+    # failure alone -- exactly the regression issue #14 exists to prevent.
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": None, "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    card = _card()
+    card["laneId"] = "L2"
+
+    state, run_mock, patch_card_mock, _ = _run_main_once(
+        tmp_path, (parsed, raw_items), field_meta_return=None,
+        open_pr_return=None, lanes_return=_LANES, card=card)
+
+    out = capsys.readouterr().out
+    assert "open-PR read FAILED" in out
+    patch_card_mock.assert_not_called()  # frozen: card must stay in "In review", never moved to Backlog
+    assert state["issues"][ISSUE_URL]["card_id"] == "C1"
+
+
+def test_explicit_status_overrides_open_pr_freeze_guard(tmp_path, capsys):
+    # Same failed-read, same card sitting in "In review" -- but this time the issue carries an EXPLICIT
+    # Projects v2 Status of "Backlog". A human's explicit call must always win over the freeze guard:
+    # the card should move to Backlog exactly as it would if the open-PR read had succeeded.
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "Backlog",
+                          "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    card = _card()
+    card["laneId"] = "L2"
+
+    state, run_mock, patch_card_mock, _ = _run_main_once(
+        tmp_path, (parsed, raw_items), field_meta_return=None,
+        open_pr_return=None, lanes_return=_LANES, card=card)
+
+    out = capsys.readouterr().out
+    assert "open-PR read FAILED" in out
+    assert "-> 'Backlog' (stage Backlog)" in out
+    patch_card_mock.assert_called_once()  # explicit Status wins: card moved out of "In review" lane
+    assert state["issues"][ISSUE_URL]["card_id"] == "C1"
+
+
+def test_unrecognized_custom_status_option_does_not_bypass_freeze_guard(tmp_path, capsys):
+    # Same failed-read, same card sitting in "In review" -- but this time the issue's Projects v2
+    # Status carries a CUSTOM option name ("Triage") that doesn't map to any of our five canonical
+    # stages. project_status[url] is truthy, but resolve_issue_stage() can't use it and falls all the
+    # way back to issue_stage() (label/PR-derived) -- so no human's EXPLICIT canonical call was ever
+    # actually made. has_explicit_status must reflect that (False), not the raw truthiness of the
+    # Status field, or this unrecognized option would silently bypass the freeze guard and demote the
+    # card out of "In review" on the same transient read failure issue #14 exists to protect against.
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "Triage",
+                          "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    card = _card()
+    card["laneId"] = "L2"
+
+    state, run_mock, patch_card_mock, _ = _run_main_once(
+        tmp_path, (parsed, raw_items), field_meta_return=None,
+        open_pr_return=None, lanes_return=_LANES, card=card)
+
+    out = capsys.readouterr().out
+    assert "open-PR read FAILED" in out
+    patch_card_mock.assert_not_called()  # frozen: unrecognized option must not count as explicit
+    assert state["issues"][ISSUE_URL]["card_id"] == "C1"
+
+
+# --- card creation path (issue #14 follow-up): must use `stage`, never a guard-adjusted lane_stage ---
+
+def test_ensure_card_creation_uses_stage_unaffected_by_open_pr_read_failure(tmp_path, capsys):
+    # No existing card matches the issue -> the "ensure a card per issue" creation path runs. It must
+    # use resolve_issue_stage()'s `stage` directly and never route through _protect_open_pr_stage (that
+    # guard only ever freezes a card ALREADY sitting in a lane -- a brand-new card has no current lane
+    # to freeze). Explicit Status "In review" + a failed open-PR read must still create the new card
+    # straight into the "In review" lane, proving the creation path was never touched by the guard.
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In review",
+                          "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+
+    state, run_mock, patch_card_mock, create_card_mock = _run_main_once(
+        tmp_path, (parsed, raw_items), field_meta_return=None,
+        open_pr_return=None, lanes_return=_LANES, existing_cards=[])
+
+    out = capsys.readouterr().out
+    assert "open-PR read FAILED" in out
+    assert "stage=In review lane=In review" in out
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.args[-1] == "L2"  # created straight into the In review lane
 
 
 # --- issue #5: fail-closed gate widened to zero-recognized-statuses-despite-items, and extended to

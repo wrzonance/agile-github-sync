@@ -73,7 +73,7 @@ def run(cfg: dict, args: list[str], *, check: bool = True,
 def repo_name(cfg: dict) -> str | None:
     try:
         return run(cfg, ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]).stdout.strip() or None
-    except (subprocess.CalledProcessError, FileNotFoundError, SystemExit):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, SystemExit):
         return None
 
 
@@ -128,14 +128,17 @@ def list_issues(cfg: dict) -> list[dict]:
     return normalized
 
 
-def open_pr_issue_numbers(cfg: dict) -> set[int]:
-    """Issue numbers that an OPEN PR declares it will close (an 'in review' signal). Best-effort:
-    returns empty on any error so the label-based signal still drives 'In review'."""
+def open_pr_issue_numbers(cfg: dict) -> set[int] | None:
+    """Issue numbers that an OPEN PR declares it will close (an 'in review' signal). Tri-state: a
+    set on success (possibly empty when no open PR closes any issue -- a real, distinguishable
+    result); **None on read failure** (no repo context, gh error, timeout, or a malformed/missing
+    response), so callers can tell "no open PRs" from "we don't know" instead of silently treating
+    a failed read as if every issue's PR had closed."""
     q = """query($owner:String!,$name:String!){repository(owner:$owner,name:$name){
       pullRequests(states:OPEN,first:100){nodes{closingIssuesReferences(first:20){nodes{number}}}}}}"""
     ctx = _repo_context(cfg)
     if ctx is None:
-        return set()
+        return None
     try:
         out = run(cfg, ["api", "graphql", "--hostname", ctx.host, "-f", f"query={q}",
                         "-f", f"owner={ctx.owner}", "-f", f"name={ctx.name}"])
@@ -143,7 +146,7 @@ def open_pr_issue_numbers(cfg: dict) -> set[int]:
         return {n["number"] for pr in prs for n in pr["closingIssuesReferences"]["nodes"]}
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, KeyError, TypeError,
             json.JSONDecodeError):
-        return set()
+        return None
 
 
 def sub_issue_numbers(cfg: dict, epic_number: int) -> list[int] | None:

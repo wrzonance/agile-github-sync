@@ -89,9 +89,40 @@ def issue_card_title(issue: dict) -> str:
     return t
 
 
+def explicit_stage_status(issue: dict, project_status: dict) -> str | None:
+    """The canonical stage this issue's Projects v2 Status maps to, or None when there's no Status set
+    OR it's a custom option name that doesn't match one of our five stages -- i.e. exactly the case
+    where resolve_issue_stage() has to fall back to label/PR derivation instead of a human's explicit
+    call. Callers must use this (not raw truthiness of project_status[url]) to decide whether an
+    issue's stage actually came from an explicit Status -- a truthy-but-unrecognized raw value (e.g.
+    a custom 'Triage' option) is NOT an explicit canonical call."""
+    return normalize_status(project_status.get(issue["url"]))
+
+
 def resolve_issue_stage(issue: dict, project_status: dict) -> str:
-    raw = project_status.get(issue["url"])
-    return (normalize_status(raw) if raw else None) or issue_stage(issue)
+    return explicit_stage_status(issue, project_status) or issue_stage(issue)
+
+
+def _protect_open_pr_stage(stage: str, current_lane_id: str, lanes: list, milestone: str,
+                            stage_map: dict | None, *, open_pr_read_failed: bool,
+                            has_explicit_status: bool, issue_closed: bool = False) -> str:
+    """Guard against demoting a card OUT of 'In review' purely because this run's open-PR read
+    failed (ghkit.open_pr_issue_numbers returned None): a transient GitHub API hiccup must never
+    silently walk a card backward on a vanished signal. Pure, no I/O, never mutates its arguments.
+
+    Freezes the stage at 'In review' only when ALL of: the read failed, there's no explicit Projects
+    v2 Status for this issue (a human's explicit call always wins over the guard), the issue isn't
+    closed (a CLOSED issue's 'Done' comes from the authoritative state signal, not the lost open-PR
+    signal -- freezing it would strand a finished card in review), the computed stage isn't already
+    'In review', and the card's current lane is already one of the acceptable lanes for 'In review'
+    (i.e. the card is already sitting in review -- this never PROMOTES a card into review, it only
+    freezes one already there). Every other case passes `stage` through unchanged."""
+    if not open_pr_read_failed or has_explicit_status or issue_closed or stage == "In review":
+        return stage
+    _, acceptable = agileplace.resolve_lane_for_stage(lanes, "In review", milestone, stage_map, quiet=True)
+    if str(current_lane_id) in {str(i) for i in acceptable}:
+        return "In review"
+    return stage
 
 
 def _label_set(labels, ignore: frozenset) -> set[str]:
@@ -273,8 +304,12 @@ def main() -> None:
 
     issues = ghkit.list_issues(cfg)
     open_pr = ghkit.open_pr_issue_numbers(cfg)
-    for i in issues:
-        i["has_open_pr"] = i["number"] in open_pr
+    open_pr_read_failed = open_pr is None
+    if open_pr_read_failed:
+        print("WARN  open-PR read FAILED -- leaving PR-derived 'In review' stages untouched this run")
+    else:
+        for i in issues:
+            i["has_open_pr"] = i["number"] in open_pr
     by_number = {i["number"]: i for i in issues}
     by_key = {title_key(i["title"]) or str(i["number"]): i for i in issues}
     epics = [i for i in issues if "type:epic" in i["labels"]]
@@ -370,12 +405,17 @@ def main() -> None:
 
         stage = resolve_issue_stage(issue, project_status)
         if move_lanes:
-            target_lane, acceptable = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
+            current = str(card.get("laneId") or (card.get("lane") or {}).get("id") or "")
+            has_explicit_status = explicit_stage_status(issue, project_status) is not None
+            lane_stage = _protect_open_pr_stage(stage, current, lanes, issue.get("milestone") or "", smap,
+                                                 open_pr_read_failed=open_pr_read_failed,
+                                                 has_explicit_status=has_explicit_status,
+                                                 issue_closed=str(issue.get("state", "")).upper() == "CLOSED")
+            target_lane, acceptable = agileplace.resolve_lane_for_stage(lanes, lane_stage, issue.get("milestone") or "", smap)
             if target_lane:
-                current = str(card.get("laneId") or (card.get("lane") or {}).get("id") or "")
                 if current not in {str(i) for i in acceptable}:
                     queue(card, [agileplace.op_lane(target_lane["id"])], f"lane->{agileplace.lane_title(target_lane)}")
-                    print(f"{'move ' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {stage})")
+                    print(f"{'move ' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {lane_stage})")
         sync_metadata(cfg, apply, issue, card, cfg["label_sync_ignore"], issues_state, queue)
         if field_meta:
             sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue,
