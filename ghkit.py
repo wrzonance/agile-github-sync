@@ -251,7 +251,8 @@ def blocked_by_map(cfg: dict, issue_numbers: list[int]) -> dict[int, list[int]] 
             if nums:
                 result[n] = nums
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
-                TypeError, ValueError):
+                TypeError, ValueError) as exc:
+            print(f"WARN  blocked-by snapshot incomplete for issue #{n}: {exc}", file=sys.stderr)
             return None  # ANY failure -> the snapshot is incomplete; skip ALL blocked-state writes
     return result
 
