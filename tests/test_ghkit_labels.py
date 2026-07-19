@@ -281,6 +281,133 @@ def test_sync_metadata_dry_run_never_mutates_state(monkeypatch, capsys):
     assert issues_state[issue["url"]] == before  # apply=False -> no state mutation
 
 
+def test_sync_metadata_no_gh_rewrite_on_verified_repro_stale_leftover(monkeypatch, capsys):
+    """Verified-repro acceptance criterion (issue #7): base=gh=ap='0.2.0', but the card also carries a
+    stale leftover 'milestone:0.1.0' tag alongside the current 'milestone:0.2.0' tag. Because gh_ms
+    already equals the reconciled new_ms, ghkit.set_milestone must NEVER be called -- this is the
+    'no longer rewrites GitHub' bug this issue exists to fix. The stale 0.1.0 tag is also NOT queued
+    for removal this pass (old_base == new_ms -> nothing superseded yet; see _stale_milestone_tags'
+    documented never-destroy tradeoff) -- pinning that no spurious tag_ops for milestone are queued
+    either."""
+    issue = _issue(milestone="0.2.0")
+    card = _card(tags=["milestone:0.2.0", "milestone:0.1.0"])
+    issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
+
+    ms_calls = []
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
+
+    queued = []
+    sync_metadata({}, True, issue, card, frozenset(), issues_state,
+                  lambda c, ops, note: queued.append((c, ops, note)))
+
+    assert ms_calls == []  # gh_ms already correct -> no GitHub rewrite
+    milestone_removes = [op["value"] for entry in queued for op in entry[1]
+                          if op.get("op") == "remove" and op.get("path") == "/tags"]
+    assert "milestone:0.1.0" not in milestone_removes  # stale leftover preserved this pass
+    assert issues_state[issue["url"]]["milestone"] == "0.2.0"
+
+
+def test_sync_metadata_no_gh_rewrite_on_coexisting_ambiguous_upgrade_tag(monkeypatch, capsys):
+    """Coexisting-ambiguous worked example (issue #7): base=gh=ap='0.2.0', but the card ALSO carries an
+    unrelated 'milestone:9.9' tag that matches neither anchor. Same shape as the verified-repro case
+    (old_base == new_ms -> nothing superseded this pass) but with the 'other' tag looking like a
+    genuine future upgrade rather than an old leftover -- the point being _stale_milestone_tags cannot
+    (and must not) tell the two apart by value alone, so both must be preserved identically: no
+    GitHub rewrite, and '9.9' is never queued for removal."""
+    issue = _issue(milestone="0.2.0")
+    card = _card(tags=["milestone:0.2.0", "milestone:9.9"])
+    issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
+
+    ms_calls = []
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
+
+    queued = []
+    sync_metadata({}, True, issue, card, frozenset(), issues_state,
+                  lambda c, ops, note: queued.append((c, ops, note)))
+
+    assert ms_calls == []  # gh_ms already correct -> no GitHub rewrite
+    milestone_removes = [op["value"] for entry in queued for op in entry[1]
+                          if op.get("op") == "remove" and op.get("path") == "/tags"]
+    assert "milestone:9.9" not in milestone_removes  # ambiguous 'other' tag preserved, not destroyed
+    assert issues_state[issue["url"]]["milestone"] == "0.2.0"
+
+
+def test_sync_metadata_calls_set_milestone_on_fully_unanchored_upgrade(monkeypatch, capsys):
+    """Fully-unanchored-upgrade worked example (issue #7): base=gh='0.2.0', but the card's ONLY
+    milestone: tag is 'milestone:9.9' -- neither anchor is present on the card at all. There is
+    nothing ambiguous to preserve here: '9.9' is the sole candidate, _card_milestones selects it via
+    the fully-unanchored tie-break, reconcile_value should carry it through as the new value, and
+    since it differs from gh_ms ('0.2.0') ghkit.set_milestone MUST be called with '9.9' -- this is the
+    genuine-upgrade side of the ambiguity that the never-destroy design must still let through."""
+    issue = _issue(milestone="0.2.0")
+    card = _card(tags=["milestone:9.9"])
+    issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
+
+    ms_calls = []
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
+
+    sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
+
+    assert len(ms_calls) == 1
+    args, _ = ms_calls[0]
+    assert args[3] == "9.9"  # set_milestone(cfg, apply, number, title) -> title is the 4th arg
+    assert issues_state[issue["url"]]["milestone"] == "9.9"
+
+
+def test_sync_metadata_cleared_milestone_not_resurrected_next_pass(monkeypatch, capsys):
+    """Cross-run deletion resurrection (Codex-flagged, issue #7 class): base=gh=ap='0.2.0' with a stale
+    'milestone:0.1.0' leftover also on the card. The user then CLEARS the GitHub milestone. Pass 1 must
+    honor the clear (new_ms=None, base persists None) AND remove every milestone: tag from the card --
+    not just the old-base tag -- so pass 2 finds nothing to push back. Without wiping the leftover, pass
+    2 sees '0.1.0' as the sole unanchored AgilePlace value and calls set_milestone('0.1.0'), silently
+    undoing the deletion. This pins that pass 2 makes NO set_milestone call."""
+    issue = _issue(milestone=None)  # user cleared it on GitHub
+    card_tags = ["milestone:0.2.0", "milestone:0.1.0"]
+    card = _card(tags=list(card_tags))
+    issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
+
+    ms_calls = []
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
+
+    # PASS 1 — capture queued tag ops so we can apply the AgilePlace-side removals to the card.
+    queued = []
+    sync_metadata({}, True, issue, card, frozenset(), issues_state,
+                  lambda c, ops, note: queued.append(ops))
+    assert ms_calls == []  # gh already cleared -> no rewrite this pass either
+    assert issues_state[issue["url"]]["milestone"] is None  # clear persisted as the new base
+    removed = {op["value"] for ops in queued for op in ops
+               if op.get("op") == "remove" and op.get("path") == "/tags"}
+    # BOTH milestone tags must be queued for removal -- the leftover is not spared once new_ms is None
+    assert removed == set(card_tags)
+    card_after = {"id": card["id"], "tags": [t for t in card_tags if t not in removed]}
+
+    # PASS 2 — nothing changed on GitHub (still cleared); the cleaned card must not resurrect anything.
+    sync_metadata({}, True, issue, card_after, frozenset(), issues_state, lambda c, ops, note: None)
+    assert ms_calls == []  # <-- resurrection would show up here as set_milestone('0.1.0')
+    assert issues_state[issue["url"]]["milestone"] is None
+
+
+def test_sync_metadata_dry_run_never_mutates_state_with_milestone_tags(monkeypatch, capsys):
+    """Regression pin for the milestone-block rewrite: apply=False must still never mutate
+    issues_state, even when the card carries multiple milestone: tags that now flow through
+    _card_milestones/_stale_milestone_tags instead of the old blunt removal set."""
+    issue = _issue(milestone="9.9")
+    card = _card(tags=["milestone:0.2.0", "milestone:"])
+    issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
+    before = dict(issues_state[issue["url"]])
+
+    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+
+    sync_metadata({}, False, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
+
+    assert issues_state[issue["url"]] == before  # apply=False -> no state mutation
+
+
 def test_sync_metadata_backward_compatible_on_safe_labels(monkeypatch, capsys):
     """No comma-or-leading-quote names anywhere -> identical behavior to before this fix: edit_label
     called for the genuinely reconciled adds/removes, base updated to the full reconciled set."""

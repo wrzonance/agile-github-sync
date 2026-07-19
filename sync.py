@@ -108,12 +108,61 @@ def _filter_gh_safe_labels(names: frozenset[str], *, key: str, action: str) -> f
     return safe
 
 
-def _card_milestones(card: dict) -> tuple[str | None, set[str]]:
-    """(current milestone value, all raw milestone: tags). Deterministic: the current value is the
-    lexicographically-first non-empty suffix; extras/empties are stale tags to be cleaned up."""
+def _card_milestones(card: dict, base: str | None, gh: str | None) -> tuple[str | None, set[str]]:
+    """(selected current milestone value, all raw milestone: tags incl. empty-suffix ones for cleanup).
+
+    Selection over the card's non-empty milestone: suffixes is by PROVENANCE, not sort order:
+      - zero suffixes       -> None
+      - `base` among them    -> base (nothing changed AP-side this pass; a coexisting extra tag is
+                                cleanup fodder, never a same-pass override -- closes the
+                                milestone:0.0.0 downgrade abuse vector from issue #7's 'Why')
+      - else `gh` among them -> gh (same rationale, GitHub-side anchor)
+      - else                 -> sorted(suffixes)[0] -- tie-break used ONLY among tags matching
+                                 NEITHER anchor, i.e. genuinely new/fully-unanchored AP-side values;
+                                 never used to arbitrate an anchored tag against an unanchored one.
+    Pure function of its three inputs; no I/O. Determinism is a property of the base/gh-anchor rule
+    (and, only in the fully-unanchored case, the sort tie-break) -- NOT, as the prior docstring
+    claimed, a virtue of sorting itself; sorting alone was the actual bug (issue #7).
+    """
     tags = {t for t in agileplace.card_tags(card) if t.startswith(MS_PREFIX)}
-    suffixes = sorted(t[len(MS_PREFIX):] for t in tags if t[len(MS_PREFIX):])
-    return (suffixes[0] if suffixes else None), tags
+    suffixes = {t[len(MS_PREFIX):] for t in tags if t[len(MS_PREFIX):]}
+    if not suffixes:
+        return None, tags
+    if base is not None and base in suffixes:
+        return base, tags
+    if gh is not None and gh in suffixes:
+        return gh, tags
+    return sorted(suffixes)[0], tags
+
+
+def _stale_milestone_tags(ms_tags: set[str], old_base: str | None, new_ms: str | None) -> frozenset[str]:
+    """Subset of ms_tags (the 2nd _card_milestones return) safe to remove via op_tag(add=False) this
+    pass. Postcondition: result <= ms_tags always -- never proposes removing a tag that was never on
+    the card. Included:
+      - new_ms is None (reconcile resolved the milestone to UNSET this pass -- GitHub cleared it, or
+        it was never set): EVERY milestone: tag is stale. With no current milestone there is nothing
+        legitimate for any tag to represent, and leaving one behind lets it resurrect the cleared
+        value on a later pass -- once the base is persisted as None the leftover looks like a fresh,
+        unanchored AgilePlace value and gets pushed straight back onto GitHub, silently undoing the
+        user's deletion (the cross-run resurrection Codex flagged). A tag cannot be a genuine pending
+        upgrade here: if it were, reconcile_value would have resolved new_ms TO that value, not None.
+      - otherwise (new_ms is a real value), the conservative set:
+          - every empty-suffix tag ("milestone:" alone) -- always stale, carries no value
+          - f"{MS_PREFIX}{old_base}" iff ALL THREE hold: old_base is not None, old_base != new_ms (the
+            base has been confirmed superseded THIS pass), AND that literal tag is a member of ms_tags
+            (it may legitimately not be, e.g. the base was never re-tagged onto this card)
+        and deliberately EXCLUDES any other non-empty-suffix tag (one matching neither the old base
+        nor the new value): while a real milestone still stands it cannot be told apart from a pending,
+        ambiguous human edit by value alone, so it is preserved rather than destroyed -- risking the
+        deletion of a genuine, not-yet-reconciled upgrade (issue #7).
+    """
+    if new_ms is None:
+        return frozenset(ms_tags)
+    stale = {t for t in ms_tags if t == MS_PREFIX}
+    old_tag = f"{MS_PREFIX}{old_base}" if old_base is not None else None
+    if old_tag is not None and old_base != new_ms and old_tag in ms_tags:
+        stale.add(old_tag)
+    return frozenset(stale)
 
 
 def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
@@ -141,14 +190,15 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
     tag_ops += [agileplace.op_tag(t, add=False) for t in sorted(r.ap_remove)]
 
     gh_ms = issue.get("milestone")
-    ap_ms, ms_tags = _card_milestones(card)
+    ap_ms, ms_tags = _card_milestones(card, prev.get("milestone"), gh_ms)
     new_ms = reconcile_value(prev.get("milestone"), gh_ms, ap_ms)
     if new_ms != gh_ms:
         ghkit.set_milestone(cfg, apply, issue["number"], new_ms)
     desired_ms_tag = f"{MS_PREFIX}{new_ms}" if new_ms else None
-    if {desired_ms_tag} - {None} != ms_tags:  # normalize: exactly the one desired tag, remove any others
-        for stale in sorted(ms_tags - ({desired_ms_tag} - {None})):
-            tag_ops.append(agileplace.op_tag(stale, add=False))
+    stale = _stale_milestone_tags(ms_tags, prev.get("milestone"), new_ms) - ({desired_ms_tag} - {None})
+    if stale or (desired_ms_tag and desired_ms_tag not in ms_tags):
+        for tag in sorted(stale):
+            tag_ops.append(agileplace.op_tag(tag, add=False))
         if desired_ms_tag and desired_ms_tag not in ms_tags:
             tag_ops.append(agileplace.op_tag(desired_ms_tag, add=True))
 
