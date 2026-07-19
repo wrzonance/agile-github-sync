@@ -352,7 +352,7 @@ def test_sync_metadata_calls_set_milestone_on_fully_unanchored_upgrade(monkeypat
     sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
     assert len(ms_calls) == 1
-    (args, kwargs) = ms_calls[0]
+    args, _ = ms_calls[0]
     assert args[3] == "9.9"  # set_milestone(cfg, apply, number, title) -> title is the 4th arg
     assert issues_state[issue["url"]]["milestone"] == "9.9"
 
