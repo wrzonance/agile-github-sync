@@ -381,12 +381,16 @@ def main() -> None:
 
         stage = resolve_issue_stage(issue, project_status)
         if move_lanes:
-            target_lane, acceptable = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
+            current = str(card.get("laneId") or (card.get("lane") or {}).get("id") or "")
+            has_explicit_status = bool(project_status.get(issue["url"]))
+            lane_stage = _protect_open_pr_stage(stage, current, lanes, issue.get("milestone") or "", smap,
+                                                 open_pr_read_failed=open_pr_read_failed,
+                                                 has_explicit_status=has_explicit_status)
+            target_lane, acceptable = agileplace.resolve_lane_for_stage(lanes, lane_stage, issue.get("milestone") or "", smap)
             if target_lane:
-                current = str(card.get("laneId") or (card.get("lane") or {}).get("id") or "")
                 if current not in {str(i) for i in acceptable}:
                     queue(card, [agileplace.op_lane(target_lane["id"])], f"lane->{agileplace.lane_title(target_lane)}")
-                    print(f"{'move ' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {stage})")
+                    print(f"{'move ' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {lane_stage})")
         sync_metadata(cfg, apply, issue, card, cfg["label_sync_ignore"], issues_state, queue)
         if field_meta:
             sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue,

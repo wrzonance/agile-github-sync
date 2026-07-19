@@ -199,3 +199,45 @@ def test_open_pr_read_failure_does_not_crash_and_leaves_has_open_pr_false(tmp_pa
     assert "open-PR read FAILED" in out
     patch_card_mock.assert_not_called()  # card stayed in its Backlog lane, never moved to "In review"
     assert state["issues"][ISSUE_URL]["card_id"] == "C1"  # run completed and persisted state normally
+
+
+def test_open_pr_read_failure_freezes_card_already_in_review_lane(tmp_path, capsys):
+    # Card is ALREADY sitting in the "In review" lane (from a prior run where the PR was open). This
+    # run's open-PR read fails, so has_open_pr is never set -> issue_stage() falls all the way back to
+    # "Backlog" (no labels/assignees). Without the _protect_open_pr_stage guard wired into the
+    # existing-card lane-move site, main() would demote this card to "Backlog" on a transient read
+    # failure alone -- exactly the regression issue #14 exists to prevent.
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": None, "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    card = _card()
+    card["laneId"] = "L2"
+
+    state, run_mock, patch_card_mock = _run_main_once(
+        tmp_path, (parsed, raw_items), field_meta_return=None,
+        open_pr_return=None, lanes_return=_LANES, card=card)
+
+    out = capsys.readouterr().out
+    assert "open-PR read FAILED" in out
+    patch_card_mock.assert_not_called()  # frozen: card must stay in "In review", never moved to Backlog
+    assert state["issues"][ISSUE_URL]["card_id"] == "C1"
+
+
+def test_explicit_status_overrides_open_pr_freeze_guard(tmp_path, capsys):
+    # Same failed-read, same card sitting in "In review" -- but this time the issue carries an EXPLICIT
+    # Projects v2 Status of "Backlog". A human's explicit call must always win over the freeze guard:
+    # the card should move to Backlog exactly as it would if the open-PR read had succeeded.
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "Backlog",
+                          "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    card = _card()
+    card["laneId"] = "L2"
+
+    state, run_mock, patch_card_mock = _run_main_once(
+        tmp_path, (parsed, raw_items), field_meta_return=None,
+        open_pr_return=None, lanes_return=_LANES, card=card)
+
+    out = capsys.readouterr().out
+    assert "open-PR read FAILED" in out
+    assert "-> 'Backlog' (stage Backlog)" in out
+    patch_card_mock.assert_called_once()  # explicit Status wins: card moved out of "In review" lane
+    assert state["issues"][ISSUE_URL]["card_id"] == "C1"
