@@ -55,9 +55,11 @@ def _cfg(tmp_path):
     }
 
 
-def _mock_io(card, items_and_raw_return, field_meta_return):
+def _mock_io(card, items_and_raw_return, field_meta_return, existing_cards=None):
     """ExitStack of patches covering every I/O boundary main() touches for one run. Returns the stack
-    plus the ghkit.run and agileplace.patch_card mocks (for call-site assertions)."""
+    plus the ghkit.run, agileplace.patch_card, and agileplace.create_card mocks (for call-site
+    assertions). `existing_cards` defaults to [card] (the common "card already exists" scenario); pass
+    [] to exercise the new-card-creation loop instead."""
     stack = ExitStack()
     stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
     stack.enter_context(patch("ghkit.list_issues", return_value=[_issue()]))
@@ -68,26 +70,30 @@ def _mock_io(card, items_and_raw_return, field_meta_return):
     stack.enter_context(patch("ghproject.items_and_raw", return_value=items_and_raw_return))
     stack.enter_context(patch("ghproject.field_meta", return_value=field_meta_return))
     stack.enter_context(patch("agileplace.board_layout", return_value=[]))
-    stack.enter_context(patch("agileplace.list_cards", return_value=[card]))
+    stack.enter_context(patch("agileplace.list_cards",
+                              return_value=[card] if existing_cards is None else existing_cards))
     patch_card_mock = stack.enter_context(patch("agileplace.patch_card"))
-    return stack, run_mock, patch_card_mock
+    create_card_mock = stack.enter_context(patch("agileplace.create_card", return_value={}))
+    return stack, run_mock, patch_card_mock, create_card_mock
 
 
-def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_issues_state=None):
+def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_issues_state=None,
+                   existing_cards=None):
     """seed_issues_state pre-populates the on-disk state file's issues[ISSUE_URL] before main() runs --
     used to simulate a kind that previously read real values (see ghproject.unmatched_date_kinds's
-    known_kinds gate)."""
+    known_kinds gate). existing_cards is forwarded to _mock_io (see there)."""
     cfg = _cfg(tmp_path)
     state_file = tmp_path / ".sync-state.json"
     if seed_issues_state is not None:
         state_file.write_text(json.dumps({"schema": 2, "target": "acme/repo", "board": "42",
                                           "issues": {ISSUE_URL: seed_issues_state}}), encoding="utf-8")
     card = _card()
-    stack, run_mock, patch_card_mock = _mock_io(card, items_and_raw_return, field_meta_return)
+    stack, run_mock, patch_card_mock, create_card_mock = _mock_io(
+        card, items_and_raw_return, field_meta_return, existing_cards=existing_cards)
     with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
-    return json.loads(state_file.read_text(encoding="utf-8")), run_mock, patch_card_mock
+    return json.loads(state_file.read_text(encoding="utf-8")), run_mock, patch_card_mock, create_card_mock
 
 
 # --- merge-base advance invariant, end-to-end through two real main() runs -----------------------
@@ -99,14 +105,14 @@ def test_merge_base_advances_only_after_confirmed_write_across_two_main_runs(tmp
     # Run 1: item_id missing -> ghproject.set_project_date's own guard skips the write.
     parsed_no_item_id = {ISSUE_URL: {"item_id": None, "number": 1, "status": "In progress",
                                      "start": "2026-01-01", "target": None}}
-    state_after_1, _, _ = _run_main_once(tmp_path, (parsed_no_item_id, raw_items), field_meta)
+    state_after_1, _, _, _ = _run_main_once(tmp_path, (parsed_no_item_id, raw_items), field_meta)
     assert "start" not in state_after_1["issues"][ISSUE_URL], (
         "merge base must NOT advance when the GH-side write was skipped (item_id missing)")
 
     # Run 2: same GitHub-side date, item_id now present -> the write is confirmed.
     parsed_with_item_id = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
                                        "start": "2026-01-01", "target": None}}
-    state_after_2, run_mock, _ = _run_main_once(tmp_path, (parsed_with_item_id, raw_items), field_meta)
+    state_after_2, run_mock, _, _ = _run_main_once(tmp_path, (parsed_with_item_id, raw_items), field_meta)
     assert state_after_2["issues"][ISSUE_URL]["start"] == "2026-02-01", (
         "merge base must advance once the GH-side write is confirmed")
     run_mock.assert_called_once()  # the real ghproject.set_project_date issued exactly one gh write
@@ -120,7 +126,7 @@ def test_unmatched_kinds_warns_and_skips_both_date_kinds(tmp_path, capsys):
     raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}, "unrelated": "x"}]
     parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
                           "start": None, "target": None}}
-    state, run_mock, patch_card_mock = _run_main_once(
+    state, run_mock, patch_card_mock, _ = _run_main_once(
         tmp_path, (parsed, raw_items), _field_meta(),
         seed_issues_state={"start": "2026-01-01", "target": "2026-01-09"})
 
@@ -141,7 +147,7 @@ def test_no_warn_and_no_skip_on_first_rollout_with_no_known_date_history(tmp_pat
     raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}, "unrelated": "x"}]
     parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
                           "start": None, "target": None}}
-    state, run_mock, patch_card_mock = _run_main_once(tmp_path, (parsed, raw_items), _field_meta())
+    state, run_mock, patch_card_mock, _ = _run_main_once(tmp_path, (parsed, raw_items), _field_meta())
 
     out = capsys.readouterr().out
     assert "WARN  Projects v2" not in out
@@ -155,10 +161,52 @@ def test_no_warn_and_no_crash_when_field_meta_is_none(tmp_path, capsys):
     parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
                           "start": "2026-01-01", "target": None}}
     raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]  # would flag both kinds if checked
-    state, run_mock, patch_card_mock = _run_main_once(tmp_path, (parsed, raw_items), field_meta_return=None)
+    state, run_mock, patch_card_mock, _ = _run_main_once(tmp_path, (parsed, raw_items), field_meta_return=None)
 
     out = capsys.readouterr().out
     assert "WARN  Projects v2" not in out
     run_mock.assert_not_called()
     patch_card_mock.assert_not_called()
     assert "start" not in state["issues"][ISSUE_URL]
+
+
+# --- issue #5: fail-closed gate widened to zero-recognized-statuses-despite-items, and extended to
+# gate new-card lane assignment (not just existing-card lane moves) -------------------------------
+
+def _zero_status_inputs():
+    """A technically-successful item-list read: the Project has one issue-linked item (item_id/number
+    populated) but no candidate key for the configured Status field resolved to a value -- the
+    misspelled-GH_PROJECT_STATUS_FIELD / gh output-shape-drift signature this issue targets. project_status
+    ends up {} even though project_items is non-empty."""
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": None, "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL, "number": 1}, "unrelated": "x"}]
+    return parsed, raw_items
+
+
+def test_zero_recognized_statuses_treated_as_failed_read(tmp_path, capsys):
+    state, run_mock, patch_card_mock, create_card_mock = _run_main_once(
+        tmp_path, _zero_status_inputs(), field_meta_return=None)
+
+    out = capsys.readouterr().out
+    assert ("WARN  Projects v2 has 1 issue item(s) but none carry a recognized 'Status' Status -- "
+            "check GH_PROJECT_STATUS_FIELD") in out
+    patch_card_mock.assert_not_called()         # no lane-move (or any) op reached the existing card
+    create_card_mock.assert_not_called()        # card already existed -- nothing created this run
+
+
+def test_new_card_gets_no_lane_when_statuses_unrecognized(tmp_path, capsys):
+    _, _, _, create_card_mock = _run_main_once(
+        tmp_path, _zero_status_inputs(), field_meta_return=None, existing_cards=[])
+
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.args[-1] is None, (
+        "new card must be created laneless when the Project read yields zero recognized statuses")
+
+
+def test_new_card_gets_no_lane_when_project_read_outright_fails(tmp_path, capsys):
+    _, _, _, create_card_mock = _run_main_once(
+        tmp_path, (None, None), field_meta_return=None, existing_cards=[])
+
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.args[-1] is None, (
+        "new card must be created laneless when the Project item-list call fails outright")

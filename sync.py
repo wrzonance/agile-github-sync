@@ -282,17 +282,27 @@ def main() -> None:
     state = load_state(target, str(cfg["board_id"])) if online else {"issues": {}}
     issues_state = state.setdefault("issues", {})
 
-    # Projects v2: tri-state. A configured-but-FAILED read must not silently fall back and mass-move lanes.
+    # Projects v2: tri-state. A configured-but-FAILED read must not silently fall back and mass-move
+    # lanes -- and neither may a technically-successful read that yields zero recognized statuses
+    # despite the Project actually having issue-linked items (misspelled GH_PROJECT_STATUS_FIELD, or a
+    # gh output-shape change): that is the same mass-move reached through a different door (issue #5).
     if ghproject.configured(cfg):
         pit, raw_items = ghproject.items_and_raw(cfg)
-        project_read_failed = pit is None
+        call_failed = pit is None
         project_items = pit or {}
     else:
-        project_read_failed, project_items, raw_items = False, {}, []
+        call_failed, project_items, raw_items = False, {}, []
     project_status = {u: v["status"] for u, v in project_items.items() if v.get("status")}
+    zero_status_despite_items = (ghproject.configured(cfg) and not call_failed
+                                  and bool(project_items) and not project_status)
+    project_read_failed = call_failed or zero_status_despite_items
     field_meta = ghproject.field_meta(cfg) if (ghproject.configured(cfg) and not project_read_failed) else None
     move_lanes = not project_read_failed
-    if project_read_failed:
+    if zero_status_despite_items:
+        print(f"WARN  Projects v2 has {len(project_items)} issue item(s) but none carry a recognized "
+              f"'{cfg['gh_project']['status_field']}' Status -- check GH_PROJECT_STATUS_FIELD; "
+              f"leaving lanes untouched this run")
+    elif project_read_failed:
         print("WARN  Projects v2 read FAILED -- leaving lanes untouched this run (Status is the source of truth)")
     elif ghproject.configured(cfg):
         print(f"projects v2: {len(project_status)} items carry Status{'; dates enabled' if field_meta else ''}")
@@ -331,16 +341,19 @@ def main() -> None:
         if card_for(issue):
             continue
         key = title_key(issue["title"]) or str(issue["number"])
-        stage = resolve_issue_stage(issue, project_status)
-        lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
+        stage = resolve_issue_stage(issue, project_status)  # informational only when the read failed
+        lane = None
+        if not project_read_failed:
+            lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
         created = agileplace.create_card(cfg, apply, issue_card_title(issue), key, issue["url"],
                                          lane["id"] if lane else None)
         if apply and created.get("id"):
             card_by_url[issue["url"]] = created
             if key:
                 card_by_cid[key] = created
-        print(f"{'made ' if apply else 'DRY  '} card [{key}] stage={stage}"
-              f"{' lane=' + agileplace.lane_title(lane) if lane else ''}")
+        lane_note = (f" lane={agileplace.lane_title(lane)}" if lane
+                     else " lane=deferred (Projects v2 read failed)" if project_read_failed else "")
+        print(f"{'made ' if apply else 'DRY  '} card [{key}] stage={stage}{lane_note}")
 
     # 2) per issue: base reset if card changed; lane; metadata; dates
     for issue in issues:
