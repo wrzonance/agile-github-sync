@@ -105,17 +105,19 @@ def resolve_issue_stage(issue: dict, project_status: dict) -> str:
 
 def _protect_open_pr_stage(stage: str, current_lane_id: str, lanes: list, milestone: str,
                             stage_map: dict | None, *, open_pr_read_failed: bool,
-                            has_explicit_status: bool) -> str:
+                            has_explicit_status: bool, issue_closed: bool = False) -> str:
     """Guard against demoting a card OUT of 'In review' purely because this run's open-PR read
     failed (ghkit.open_pr_issue_numbers returned None): a transient GitHub API hiccup must never
     silently walk a card backward on a vanished signal. Pure, no I/O, never mutates its arguments.
 
     Freezes the stage at 'In review' only when ALL of: the read failed, there's no explicit Projects
-    v2 Status for this issue (a human's explicit call always wins over the guard), the computed stage
-    isn't already 'In review', and the card's current lane is already one of the acceptable lanes for
-    'In review' (i.e. the card is already sitting in review -- this never PROMOTES a card into review,
-    it only freezes one already there). Every other case passes `stage` through unchanged."""
-    if not open_pr_read_failed or has_explicit_status or stage == "In review":
+    v2 Status for this issue (a human's explicit call always wins over the guard), the issue isn't
+    closed (a CLOSED issue's 'Done' comes from the authoritative state signal, not the lost open-PR
+    signal -- freezing it would strand a finished card in review), the computed stage isn't already
+    'In review', and the card's current lane is already one of the acceptable lanes for 'In review'
+    (i.e. the card is already sitting in review -- this never PROMOTES a card into review, it only
+    freezes one already there). Every other case passes `stage` through unchanged."""
+    if not open_pr_read_failed or has_explicit_status or issue_closed or stage == "In review":
         return stage
     _, acceptable = agileplace.resolve_lane_for_stage(lanes, "In review", milestone, stage_map, quiet=True)
     if str(current_lane_id) in {str(i) for i in acceptable}:
@@ -394,7 +396,8 @@ def main() -> None:
             has_explicit_status = explicit_stage_status(issue, project_status) is not None
             lane_stage = _protect_open_pr_stage(stage, current, lanes, issue.get("milestone") or "", smap,
                                                  open_pr_read_failed=open_pr_read_failed,
-                                                 has_explicit_status=has_explicit_status)
+                                                 has_explicit_status=has_explicit_status,
+                                                 issue_closed=str(issue.get("state", "")).upper() == "CLOSED")
             target_lane, acceptable = agileplace.resolve_lane_for_stage(lanes, lane_stage, issue.get("milestone") or "", smap)
             if target_lane:
                 if current not in {str(i) for i in acceptable}:

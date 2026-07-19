@@ -457,6 +457,16 @@ def test_protect_open_pr_stage_freezes_in_review_lane_on_read_failure():
                                    open_pr_read_failed=True, has_explicit_status=False) == "In review"
 
 
+def test_protect_open_pr_stage_passthrough_when_issue_closed():
+    L = _board_lanes()
+    # A CLOSED issue resolves to "Done" from the authoritative state signal (stages.py), NOT from the
+    # lost has_open_pr signal -- so the guard must never freeze it back into "In review" and strand a
+    # finished card in review during a persistent open-PR read failure.
+    assert _protect_open_pr_stage("Done", "ur", L, "", None,
+                                   open_pr_read_failed=True, has_explicit_status=False,
+                                   issue_closed=True) == "Done"
+
+
 def test_protect_open_pr_stage_is_pure_no_mutation():
     L = _board_lanes()
     lanes_before = json.loads(json.dumps(L))
