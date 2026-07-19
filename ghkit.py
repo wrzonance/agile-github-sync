@@ -168,10 +168,76 @@ def sub_issue_numbers(cfg: dict, epic_number: int) -> list[int] | None:
         return None
 
 
+def _repo_name_from_url(value: object) -> str | None:
+    """Return owner/name from a REST repository URL, including GHES's /api/v3 prefix."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    for index, part in enumerate(parts):
+        if part.casefold() == "repos" and len(parts) == index + 3:
+            return f"{parts[index + 1]}/{parts[index + 2]}"
+    return None
+
+
+def _blocker_repo_name(blocker: dict) -> str | None:
+    """Extract owner/name from either an embedded repository or repository_url."""
+    repository = blocker.get("repository")
+    if isinstance(repository, dict):
+        for key in ("full_name", "nameWithOwner", "name_with_owner"):
+            value = repository.get(key)
+            if isinstance(value, str):
+                parts = value.split("/")
+                if len(parts) == 2 and all(parts):
+                    return value
+        owner = repository.get("owner")
+        owner_name = owner.get("login") if isinstance(owner, dict) else owner
+        name = repository.get("name")
+        if isinstance(owner_name, str) and isinstance(name, str) and owner_name and name:
+            return f"{owner_name}/{name}"
+    elif isinstance(repository, str):
+        parts = repository.split("/")
+        if len(parts) == 2 and all(parts):
+            return repository
+        from_url = _repo_name_from_url(repository)
+        if from_url:
+            return from_url
+    return _repo_name_from_url(blocker.get("repository_url"))
+
+
+def _local_blocker_numbers(stdout: str, ctx: RepoContext, blocked_number: int) -> list[int]:
+    """Parse gh --slurp output and retain only blockers from the target repository."""
+    pages = json.loads(stdout or "[]")
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise TypeError("blocked-by response must be a list of pages")
+    target_repo = f"{ctx.owner}/{ctx.name}"
+    local_numbers: list[int] = []
+    for blocker in (item for page in pages for item in page):
+        if not isinstance(blocker, dict):
+            raise TypeError("blocked-by response item must be an object")
+        number = blocker.get("number")
+        blocker_repo = _blocker_repo_name(blocker)
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1 or not blocker_repo:
+            raise ValueError("blocked-by response item lacks a valid repository-qualified issue")
+        if blocker_repo.casefold() != target_repo.casefold():
+            print(f"WARN  issue #{blocked_number}: skipping cross-repo blocker "
+                  f"{blocker_repo}#{number} (target {target_repo})")
+            continue
+        local_numbers.append(number)
+    return local_numbers
+
+
 def blocked_by_map(cfg: dict, issue_numbers: list[int]) -> dict[int, list[int]] | None:
-    """{issue_number: [blocker_issue_numbers]} from GitHub's issue-dependencies REST API. **None** when
-    the endpoint isn't available (dependencies then skipped entirely). VALIDATE LIVE: the exact
-    endpoint/shape (issue dependencies are a newer GitHub feature)."""
+    """Target-repo blockers keyed by blocked issue. Foreign-repo blockers are warned and skipped.
+
+    **None** means the repository context, endpoint, or response shape was unavailable, so callers
+    must skip every blocked-state write rather than act on an incomplete snapshot.
+    """
     ctx = _repo_context(cfg)
     if ctx is None:
         return None
@@ -180,11 +246,13 @@ def blocked_by_map(cfg: dict, issue_numbers: list[int]) -> dict[int, list[int]] 
         try:
             out = run(cfg, ["api", "--hostname", ctx.host,
                             f"repos/{ctx.owner}/{ctx.name}/issues/{n}/dependencies/blocked_by",
-                            "--paginate", "--jq", ".[].number"], check=True)
-            nums = [int(x) for x in out.stdout.split() if x.strip().isdigit()]
+                            "--paginate", "--slurp"], check=True)
+            nums = _local_blocker_numbers(out.stdout, ctx, n)
             if nums:
                 result[n] = nums
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
+                TypeError, ValueError) as exc:
+            print(f"WARN  blocked-by snapshot incomplete for issue #{n}: {exc}", file=sys.stderr)
             return None  # ANY failure -> the snapshot is incomplete; skip ALL blocked-state writes
     return result
 
