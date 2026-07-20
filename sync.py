@@ -562,7 +562,10 @@ def main() -> None:
             lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
         created = agileplace.create_card(cfg, apply, issue_card_title(issue), key, issue["url"],
                                          lane["id"] if lane else None)
-        if apply and created.get("id"):
+        # Real creates carry a server id; dry creates carry an obvious plan-only id. Index either
+        # snapshot so metadata, hierarchy, dependency, and batched patch planning stay in parity.
+        # Dry-run state is never saved, so the plan-only identity cannot escape this run.
+        if created.get("id"):
             card_by_url[issue["url"]] = created
             if key:
                 card_by_cid[key] = created
