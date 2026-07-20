@@ -436,7 +436,6 @@ def main() -> None:
             i["has_open_pr"] = i["number"] in open_pr
     by_number = {i["number"]: i for i in active_issues}
     by_key = {issue_custom_id(i): i for i in active_issues}
-    epics = [i for i in active_issues if "type:epic" in i["labels"]]
 
     state = load_state(target, str(cfg["board_id"])) if online else {"issues": {}}
     issues_state = state.setdefault("issues", {})
@@ -504,8 +503,31 @@ def main() -> None:
     card_by_cid = {
         cid: card for cid, card in all_card_by_cid.items() if not reserved_for_retirement(card)
     }
+
+    def retirement_reservation(issue):
+        url_card = all_card_by_url.get(issue["url"])
+        if url_card and reserved_for_retirement(url_card):
+            return "external-link URL", url_card
+        custom_id_card = retired_card_by_cid.get(issue_custom_id(issue))
+        if custom_id_card:
+            return "customId", custom_id_card
+        return None
+
+    active_reservations = {
+        issue["url"]: reservation
+        for issue in active_issues if (reservation := retirement_reservation(issue))
+    }
+    syncable_issues = [issue for issue in active_issues if issue["url"] not in active_reservations]
+    for issue in active_issues:
+        reservation = active_reservations.get(issue["url"])
+        if reservation:
+            kind, card = reservation
+            print(f"WARN  deferring active card [{issue_custom_id(issue)}]: {kind} is held by "
+                  f"retired card {card.get('id') or '<unknown>'}")
+
     card_by_cid, pending_custom_id_releases = _reconciled_custom_id_index(
-        active_issues, card_by_url, card_by_cid)
+        syncable_issues, card_by_url, card_by_cid)
+    epics = [i for i in syncable_issues if "type:epic" in i["labels"]]
 
     def card_for(issue):
         return _matching_card(issue, card_by_url, card_by_cid)
@@ -530,20 +552,10 @@ def main() -> None:
                   "refusing to retire without the GitHub external-link URL")
 
     # 1) ensure a card per active issue
-    for issue in active_issues:
+    for issue in syncable_issues:
         if card_for(issue):
             continue
         key = issue_custom_id(issue)
-        reserved_url_card = all_card_by_url.get(issue["url"])
-        if reserved_url_card and reserved_for_retirement(reserved_url_card):
-            print(f"WARN  deferring active card [{key}]: external-link URL is held by retired card "
-                  f"{reserved_url_card.get('id') or '<unknown>'}")
-            continue
-        reserved_card = retired_card_by_cid.get(key)
-        if reserved_card:
-            print(f"WARN  deferring active card [{key}]: customId is held by retired card "
-                  f"{reserved_card.get('id') or '<unknown>'}")
-            continue
         if key in pending_custom_id_releases:
             print(f"WARN  deferring card [{key}] until the renamed customId is released by a prior run")
             continue
@@ -562,7 +574,7 @@ def main() -> None:
         print(f"{'made ' if apply else 'DRY  '} card [{key}] stage={stage}{lane_note}")
 
     # 2) per active issue: base reset if card changed; lane; metadata; dates
-    for issue in active_issues:
+    for issue in syncable_issues:
         key = issue_custom_id(issue)
         card = card_for(issue)
         if not card or not card.get("id"):
@@ -615,13 +627,13 @@ def main() -> None:
             print(f"{'unlink' if apply else 'DRY  '} [{key}] -{len(removes)} child card(s)")
 
     # 4) dependencies -> card Blocked state (skip entirely unless the whole blocked-by snapshot is complete)
-    blocked_by = (ghkit.blocked_by_map(cfg, [i["number"] for i in active_issues])
-                  if online and active_issues else {} if online else None)
+    blocked_by = (ghkit.blocked_by_map(cfg, [i["number"] for i in syncable_issues])
+                  if online and syncable_issues else {} if online else None)
     if online and blocked_by is None:
         print("WARN  blocked-by snapshot incomplete -- leaving ALL card Blocked states untouched this run")
     if blocked_by is not None:
         stage_by_number = {i["number"]: resolve_issue_stage(i, project_status) for i in issues}
-        for issue in active_issues:
+        for issue in syncable_issues:
             card = card_for(issue)
             if not card or not card.get("id"):
                 continue
