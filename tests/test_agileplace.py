@@ -12,8 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agileplace import (  # noqa: E402
     _card_with_version,
     _has_index_tag_remove,
+    api,
+    card_external_urls,
     card_block_reason,
     card_is_blocked,
+    card_tags,
     connect_children,
     create_card,
     disconnect_children,
@@ -23,9 +26,38 @@ from agileplace import (  # noqa: E402
     ops_blocked,
     ops_tag_remove,
     patch_card,
+    resolve_lane_for_stage,
 )
 
 CFG = {"token": "t", "host": "h", "board_id": "b1"}
+
+
+# --- api: transport failures become clean command errors -----------------
+
+def test_api_converts_non_json_200_to_standard_truncated_system_exit():
+    raw = b"<html>captive portal</html>" + (b"x" * 400)
+
+    with patch("agileplace.urllib.request.urlopen") as urlopen_mock:
+        urlopen_mock.return_value.__enter__.return_value.read.return_value = raw
+        with pytest.raises(SystemExit) as exc_info:
+            api(CFG, "GET", "card")
+
+    message = str(exc_info.value)
+    prefix = "AgilePlace GET /card failed: invalid JSON response "
+    assert message == prefix + raw[:300].decode()
+
+
+def test_api_converts_non_utf8_200_to_standard_truncated_system_exit():
+    raw = b"\xff<html>invalid encoding</html>" + (b"x" * 400)
+
+    with patch("agileplace.urllib.request.urlopen") as urlopen_mock:
+        urlopen_mock.return_value.__enter__.return_value.read.return_value = raw
+        with pytest.raises(SystemExit) as exc_info:
+            api(CFG, "GET", "card")
+
+    message = str(exc_info.value)
+    prefix = "AgilePlace GET /card failed: invalid JSON response "
+    assert message == prefix + raw.decode(errors="replace")[:300]
 
 
 # --- list_cards: response-driven, bounded pagination (issue #16) ---------
@@ -168,6 +200,19 @@ def test_list_cards_fails_loud_when_hostile_page_meta_never_terminates():
     assert [call.kwargs["params"]["offset"] for call in api_mock.call_args_list] == [0, 1, 2]
 
 
+def test_list_cards_ignores_truthy_non_dict_page_meta():
+    pages = [
+        {"cards": [{"id": "1"}], "pageMeta": "not-an-object"},
+        {"cards": [], "pageMeta": "still-not-an-object"},
+    ]
+
+    with patch("agileplace.api", side_effect=pages) as api_mock:
+        cards = list_cards(CFG)
+
+    assert cards == [{"id": "1"}]
+    assert [call.kwargs["params"]["offset"] for call in api_mock.call_args_list] == [0, 1]
+
+
 def test_ops_blocked_block_with_reason():
     ops = ops_blocked(True, "waiting on design review")
     assert len(ops) == 2
@@ -264,6 +309,12 @@ def test_ops_tag_remove_empty_set_returns_empty_list():
     assert ops_tag_remove(["alpha", "beta"], set()) == []
 
 
+def test_ops_tag_remove_handles_unhashable_malformed_raw_tag_elements():
+    current_tags = ["alpha", {"name": "bad"}, "beta"]
+
+    assert ops_tag_remove(current_tags, {"beta"}) == [{"op": "remove", "path": "/tags/2"}]
+
+
 def test_ops_tag_remove_interleaved_with_op_tag_add_stays_consistent():
     """Covers the issue's 'interleaved add+remove in one patch stays consistent' criterion: adds
     and removes combined into one ops list, with the remove ops still strictly descending among
@@ -285,6 +336,100 @@ def test_card_is_blocked_reads_nested_blockedstatus_isblocked():
     assert card_is_blocked({"blockedStatus": {"isBlocked": False, "reason": ""}}) is False
     assert card_is_blocked({}) is False
     assert card_is_blocked({"isBlocked": True}) is False  # flat write shape must not be read
+
+
+def test_card_tags_skips_non_string_elements_and_warns_with_card_id(capsys):
+    card = {"id": "card-7", "tags": ["alpha", {"name": "bad"}, 42, ""]}
+
+    assert card_tags(card) == {"alpha"}
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 2
+    assert all("card-7" in line for line in warnings)
+
+
+def test_card_tags_rejects_supplied_falsy_non_array_and_warns_with_card_id(capsys):
+    card = {"id": "card-7-falsy", "tags": ""}
+
+    assert card_tags(card) == set()
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 1
+    assert "card-7-falsy" in warnings[0]
+
+
+def test_card_external_urls_skips_non_dict_links_and_warns_with_card_id(capsys):
+    card = {
+        "id": "card-8",
+        "externalLinks": [{"url": "https://example.test/issues/8"}, "bad-link", 8],
+    }
+
+    assert card_external_urls(card) == ["https://example.test/issues/8"]
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 2
+    assert all("card-8" in line for line in warnings)
+
+
+def test_card_external_urls_skips_non_string_urls_and_warns_with_card_id(capsys):
+    card = {
+        "id": "card-8-url",
+        "externalLinks": [
+            {"url": "https://example.test/issues/8"},
+            {"url": {"host": "example.test"}},
+        ],
+    }
+
+    assert card_external_urls(card) == ["https://example.test/issues/8"]
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 1
+    assert "card-8-url" in warnings[0]
+
+
+def test_card_external_urls_rejects_supplied_falsy_non_array_before_legacy_fallback(capsys):
+    card = {
+        "id": "card-8-falsy",
+        "externalLinks": {},
+        "externalLink": {"url": "https://example.test/issues/8"},
+    }
+
+    assert card_external_urls(card) == []
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 1
+    assert "card-8-falsy" in warnings[0]
+
+
+def test_blocked_readers_ignore_string_status_and_warn_with_card_id(capsys):
+    card = {"id": "card-9", "blockedStatus": "blocked"}
+
+    assert card_is_blocked(card) is False
+    assert card_block_reason(card) == ""
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 2
+    assert all("card-9" in line for line in warnings)
+
+
+def test_blocked_reader_rejects_supplied_falsy_non_object_and_warns_with_card_id(capsys):
+    card = {"id": "card-9-falsy", "blockedStatus": 0}
+
+    assert card_is_blocked(card) is False
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 1
+    assert "card-9-falsy" in warnings[0]
+
+
+def test_lane_resolution_skips_non_string_titles_and_unhashable_ids(capsys):
+    lanes = [
+        {"id": "valid", "title": "Ready"},
+        {"id": "bad-title", "title": {"text": "Ready"}},
+        {"id": ["bad-id"], "title": "Ready"},
+    ]
+
+    lane, acceptable = resolve_lane_for_stage(lanes, "Ready", "")
+
+    assert lane == {"id": "valid", "title": "Ready"}
+    assert acceptable == {"valid"}
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 2
+    assert any("bad-title" in line for line in warnings)
+    assert any("Ready" in line and "unhashable" in line for line in warnings)
 
 
 def test_card_block_reason_reads_nested_blockedstatus_reason():
@@ -314,6 +459,20 @@ def test_get_card_returns_already_flat_response_as_is():
     with patch("agileplace.api", return_value=flat):
         card = get_card({"token": "t", "host": "h"}, "456")
     assert card == flat
+
+
+@pytest.mark.parametrize(
+    ("card_id", "encoded_path"),
+    [
+        ("1/../board/x", "card/1%2F..%2Fboard%2Fx"),
+        ("1?x=1", "card/1%3Fx%3D1"),
+    ],
+)
+def test_get_card_quotes_hostile_id_as_one_path_segment(card_id, encoded_path):
+    with patch("agileplace.api", return_value={"id": card_id}) as api_mock:
+        assert get_card(CFG, card_id) == {"id": card_id}
+
+    api_mock.assert_called_once_with(CFG, "GET", encoded_path)
 
 
 def test_get_card_fails_loud_when_card_is_null():
@@ -517,6 +676,29 @@ def test_patch_card_version_present_is_byte_identical_to_pre_fix_behavior():
     with patch("agileplace.api", return_value={}) as api_mock:
         patch_card(CFG, True, card, ops)
     api_mock.assert_called_once_with(CFG, "PATCH", "card/1", body=ops, headers={"x-lk-resource-version": "7"})
+
+
+@pytest.mark.parametrize(
+    ("card_id", "encoded_path"),
+    [
+        ("1/../board/x", "card/1%2F..%2Fboard%2Fx"),
+        ("1?x=1", "card/1%3Fx%3D1"),
+    ],
+)
+def test_patch_card_quotes_hostile_id_as_one_path_segment(card_id, encoded_path):
+    card = {"id": card_id, "version": 7}
+    ops = [{"op": "replace", "path": "/laneId", "value": "L"}]
+
+    with patch("agileplace.api", return_value={}) as api_mock:
+        patch_card(CFG, True, card, ops)
+
+    api_mock.assert_called_once_with(
+        CFG,
+        "PATCH",
+        encoded_path,
+        body=ops,
+        headers={"x-lk-resource-version": "7"},
+    )
 
 
 def test_patch_card_dry_run_makes_no_network_call_regardless_of_version():

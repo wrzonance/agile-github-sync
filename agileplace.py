@@ -45,6 +45,11 @@ def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None,
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             raw = resp.read()
             return json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, UnicodeDecodeError) as err:
+        detail = raw.decode(errors="replace")[:300]
+        raise SystemExit(
+            f"AgilePlace {method} /{path} failed: invalid JSON response {detail}"
+        ) from err
     except urllib.error.HTTPError as err:
         if err.code == 429 and _attempt < 3:
             time.sleep(_retry_after_seconds(err))
@@ -77,12 +82,41 @@ def mutate(cfg: dict, apply: bool, method: str, path: str, body=None, headers=No
 
 # --- board / lanes --------------------------------------------------------
 
-def board_layout(cfg: dict) -> list:
-    return api(cfg, "GET", f"board/{cfg['board_id']}").get("lanes", [])
-
-
 def lane_title(lane: dict) -> str:
     return (lane.get("title") or lane.get("name") or "").strip()
+
+
+def _lanes_with_ids(lanes: list) -> list[dict]:
+    valid = []
+    for lane in lanes:
+        if not isinstance(lane, dict):
+            print(f"WARN  lane <{type(lane).__name__}> is not an object -- skipping malformed lane")
+            continue
+        malformed_text = next(
+            (field for field in ("title", "name")
+             if lane.get(field) and not isinstance(lane[field], str)),
+            None,
+        )
+        if malformed_text:
+            value = lane[malformed_text]
+            print(f"WARN  lane id {lane.get('id', '<unknown>')!r} has non-string {malformed_text} "
+                  f"({type(value).__name__}) -- skipping malformed lane")
+            continue
+        if "id" not in lane or lane["id"] is None:
+            print(f"WARN  lane '{lane_title(lane) or '<untitled>'}' has no id -- skipping malformed lane")
+            continue
+        try:
+            hash(lane["id"])
+        except TypeError:
+            print(f"WARN  lane '{lane_title(lane) or '<untitled>'}' has unhashable id "
+                  f"({type(lane['id']).__name__}) -- skipping malformed lane")
+            continue
+        valid.append(lane)
+    return valid
+
+
+def board_layout(cfg: dict) -> list:
+    return _lanes_with_ids(api(cfg, "GET", f"board/{cfg['board_id']}").get("lanes", []))
 
 
 def _ancestor_titles(lane: dict, by_id: dict) -> list[str]:
@@ -95,6 +129,7 @@ def _ancestor_titles(lane: dict, by_id: dict) -> list[str]:
 
 def _leaf_lanes(lanes: list) -> list:
     """Only leaf lanes hold cards; parent/container lanes must never be a move target."""
+    lanes = _lanes_with_ids(lanes)
     parent_ids = {l.get("parentLaneId") for l in lanes if l.get("parentLaneId")}
     return [l for l in lanes if l["id"] not in parent_ids]
 
@@ -107,6 +142,7 @@ def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dic
     quiet=True suppresses the STAGE_LANE_MAP-misconfiguration WARN -- for callers that evaluate this
     purely as an internal membership check (not the actual, decisive lane-move call), so one
     misconfiguration doesn't print a duplicate WARN per such check."""
+    lanes = _lanes_with_ids(lanes)
     leaves = _leaf_lanes(lanes)
     by_id = {l["id"]: l for l in lanes}
 
@@ -146,6 +182,10 @@ def _raise_if_before_total(offset: int, expected_total: int | None) -> None:
             f"AgilePlace card pagination ended at {offset} before totalRecords {expected_total} "
             "-- refusing to continue with a partial board snapshot"
         )
+
+
+def _card_path(card_id) -> str:
+    return f"card/{urllib.parse.quote(str(card_id), safe='')}"
 
 
 def list_cards(cfg: dict) -> list[dict]:
@@ -211,7 +251,7 @@ def get_card(cfg: dict, card_id: str) -> dict:
     The exact shape being unconfirmed also means a non-dict, non-null body (a bare list, string,
     number, or bool) is plausible -- that must fail loud too, rather than reaching `.get()` and
     raising an opaque AttributeError (see issue #3 review finding)."""
-    data = api(cfg, "GET", f"card/{card_id}")
+    data = api(cfg, "GET", _card_path(card_id))
     if data is None:
         raise SystemExit(f"AgilePlace GET card/{card_id} returned no card data (got null)")
     if not isinstance(data, dict):
@@ -230,9 +270,32 @@ def get_card(cfg: dict, card_id: str) -> dict:
     return card
 
 
+def _warn_card_field(card: dict, detail: str) -> None:
+    print(f"WARN  card {card.get('id', '<unknown>')} {detail} -- skipping malformed value")
+
+
 def card_external_urls(card: dict) -> list[str]:
-    links = card.get("externalLinks") or ([card["externalLink"]] if card.get("externalLink") else [])
-    return [(l or {}).get("url", "") for l in links if l]
+    if "externalLinks" in card:
+        links = card["externalLinks"]
+        if not isinstance(links, list):
+            _warn_card_field(card, f"has non-array externalLinks ({type(links).__name__})")
+            return []
+    else:
+        link = card.get("externalLink")
+        links = [link] if link else []
+
+    urls = []
+    for link in links:
+        if not isinstance(link, dict):
+            _warn_card_field(card, f"has non-object external link ({type(link).__name__})")
+            continue
+        if link:
+            url = link.get("url", "")
+            if not isinstance(url, str):
+                _warn_card_field(card, f"has non-string external link URL ({type(url).__name__})")
+                continue
+            urls.append(url)
+    return urls
 
 
 def custom_id_value(card: dict) -> str:
@@ -243,15 +306,34 @@ def custom_id_value(card: dict) -> str:
 
 
 def card_tags(card: dict) -> set[str]:
-    return {t for t in (card.get("tags") or []) if t}
+    tags = card.get("tags", [])
+    if not isinstance(tags, list):
+        _warn_card_field(card, f"has non-array tags ({type(tags).__name__})")
+        return set()
+    valid = set()
+    for tag in tags:
+        if not isinstance(tag, str):
+            _warn_card_field(card, f"has non-string tag ({type(tag).__name__})")
+            continue
+        if tag:
+            valid.add(tag)
+    return valid
+
+
+def _blocked_status(card: dict) -> dict:
+    status = card.get("blockedStatus", {})
+    if not isinstance(status, dict):
+        _warn_card_field(card, f"has non-object blockedStatus ({type(status).__name__})")
+        return {}
+    return status
 
 
 def card_is_blocked(card: dict) -> bool:
-    return bool((card.get("blockedStatus") or {}).get("isBlocked"))
+    return bool(_blocked_status(card).get("isBlocked"))
 
 
 def card_block_reason(card: dict) -> str:
-    return (card.get("blockedStatus") or {}).get("reason") or ""
+    return _blocked_status(card).get("reason") or ""
 
 
 def card_child_ids(card: dict) -> set[str]:
@@ -295,12 +377,13 @@ def ops_tag_remove(current_tags: list[str], tags_to_remove: set[str]) -> list[di
     """
     if not tags_to_remove:
         return []
-    missing = tags_to_remove - set(current_tags)
+    missing = {tag for tag in tags_to_remove if tag not in current_tags}
     if missing:
         raise ValueError(
             f"ops_tag_remove: tag(s) {sorted(missing)} not found in current_tags {current_tags!r}"
         )
-    indices = [i for i, t in enumerate(current_tags) if t in tags_to_remove]
+    indices = [i for i, t in enumerate(current_tags)
+               if isinstance(t, str) and t in tags_to_remove]
     return [{"op": "remove", "path": f"/tags/{i}"} for i in sorted(indices, reverse=True)]
 
 
@@ -329,7 +412,7 @@ def patch_card(cfg: dict, apply: bool, card: dict, ops: list[dict], note: str = 
     versioned = _card_with_version(cfg, apply, card, ops)
     if versioned is None:
         return {}
-    return mutate(cfg, apply, "PATCH", f"card/{versioned['id']}", body=ops,
+    return mutate(cfg, apply, "PATCH", _card_path(versioned["id"]), body=ops,
                   headers=_version_headers(versioned), note=note or f"patch card {versioned['id']} ({len(ops)} ops)")
 
 
