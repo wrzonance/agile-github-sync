@@ -80,7 +80,7 @@ today the code fails closed (refetch-or-skip-with-WARN) rather than assuming eit
   `{cardIds:[parent], connections:{children:[...]}}`, matching `agileplace.py`. An earlier draft
   of this doc said `card/connect` with `{parentCardId, childCardIds}`, which is not what the code
   sends. Validate the exact endpoint and body against the Connections API
-  ([create](https://success.planview.com/Planview_LeanKit/LeanKit_API/01_v2/connections/create) /
+  ([create](https://success.planview.com/Planview_AgilePlace/AgilePlace_API/01_v2/connections/create) /
   connect-many) on a disposable card, and confirm how existing children read back
   (`card_child_ids`).
 - Planned dates (Phase 4): `plannedStart`/`plannedFinish` via the card PATCH; the Project Start
