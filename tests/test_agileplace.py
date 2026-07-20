@@ -78,6 +78,7 @@ def test_list_cards_honors_server_page_size_clamp_and_uses_contiguous_offsets():
     assert [card["id"] for card in cards] == [str(i) for i in range(60)]
     assert [call.kwargs["params"]["offset"] for call in api_mock.call_args_list] == [0, 25, 50]
     assert all(call.kwargs["params"]["limit"] == 200 for call in api_mock.call_args_list)
+    assert all("include" not in call.kwargs["params"] for call in api_mock.call_args_list)
 
 
 def test_list_cards_retains_clamped_limit_when_later_metadata_omits_it():

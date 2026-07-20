@@ -22,14 +22,20 @@ past roughly 1,000 records.
   different cards. URL-owned cards also update the in-run customId index before fallback matching,
   so a renamed key cannot claim the old card; creation with that released key waits until the next
   run, after the rename PATCH has applied.
+- Existing epic children are read through the documented, paginated
+  `GET card/{cardId}/connection/children` endpoint. Malformed, failed, duplicate, or incomplete
+  snapshots remain observably unavailable and make reconciliation add-only. Removals require both
+  a successful native GitHub sub-issue snapshot and a complete AgilePlace child snapshot; successful
+  empty snapshots remain authoritative.
 
 ## [first-live-run]: confirm the exact API behavior (see also API-VALIDATION.md)
 
-- Card connections. `connect_children` and `disconnect_children` POST/DELETE `card/connections`
-  with `{cardIds:[parent], connections:{children:[...]}}`, and `card_child_ids` reads the
-  `childCards` include. Confirm the endpoint, the body, and that `list_cards` actually returns
-  `childCards`. If the read is unreliable, the add/remove reconciliation is unsafe and should be
-  gated on a trustworthy read of existing children.
+- Card connections. `card_child_ids` now uses the documented singular
+  `GET card/{cardId}/connection/children` path and validates its paginated `{pageMeta,cards}` shape
+  before allowing removals. No AgilePlace credentials were available when this was implemented, so
+  confirm that read on a disposable parent and child. Also confirm that `connect_children` and
+  `disconnect_children` POST/DELETE `card/connections` with
+  `{cardIds:[parent], connections:{children:[...]}}` round-trip against the target tenant.
 - Blocked state. The code reads `blockedStatus.{isBlocked,reason}` and writes flat `/isBlocked`
   (replace) + `/blockReason` (add). Confirm the write field paths and that a PATCH round-trips
   (block, unblock, change the reason).

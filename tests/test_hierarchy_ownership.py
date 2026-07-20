@@ -68,6 +68,15 @@ def _run_hierarchy(tmp_path: Path, monkeypatch, issues: list[dict], cards: list[
     monkeypatch.setattr(ghproject, "configured", lambda _cfg: False)
     monkeypatch.setattr(agileplace, "board_layout", lambda _cfg: [])
     monkeypatch.setattr(agileplace, "list_cards", lambda _cfg: cards)
+    children_by_parent = {
+        str(card["id"]): frozenset(str(child["id"]) for child in card.get("childCards", []))
+        for card in cards
+    }
+    monkeypatch.setattr(
+        agileplace,
+        "card_child_ids",
+        lambda _cfg, parent_id: children_by_parent.get(str(parent_id), frozenset()),
+    )
     monkeypatch.setattr(agileplace, "create_card", Mock(return_value={}))
     monkeypatch.setattr(agileplace, "patch_card", Mock())
     monkeypatch.setattr(agileplace, "connect_children", connect_children)

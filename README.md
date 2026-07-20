@@ -26,9 +26,10 @@ With `--apply`, each run:
    mass-move the board. Authoritative `NOT_PLANNED`/`DUPLICATE` retirement still moves an existing
    card to Done. New cards created during such a run are left laneless rather than fallback-laned; a
    later run lanes them normally once the read succeeds.
-3. Mirrors sub-issues as parent/child card connections, adding and removing links so the card
-   hierarchy matches the GitHub graph. LeanKit then rolls child progress up to the parent on its
-   own.
+3. Mirrors sub-issues as parent/child card connections. Existing children are read per epic through
+   the paginated AgilePlace connections endpoint. Links are removed only when both the native GitHub
+   sub-issue snapshot and the AgilePlace child snapshot are authoritative; either read failing makes
+   that epic add-only for the run. LeanKit then rolls child progress up to the parent on its own.
 4. Marks a card blocked while any issue blocking it is not Done, and clears the blocked state
    otherwise. A `NOT_PLANNED`/`DUPLICATE` blocker is known Done, so it cannot block dependents
    forever; a blocker missing from the complete issue snapshot remains incomplete (fail-closed).
