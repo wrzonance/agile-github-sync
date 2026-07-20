@@ -459,9 +459,10 @@ def main() -> None:
     if zero_status_despite_items:
         print(f"WARN  Projects v2 has {len(project_items)} issue item(s) but none carry a recognized "
               f"'{cfg['gh_project']['status_field']}' Status -- check GH_PROJECT_STATUS_FIELD; "
-              f"leaving lanes untouched this run")
+              f"leaving active-issue lanes untouched this run")
     elif project_read_failed:
-        print("WARN  Projects v2 read FAILED -- leaving lanes untouched this run (Status is the source of truth)")
+        print("WARN  Projects v2 read FAILED -- leaving active-issue lanes untouched this run "
+              "(Status is the source of truth)")
     elif ghproject.configured(cfg):
         print(f"projects v2: {len(project_status)} items carry Status{'; dates enabled' if field_meta else ''}")
     unmatched_kinds = (

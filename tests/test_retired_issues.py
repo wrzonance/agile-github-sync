@@ -171,7 +171,7 @@ def test_retirement_uses_authoritative_closure_when_other_reads_fail(
 
     out = capsys.readouterr().out
     assert "open-PR read FAILED" in out
-    assert "Projects v2 read FAILED" in out
+    assert "Projects v2 read FAILED -- leaving active-issue lanes untouched" in out
     assert "DRY   retire [10] -> 'Done' (DUPLICATE)" in out
     assert patch_card.call_args.args[3] == [
         {"op": "replace", "path": "/laneId", "value": "L5"},
