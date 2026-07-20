@@ -1,27 +1,32 @@
 # AgilePlace (Planview LeanKit) io v2: API validation
 
 This file records how the API calls this tool makes were checked before running against a real
-account. On 2026-07-17 each call was compared with the public Planview LeanKit io v2 docs and the
-official LeanKit Node client, the best available reference for request shapes. Most calls are
-confirmed. A few, marked `[live-check]`, are not fully pinned down by public docs and should be
-smoke-tested once against a disposable card. The last section records what was verified against
-the live GitHub APIs on 2026-07-18.
+account. On 2026-07-17 each call was compared with the public Planview LeanKit io v2 docs and, where
+it documents the same operation, the official LeanKit Node client. Most calls are confirmed. A few,
+marked `[live-check]`, are not fully pinned down by public docs and should be smoke-tested once
+against a disposable card. The last section records what was verified against the live GitHub APIs
+on 2026-07-18.
 
-## Confirmed against docs and the official client
+## Confirmed against the cited sources
 
 | Call (in `agileplace.py`) | Format used | Evidence |
 |---|---|---|
-| Update card | `PATCH /io/card/{id}` with an RFC-6902 JSON Patch array | LeanKit Node client `client.card.update(id, [ops])` |
+| Update card | `PATCH /io/card/{id}` with an RFC-6902 JSON Patch array | io v2 "Update a card" docs; the Node client maps `card.update(id, ops)` to this PATCH and forwards the operation array unchanged |
 | Add tag | `{op:"add", path:"/tags/-", value:<str>}` | Node client: "appends the tag... existing tags are preserved" |
-| Move lane | `{op:"replace", path:"/laneId", value:<laneId>}` | Node client (lane change via `card.update`) |
+| Move lane | `{op:"replace", path:"/laneId", value:<laneId>}` | io v2 "Update a card" docs (`/laneId` replace example) |
 | Optimistic concurrency | `x-lk-resource-version` header (card `version`) | Core-concepts doc: version via the `x-lk-resource-version` header or a `/version` test op |
 | List cards | `GET /io/card?limit&offset`, read `pageMeta.totalRecords` and `pageMeta.limit` | Docs: `pageMeta:{totalRecords,offset,limit,startRow,endRow}`; the code advances by the returned card count, honors a server-clamped limit, and fails closed at a defensive request ceiling |
 | Board layout | `GET /io/board/{id}` returns `lanes[]` with `id/title/cardStatus/parentLaneId/isDefaultDropLane` | io v2 board schema; `cardStatus` has only three values (`notStarted`, `started`, `finished`), so In progress and In review are told apart by lane title |
-| Tags representation | array of plain strings | the add op's `value` is a string; `card_tags()` reads strings |
+| Tags representation | array of plain strings | io v2 card/update schemas; the Node client's add-tag example appends a string |
 
 Sources: the LeanKit io v2 pages "Update a card", "Get a list of cards", "Get board", and "Core
-concepts" (`success.planview.com/Planview_LeanKit/LeanKit_API/01_v2/...`), and the official client
+concepts" (`success.planview.com/Planview_AgilePlace/AgilePlace_API/01_v2/...`), and the official client
 at `github.com/LeanKit/leankit-node-client`.
+
+The Node client is evidence only for the rows that name it: it forwards update operations without
+interpreting their paths, and it does not add `x-lk-resource-version`. The lane operation and
+optimistic-concurrency claims therefore rely on the io v2 update-card and core-concepts docs,
+respectively.
 
 ## [live-check]: verify once with real keys, on a disposable card
 
@@ -29,15 +34,14 @@ at `github.com/LeanKit/leankit-node-client`.
    `{op:"remove", path:"/tags/{i}"}`, no `value` member -- with indices computed from the card's
    current tags and removals applied in descending index order within one patch (`agileplace.py`'s
    `ops_tag_remove`), so an earlier removal in the batch never shifts a later op's target index.
-   This replaces an earlier, undocumented value-based form (`{op:"remove", path:"/tags",
-   value:<str>}`) that this doc previously (and incorrectly) attributed to "LeanKit's documented
-   value-based removal" -- no public LeanKit docs describe that shape. The evidence for the
-   index-based form: the Node client README documents tag *add* only (silent on remove); RFC 6902
-   itself says "the 'remove' operation removes the value at the target location" with no `value`
-   member; and source-index quotes of the update-card doc show index-based tag ops (e.g. `/tags/1`).
-   Still needs a human-run live check: confirm an add-then-remove round-trip on a disposable card
-   actually clears the tag (not attempted here -- no live AgilePlace credentials available/authorized
-   for this task).
+   This replaces the previously used value-based form (`{op:"remove", path:"/tags", value:<str>}`).
+   The current io v2 "Update a card" docs describe both forms: `/tags/{i}` removes by position,
+   while `/tags` plus `value` removes by value. This implementation intentionally uses the
+   deterministic index form: it follows RFC 6902's standard `remove` shape and ties each removal to
+   the versioned tag snapshot used to build the batch. The Node client README documents tag *add*
+   only and is not evidence for either removal form. Still needs a human-run live check: confirm an
+   add-then-remove round-trip on a disposable card actually clears the tag (not attempted here -- no
+   live AgilePlace credentials available/authorized for this task).
 2. External link add (init `04`). `{op:"add", path:"/externalLink", value:{label,url}}` on a card
    that has no link yet. Confirm `add` succeeds on the absent property (the code uses `add`, not
    `replace`).
@@ -76,7 +80,7 @@ today the code fails closed (refetch-or-skip-with-WARN) rather than assuming eit
   `{cardIds:[parent], connections:{children:[...]}}`, matching `agileplace.py`. An earlier draft
   of this doc said `card/connect` with `{parentCardId, childCardIds}`, which is not what the code
   sends. Validate the exact endpoint and body against the Connections API
-  ([create](https://success.planview.com/Planview_LeanKit/LeanKit_API/01_v2/connections/create) /
+  ([create](https://success.planview.com/Planview_AgilePlace/AgilePlace_API/01_v2/connections/create) /
   connect-many) on a disposable card, and confirm how existing children read back
   (`card_child_ids`).
 - Planned dates (Phase 4): `plannedStart`/`plannedFinish` via the card PATCH; the Project Start
@@ -104,8 +108,8 @@ During the backlog stand-up, these formerly `[live-check]` GitHub shapes were ex
 - Issue dependencies REST: `GET repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by` returns
   an array of issue objects, and `.number` extraction works, so `blocked_by_map` is sound.
 - `gh project item-list --format json`: items carry a top-level `id`, flattened lower-case field
-  values (`status`), and `content{number,title,url,state}`, which is exactly what `parse_items`
-  expects.
+  values (`status`), and `content{type,body,title,number,repository,url}` (no `state`) in gh 2.96.0.
+  `parse_items` consumes the `type`, `number`, and `url` members.
 - `gh project view --format json` (`.id`) and `field-list --format json`
   (`fields[].id/name/options[].id/name`): shapes as coded. Board #158's Status options are the
   standard five (Backlog / Ready / In progress / In review / Done). Note that field-list's default

@@ -1,9 +1,10 @@
-"""GitHub Projects v2 — the Status source of truth (Phase 1), later also dates (Phase 4).
+"""GitHub Projects v2 — the Status source of truth (Phase 1) and date fields (Phase 4).
 
 Uses the `gh project` CLI (owner-scoped; runs through ghkit.run so it inherits the target cwd). Reads
-are one `item-list` call; writes (Phase 1b/4) go through the dry-run gate. Parsing is a pure function so
-it's unit-tested against a fixture; the live `gh project` shape is validated at first real run (no
-Project is reachable offline). Requires the `project` token scope: `gh auth refresh -s project`.
+of Project items use one `item-list` call; field discovery uses `project view` and `field-list`. Only
+date-field writes exist, and they go through the dry-run gate. Parsing is a pure function so it's
+unit-tested against a fixture; the live `gh project` shape is validated at first real run. Requires
+the `project` token scope: `gh auth refresh -s project`.
 """
 from __future__ import annotations
 
@@ -158,7 +159,9 @@ def issue_dates_map(cfg: dict) -> dict[str, dict]:
 
 def field_meta(cfg: dict) -> dict | None:
     """{project_id, host, status_field_id, status_options{name_lower:id}, start_field_id, target_field_id}
-    for writes (Status in Phase 1b, dates in Phase 4). None on failure. VALIDATE LIVE: gh project shapes."""
+    for Project field discovery and date writes. Status metadata is included but currently unused;
+    there is no Project Status write path. None on failure.
+    VALIDATE LIVE: gh project shapes."""
     if not configured(cfg):
         return None
     ctx = ghkit._repo_context(cfg)

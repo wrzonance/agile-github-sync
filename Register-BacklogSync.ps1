@@ -56,7 +56,9 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" `
   -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -Command "python sync.py --apply *>> sync.log"' `
   -WorkingDirectory $here
 
-# Weekly on weekdays, with a 30-min repetition across the active window.
+# Microsoft's documented -Weekly parameter set has no repetition parameters. Copying .Repetition
+# from a -Once trigger is an undocumented community workaround and is load-bearing: do not replace
+# it by passing -RepetitionInterval/-RepetitionDuration directly to -Weekly.
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday -At $StartTime
 $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At $StartTime `
     -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
