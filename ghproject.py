@@ -1,10 +1,10 @@
 """GitHub Projects v2 — the Status source of truth (Phase 1) and date fields (Phase 4).
 
-Uses the `gh project` CLI (owner-scoped; runs through ghkit.run so it inherits the target cwd). Reads
-of Project items use one `item-list` call; field discovery uses `project view` and `field-list`. Only
-date-field writes exist, and they go through the dry-run gate. Parsing is a pure function so it's
-unit-tested against a fixture; the live `gh project` shape is validated at first real run. Requires
-the `project` token scope: `gh auth refresh -s project`.
+Uses the `gh` CLI through ghkit.run. Status/item identity comes from owner-scoped `project item-list`;
+field discovery uses `project view` and `field-list`; date values use a paginated GraphQL snapshot
+matched by field id so a successful all-cleared field is distinguishable from a failed read. Only
+date-field writes exist, and they go through the dry-run gate. Requires the `project` token scope:
+`gh auth refresh -s project`.
 """
 from __future__ import annotations
 
@@ -41,13 +41,6 @@ def _field(item: dict, name: str, *alts: str):
         if key in item and item[key] not in (None, ""):
             return item[key]
     return None
-
-
-def _field_key_seen(item: dict, name: str, *alts: str) -> bool:
-    """True if ANY candidate key for this field is present in `item`, regardless of value -- including
-    present-but-empty. Presence-only; never used for value reads. Distinguishes a genuinely-unset field
-    (key present, value empty) from a field gh never exposed under any known key (key truly absent)."""
-    return any(key in item for key in _field_candidates(name, *alts))
 
 
 _NON_ISSUE_CONTENT_TYPES = frozenset({"PullRequest", "DraftIssue"})
@@ -95,49 +88,110 @@ def _fetch_raw_items(cfg: dict) -> list | None:
         return None
 
 
-def items_and_raw(cfg: dict) -> tuple[dict[str, dict] | None, list | None]:
-    """(parse_items(...) keyed by issue URL, raw item-list rows), or (None, None) on failure/not-
-    configured. The raw rows let callers (e.g. unmatched_date_kinds) inspect field keys gh actually
-    exposed, beyond what parse_items already extracted."""
-    raw = _fetch_raw_items(cfg)
-    if raw is None:
-        return None, None
-    p = cfg["gh_project"]
-    try:
-        parsed = parse_items(raw, p["status_field"], p["start_field"], p["target_field"])
-    except KeyError:
-        return None, None
-    return parsed, raw
-
-
 def items(cfg: dict) -> dict[str, dict] | None:
     """All project items keyed by issue URL, or None on failure/not-configured (caller falls back)."""
-    return items_and_raw(cfg)[0]
+    raw = _fetch_raw_items(cfg)
+    if raw is None:
+        return None
+    p = cfg["gh_project"]
+    try:
+        return parse_items(raw, p["status_field"], p["start_field"], p["target_field"])
+    except KeyError:
+        return None
 
 
-def unmatched_date_kinds(raw_items: list | None, field_meta: dict | None, start_field: str,
-                          target_field: str, known_kinds: frozenset[str] = frozenset()) -> frozenset[str]:
-    """Kinds ("start"/"target") that USED TO read real values (kind in `known_kinds` -- some issue's
-    merge-base previously held a non-empty value for it, see sync.known_date_kinds) but NOW no raw item
-    row exposes a matching key for that field's name at all -- a regression signal worth warning about
-    before dates silently stop syncing (issue #6's two-run misread-as-deletion scenario).
+_DATE_VALUES_QUERY = """query($project:ID!,$endCursor:String){node(id:$project){... on ProjectV2{
+  items(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{id
+    fieldValues(first:100){pageInfo{hasNextPage} nodes{
+      ... on ProjectV2ItemFieldDateValue{date field{... on ProjectV2Field{id}}}
+    }}
+  }}
+}}}"""
 
-    A kind with NO known history is never flagged on zero-match alone: `gh project item-list` only
-    flattens a custom field's key onto an item that actually carries a value, so a field that has never
-    been set on any item -- the common case on a project's first rollout, even with the field
-    correctly configured -- is indistinguishable from a genuine name mismatch by key-presence alone.
-    `known_kinds` is what tells "used to work, now doesn't" apart from "never used".
 
-    A row that HAS the key with an empty/null value does NOT count as a mismatch either way (that's a
-    normal unset field, the common case). Pure: no I/O, no printing. frozenset() when raw_items or
-    field_meta is falsy/empty."""
-    if not raw_items or not field_meta:
-        return frozenset()
-    checks = (("start", start_field, field_meta.get("start_field_id")),
-              ("target", target_field, field_meta.get("target_field_id")))
-    return frozenset(kind for kind, name, field_id in checks
-                      if field_id and kind in known_kinds
-                      and not any(_field_key_seen(row, name) for row in raw_items))
+def _date_values_from_pages(stdout: str, field_ids: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Parse a complete `gh api graphql --paginate --slurp` date snapshot by Project item id."""
+    pages = json.loads(stdout or "[]")
+    if not isinstance(pages, list) or not pages:
+        raise TypeError("date snapshot must contain at least one page")
+    result = {}
+    for page_index, page in enumerate(pages):
+        if not isinstance(page, dict) or page.get("errors"):
+            raise ValueError("date snapshot contains GraphQL errors")
+        connection = page["data"]["node"]["items"]
+        page_info = connection["pageInfo"]
+        has_next = page_info["hasNextPage"]
+        if not isinstance(has_next, bool) or has_next != (page_index < len(pages) - 1):
+            raise ValueError("date snapshot outer pagination is incomplete")
+        nodes = connection["nodes"]
+        if not isinstance(nodes, list):
+            raise TypeError("date snapshot items must be a list")
+        for item in nodes:
+            item_id = item["id"]
+            values = item["fieldValues"]
+            if not isinstance(item_id, str) or not item_id or item_id in result:
+                raise ValueError("date snapshot contains an invalid or duplicate item id")
+            if values["pageInfo"].get("hasNextPage") is not False:
+                raise ValueError("date snapshot field-value pagination is incomplete")
+            result[item_id] = _date_values_for_item(values["nodes"], field_ids)
+    return result
+
+
+def _date_values_for_item(nodes: list, field_ids: dict[str, str]) -> dict[str, str]:
+    """Extract configured date kinds from one item's GraphQL field-value union nodes."""
+    if not isinstance(nodes, list):
+        raise TypeError("date snapshot field values must be a list")
+    by_id = {field_id: kind for kind, field_id in field_ids.items()}
+    result = {}
+    for node in nodes:
+        if node == {}:  # expected for non-date union members excluded by the inline fragment
+            continue
+        date = node.get("date") if isinstance(node, dict) else None
+        field = node.get("field") if isinstance(node, dict) else None
+        field_id = field.get("id") if isinstance(field, dict) else None
+        if not isinstance(date, str) or not isinstance(field_id, str):
+            raise TypeError("date snapshot contains a malformed date value")
+        kind = by_id.get(field_id)
+        if kind:
+            if kind in result:
+                raise ValueError("date snapshot contains duplicate values for one field")
+            result[kind] = date
+    return result
+
+
+def hydrate_item_dates(cfg: dict, project_items: dict[str, dict],
+                       field_meta: dict) -> dict[str, dict] | None:
+    """Return copied parsed items with authoritative GraphQL dates mapped by field id.
+
+    A successful snapshot represents cleared fields as None. None means the snapshot failed or was
+    incomplete, so callers must skip all date reconciliation for the run rather than infer clears.
+    """
+    project_id = field_meta.get("project_id")
+    host = field_meta.get("host")
+    candidates = {kind: field_meta.get(f"{kind}_field_id") for kind in ("start", "target")}
+    if (not isinstance(project_id, str) or not project_id
+            or not isinstance(host, str) or not host
+            or any(field_id is not None and not isinstance(field_id, str)
+                   for field_id in candidates.values())):
+        return None
+    field_ids = {kind: field_id for kind, field_id in candidates.items() if field_id}
+    if len(set(field_ids.values())) != len(field_ids):
+        return None
+    try:
+        out = ghkit.run(cfg, ["api", "graphql", "--hostname", host, "--paginate", "--slurp",
+                              "-f", f"query={_DATE_VALUES_QUERY}", "-f", f"project={project_id}"])
+        snapshot = _date_values_from_pages(out.stdout, field_ids)
+        hydrated = {}
+        for url, item in project_items.items():
+            item_id = item.get("item_id")
+            if not isinstance(item_id, str) or item_id not in snapshot:
+                raise ValueError("item-list and GraphQL date snapshots disagree")
+            dates = snapshot[item_id]
+            hydrated[url] = {**item, "start": dates.get("start"), "target": dates.get("target")}
+        return hydrated
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
+            KeyError, TypeError, ValueError, AttributeError, IndexError, FileNotFoundError):
+        return None
 
 
 def issue_status_map(cfg: dict) -> dict[str, str]:

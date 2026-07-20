@@ -1,7 +1,4 @@
-"""Unit tests for ghproject's field-key matching: camelCase resolution and key-presence detection
-used by the date-sync unmatched-kind guard (issue #6). No network or gh -- pure functions only.
-Run: pytest -q
-"""
+"""Unit tests for ghproject's item parsing, metadata reads, and date writes."""
 import json
 import subprocess
 import sys
@@ -12,8 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import ghkit  # noqa: E402
 import ghproject  # noqa: E402
-from ghproject import (_camel, _field,  # noqa: E402
-                       _field_key_seen, parse_items, unmatched_date_kinds)
+from ghproject import _camel, _field, parse_items  # noqa: E402
 from sync import sync_dates  # noqa: E402
 
 
@@ -92,26 +88,7 @@ def test_field_returns_none_when_value_empty_or_missing():
     assert _field({}, "Start Date") is None
 
 
-# --- _field_key_seen (presence-only, distinct from _field's value check) ----
-
-def test_field_key_seen_true_when_key_present_with_value():
-    assert _field_key_seen({"start Date": "2026-01-02"}, "Start Date") is True
-
-
-def test_field_key_seen_true_when_key_present_but_empty():
-    # present-but-empty is a genuinely-unset field, NOT a missing/mismatched key.
-    assert _field_key_seen({"start Date": ""}, "Start Date") is True
-    assert _field_key_seen({"start Date": None}, "Start Date") is True
-
-
-def test_field_key_seen_false_when_key_absent():
-    assert _field_key_seen({"other": "x"}, "Start Date") is False
-    assert _field_key_seen({}, "Start Date") is False
-
-
-# --- items() / items_and_raw() equivalence -----------------------------------
-# items()'s external contract must not change: it is used by issue_status_map and
-# issue_dates_map, so items(cfg) == items_and_raw(cfg)[0] for every input.
+# --- items() -----------------------------------------------------------------
 
 RAW_ITEMS = [
     {"id": "PVTI_1", "content": {"type": "Issue", "number": 5, "url": "https://github.com/o/r/issues/5"},
@@ -130,49 +107,39 @@ def _run_success(*_args, **_kwargs):
     return Mock(stdout=json.dumps({"items": RAW_ITEMS}))
 
 
-def test_items_and_raw_matches_items_on_success():
+def test_items_returns_parsed_rows_on_success():
     cfg = _cfg()
     with patch("ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
-        via_items = ghproject.items(cfg)
-    with patch("ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
-        via_pair, raw = ghproject.items_and_raw(cfg)
-    assert via_items == via_pair
-    assert raw == RAW_ITEMS
+        result = ghproject.items(cfg)
+    assert result["https://github.com/o/r/issues/5"]["start"] == "2026-01-02"
 
 
-def test_items_and_raw_matches_items_on_subprocess_failure():
+def test_items_returns_none_on_subprocess_failure():
     cfg = _cfg()
     err = subprocess.CalledProcessError(1, ["gh"])
     with patch("ghproject.ghkit.run", side_effect=err), _patch_ctx():
         assert ghproject.items(cfg) is None
-    with patch("ghproject.ghkit.run", side_effect=err), _patch_ctx():
-        assert ghproject.items_and_raw(cfg) == (None, None)
 
 
-def test_items_and_raw_matches_items_on_json_decode_failure():
+def test_items_returns_none_on_json_decode_failure():
     cfg = _cfg()
     with patch("ghproject.ghkit.run", return_value=Mock(stdout="not json")), _patch_ctx():
         assert ghproject.items(cfg) is None
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout="not json")), _patch_ctx():
-        assert ghproject.items_and_raw(cfg) == (None, None)
 
 
-def test_items_and_raw_matches_items_on_key_error():
+def test_items_returns_none_on_key_error():
     cfg = _cfg()
     del cfg["gh_project"]["status_field"]  # parse_items needs p["status_field"] -> KeyError
     with patch("ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
         assert ghproject.items(cfg) is None
-    with patch("ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
-        assert ghproject.items_and_raw(cfg) == (None, None)
 
 
 def test_fetch_raw_items_fails_closed_when_host_unresolved():
     # No resolvable target host -> no gh project call is attempted, and the read fails closed.
     cfg = _cfg()
     with patch("ghproject.ghkit._repo_context", return_value=None), \
-         patch("ghproject.ghkit.run", side_effect=_run_success) as run_mock:
+        patch("ghproject.ghkit.run", side_effect=_run_success) as run_mock:
         assert ghproject.items(cfg) is None
-        assert ghproject.items_and_raw(cfg) == (None, None)
     run_mock.assert_not_called()
 
 
@@ -180,83 +147,13 @@ def test_fetch_raw_items_pins_project_call_to_resolved_host():
     # gh project item-list has no --hostname flag; the resolved host must reach run() as host=.
     cfg = _cfg()
     with patch("ghproject.ghkit.run", side_effect=_run_success) as run_mock, _patch_ctx(host="ghes.acme.internal"):
-        ghproject.items_and_raw(cfg)
+        ghproject.items(cfg)
     assert run_mock.call_args.kwargs.get("host") == "ghes.acme.internal"
 
 
-def test_items_and_raw_matches_items_when_not_configured():
+def test_items_returns_none_when_not_configured():
     cfg = _cfg(owner=None)
     assert ghproject.items(cfg) is None
-    assert ghproject.items_and_raw(cfg) == (None, None)
-
-
-# --- unmatched_date_kinds -----------------------------------------------------
-# Pure, no I/O. Flags a kind iff the field id resolved AND the kind is in `known_kinds` (some issue's
-# merge-base previously held a real value for it) AND raw_items is non-empty AND no row exposes any
-# candidate key for that field's name -- a present-but-empty value is NOT a flag, and neither is a
-# kind with no known history (see issue #6 follow-up: gh's item-list only flattens a custom field's
-# key onto items that actually carry a value, so an all-unset field is indistinguishable from a name
-# mismatch by key-presence alone on a project's first rollout -- known_kinds is what tells "used to
-# work, now doesn't" apart from "never used").
-
-def _field_meta(start_id="SF_1", target_id="TF_1"):
-    return {"project_id": "PVT_1", "status_field_id": "STF", "status_options": {},
-            "start_field_id": start_id, "target_field_id": target_id}
-
-
-_BOTH_KNOWN = frozenset({"start", "target"})
-
-
-def test_unmatched_date_kinds_flags_on_zero_match_when_kind_is_known():
-    raw = [{"id": "PVTI_1", "content": {"url": "u1"}, "other": "x"}]
-    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target", _BOTH_KNOWN) == frozenset({"start", "target"})
-
-
-def test_unmatched_date_kinds_no_flag_on_zero_match_when_kind_has_no_known_history():
-    # First rollout: the field is correctly configured but nobody has ever set it on any item, so gh
-    # never flattens the key onto any row. That must NOT be mistaken for a name mismatch -- it would
-    # permanently block Phase 4 date sync for a project that has never had a date set yet.
-    raw = [{"id": "PVTI_1", "content": {"url": "u1"}, "other": "x"}]
-    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target") == frozenset()
-    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target", frozenset()) == frozenset()
-
-
-def test_unmatched_date_kinds_flags_only_the_known_kind_that_regresses():
-    # "start" previously read real values (known); "target" never has (unknown). Both now show zero
-    # key matches -- only "start" is a genuine regression worth flagging.
-    raw = [{"id": "PVTI_1", "content": {"url": "u1"}, "other": "x"}]
-    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target", frozenset({"start"})) == frozenset({"start"})
-
-
-def test_unmatched_date_kinds_no_flag_when_any_row_matches():
-    raw = [
-        {"id": "PVTI_1", "content": {"url": "u1"}},                                  # no keys at all
-        {"id": "PVTI_2", "content": {"url": "u2"}, "start Date": "", "target": "2026-01-01"},
-    ]
-    assert unmatched_date_kinds(raw, _field_meta(), "Start Date", "Target", _BOTH_KNOWN) == frozenset()
-
-
-def test_unmatched_date_kinds_no_flag_on_empty_or_none_raw_items():
-    assert unmatched_date_kinds([], _field_meta(), "Start", "Target", _BOTH_KNOWN) == frozenset()
-    assert unmatched_date_kinds(None, _field_meta(), "Start", "Target", _BOTH_KNOWN) == frozenset()
-
-
-def test_unmatched_date_kinds_no_flag_when_field_meta_lacks_field_id():
-    raw = [{"id": "PVTI_1", "content": {"url": "u1"}}]
-    meta = _field_meta(start_id=None, target_id=None)
-    assert unmatched_date_kinds(raw, meta, "Start", "Target", _BOTH_KNOWN) == frozenset()
-    assert unmatched_date_kinds(raw, None, "Start", "Target", _BOTH_KNOWN) == frozenset()
-
-
-def test_unmatched_date_kinds_present_but_empty_value_does_not_flag():
-    # A row that HAS the key but with an empty value is genuinely-unset, not a mismatch.
-    raw = [{"id": "PVTI_1", "content": {"url": "u1"}, "Start": "", "Target": None}]
-    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target", _BOTH_KNOWN) == frozenset()
-
-
-def test_unmatched_date_kinds_flags_only_the_missing_kind():
-    raw = [{"id": "PVTI_1", "content": {"url": "u1"}, "Start": "2026-01-01"}]  # no Target key at all
-    assert unmatched_date_kinds(raw, _field_meta(), "Start", "Target", _BOTH_KNOWN) == frozenset({"target"})
 
 
 # --- set_project_date returns bool (True iff a write was actually issued) ----
