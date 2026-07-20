@@ -183,11 +183,11 @@ def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dic
         if ordered is None:
             return None, set()
         if ordered:
-            return ordered[0], {l["id"] for l in ordered}
+            return ordered[0], {lane["id"] for lane in ordered}
         if not quiet:
             print(f"WARN  STAGE_LANE_MAP lists {stage_map[stage]} for '{stage}' but none match a leaf lane -- inferring")
 
-    cands = [l for l in leaves if lane_matches_stage(lane_title(l), stage)]
+    cands = [lane for lane in leaves if lane_matches_stage(lane_title(lane), stage)]
     if not cands:
         cands = [
             lane for lane in leaves
