@@ -20,7 +20,7 @@ import urllib.request
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
-from stages import STAGE_CARD_STATUS, lane_matches_stage
+from stages import STAGES, STAGE_CARD_STATUS, lane_matches_stage, title_contains_phrase
 
 REQUEST_TIMEOUT = 30      # seconds per request
 MAX_RETRY_SLEEP = 60      # cap a hostile/large Retry-After so a run can't stall for hours
@@ -135,10 +135,41 @@ def _leaf_lanes(lanes: list) -> list:
     return [l for l in lanes if l["id"] not in parent_ids]
 
 
+def _release_lane(candidates: list[dict], release: str, by_id: dict) -> dict | None:
+    """Resolve duplicate candidates to exactly one lane under the requested release ancestor."""
+    if len(candidates) == 1:
+        return candidates[0]
+    if not release:
+        return None
+    matches = [lane for lane in candidates
+               if any(title_contains_phrase(title, release)
+                      for title in _ancestor_titles(lane, by_id))]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _mapped_lanes(leaves: list[dict], stage_titles: list[str], release: str,
+                  by_id: dict) -> list[dict] | None:
+    """Resolve configured titles in order; None means a duplicate title stayed ambiguous."""
+    by_title = {}
+    for lane in leaves:
+        by_title.setdefault(lane_title(lane).lower(), []).append(lane)
+    ordered, seen = [], set()
+    for wanted in stage_titles:
+        matches = by_title.get(wanted.strip().lower(), [])
+        selected = _release_lane(matches, release, by_id) if matches else None
+        if len(matches) > 1 and selected is None:
+            return None
+        if selected and selected["id"] not in seen:
+            seen.add(selected["id"])
+            ordered.append(selected)
+    return ordered
+
+
 def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dict | None = None, *,
                             quiet: bool = False):
-    """(target_lane_or_None, acceptable_lane_ids). STAGE_LANE_MAP wins (first = target, all = in-stage);
-    else infer by lane title then cardStatus, failing CLOSED on ambiguity. Leaf lanes only.
+    """(target_lane_or_None, acceptable_lane_ids). STAGE_LANE_MAP wins (first = target, all = in-stage),
+    with duplicate titles resolved by release ancestor; else infer by lane title then non-conflicting
+    cardStatus, failing CLOSED on ambiguity. Leaf lanes only.
 
     quiet=True suppresses the STAGE_LANE_MAP-misconfiguration WARN -- for callers that evaluate this
     purely as an internal membership check (not the actual, decisive lane-move call), so one
@@ -148,15 +179,9 @@ def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dic
     by_id = {l["id"]: l for l in lanes}
 
     if stage_map and stage in stage_map:
-        by_title = {}
-        for l in leaves:
-            by_title.setdefault(lane_title(l).lower(), []).append(l)  # index to lists, not last-wins
-        ordered, seen = [], set()
-        for wanted in stage_map[stage]:
-            for lane in by_title.get(wanted.strip().lower(), []):
-                if lane["id"] not in seen:
-                    seen.add(lane["id"])
-                    ordered.append(lane)
+        ordered = _mapped_lanes(leaves, stage_map[stage], release, by_id)
+        if ordered is None:
+            return None, set()
         if ordered:
             return ordered[0], {l["id"] for l in ordered}
         if not quiet:
@@ -164,14 +189,17 @@ def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dic
 
     cands = [l for l in leaves if lane_matches_stage(lane_title(l), stage)]
     if not cands:
-        cands = [l for l in leaves if l.get("cardStatus") == STAGE_CARD_STATUS[stage]]
+        cands = [
+            lane for lane in leaves
+            if lane.get("cardStatus") == STAGE_CARD_STATUS[stage]
+            and not any(other != stage and lane_matches_stage(lane_title(lane), other)
+                        for other in STAGES)
+        ]
     if len(cands) == 1:
         return cands[0], {cands[0]["id"]}
-    if release and len(cands) > 1:
-        in_release = [l for l in cands
-                      if any(release.lower() in t.lower() for t in _ancestor_titles(l, by_id))]
-        if len(in_release) == 1:
-            return in_release[0], {in_release[0]["id"]}
+    selected = _release_lane(cands, release, by_id)
+    if selected:
+        return selected, {selected["id"]}
     return None, set()  # none, or still ambiguous -> don't move
 
 

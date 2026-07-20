@@ -182,7 +182,7 @@ def explicit_stage_status(issue: dict, project_status: dict) -> str | None:
 
 
 def resolve_issue_stage(issue: dict, project_status: dict) -> str:
-    if is_retired_issue(issue):
+    if str(issue.get("state", "")).upper() == "CLOSED":
         return "Done"
     return explicit_stage_status(issue, project_status) or issue_stage(issue)
 

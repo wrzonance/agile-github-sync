@@ -452,11 +452,56 @@ def test_inference_backlog_ambiguous_fails_closed():
     assert lane is None and acceptable == set()
 
 
+def test_card_status_fallback_vetoes_lane_titled_for_a_different_stage():
+    lanes = [{"id": "review", "title": "Under Review", "cardStatus": "started"}]
+
+    lane, acceptable = resolve_lane_for_stage(lanes, "In progress", "")
+
+    assert lane is None
+    assert acceptable == set()
+
+
 def test_stage_lane_map_multi_lane_backlog():
     smap = {"Backlog": ["New Requests", "Approved"]}
     lane, acceptable = resolve_lane_for_stage(_board_lanes(), "Backlog", "", smap)
     assert lane["id"] == "nr"              # first listed = move target
     assert acceptable == {"nr", "ap"}      # a card already in Approved is left alone
+
+
+def test_release_disambiguation_does_not_match_release_as_substring():
+    lanes = [
+        {"id": "release-11", "title": "Release 11.0"},
+        {"id": "doing-11", "title": "Doing", "cardStatus": "started",
+         "parentLaneId": "release-11"},
+        {"id": "release-2", "title": "Release 2.0"},
+        {"id": "doing-2", "title": "Doing", "cardStatus": "started",
+         "parentLaneId": "release-2"},
+    ]
+
+    lane, acceptable = resolve_lane_for_stage(lanes, "In progress", "1.0")
+
+    assert lane is None
+    assert acceptable == set()
+
+
+def test_stage_lane_map_disambiguates_duplicate_titles_by_release_or_fails_closed():
+    lanes = [
+        {"id": "release-2", "title": "Release 2.0"},
+        {"id": "queue-2", "title": "Queue", "cardStatus": "notStarted",
+         "parentLaneId": "release-2"},
+        {"id": "release-1", "title": "Release 1.0"},
+        {"id": "queue-1", "title": "Queue", "cardStatus": "notStarted",
+         "parentLaneId": "release-1"},
+    ]
+    smap = {"Ready": ["Queue"]}
+
+    lane, acceptable = resolve_lane_for_stage(lanes, "Ready", "1.0", smap)
+    assert lane["id"] == "queue-1"
+    assert acceptable == {"queue-1"}
+
+    lane, acceptable = resolve_lane_for_stage(lanes, "Ready", "", smap)
+    assert lane is None
+    assert acceptable == set()
 
 
 def test_stage_lane_map_unknown_lane_falls_back_to_inference():
@@ -536,6 +581,12 @@ def test_resolve_issue_stage_prefers_project_status_then_labels():
     assert resolve_issue_stage(issue, {"u1": "In review"}) == "In review"   # Project Status wins
     assert resolve_issue_stage(issue, {}) == "In progress"                   # fallback: label
     assert resolve_issue_stage({"url": "u2", "state": "OPEN", "labels": []}, {}) == "Backlog"
+
+
+def test_resolve_issue_stage_closed_beats_stale_project_status():
+    issue = {"url": "u1", "state": "CLOSED", "labels": ["agent:in-progress"]}
+
+    assert resolve_issue_stage(issue, {"u1": "In progress"}) == "Done"
 
 
 def test_resolve_issue_stage_falls_back_to_labels_on_unrecognized_custom_status_option():

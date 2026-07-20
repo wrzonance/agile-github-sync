@@ -37,6 +37,15 @@ STAGE_TITLE_HINTS = {
 }
 
 
+def title_contains_phrase(title: str, phrase: str) -> bool:
+    """Whether ``phrase`` appears in ``title`` between space-delimited word boundaries."""
+    normalized_title = (title or "").strip().lower()
+    normalized_phrase = (phrase or "").strip().lower()
+    if not normalized_title or not normalized_phrase:
+        return False
+    return f" {normalized_phrase} " in f" {normalized_title} "
+
+
 def issue_stage(issue: dict) -> str:
     """One issue's stage from its GitHub facts.
 
@@ -65,11 +74,7 @@ def lane_matches_stage(lane_title: str, stage: str) -> bool:
     names resolve ('Ready to Start' -> Ready, 'Code Review' -> In review) without false hits inside
     other words ('Already Done' does NOT match Ready). The hint sets stay disjoint, so In progress and
     In review remain distinct."""
-    t = (lane_title or "").strip().lower()
-    if not t:
-        return False
-    padded = f" {t} "  # both-side word boundaries: "Ready to Start"->Ready, but NOT "Readying"/"Reviewers"
-    return any(f" {h} " in padded for h in STAGE_TITLE_HINTS[stage])
+    return any(title_contains_phrase(lane_title, hint) for hint in STAGE_TITLE_HINTS[stage])
 
 
 def title_key(title: str) -> str | None:
