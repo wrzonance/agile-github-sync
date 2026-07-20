@@ -45,7 +45,7 @@ def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None,
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             raw = resp.read()
             return json.loads(raw) if raw else {}
-    except json.JSONDecodeError as err:
+    except (json.JSONDecodeError, UnicodeDecodeError) as err:
         detail = raw.decode(errors="replace")[:300]
         raise SystemExit(
             f"AgilePlace {method} /{path} failed: invalid JSON response {detail}"
@@ -259,8 +259,8 @@ def _warn_card_field(card: dict, detail: str) -> None:
 
 
 def card_external_urls(card: dict) -> list[str]:
-    links = card.get("externalLinks")
-    if links:
+    if "externalLinks" in card:
+        links = card["externalLinks"]
         if not isinstance(links, list):
             _warn_card_field(card, f"has non-array externalLinks ({type(links).__name__})")
             return []
@@ -286,7 +286,7 @@ def custom_id_value(card: dict) -> str:
 
 
 def card_tags(card: dict) -> set[str]:
-    tags = card.get("tags") or []
+    tags = card.get("tags", [])
     if not isinstance(tags, list):
         _warn_card_field(card, f"has non-array tags ({type(tags).__name__})")
         return set()
@@ -301,7 +301,7 @@ def card_tags(card: dict) -> set[str]:
 
 
 def _blocked_status(card: dict) -> dict:
-    status = card.get("blockedStatus") or {}
+    status = card.get("blockedStatus", {})
     if not isinstance(status, dict):
         _warn_card_field(card, f"has non-object blockedStatus ({type(status).__name__})")
         return {}

@@ -46,6 +46,19 @@ def test_api_converts_non_json_200_to_standard_truncated_system_exit():
     assert message == prefix + raw[:300].decode()
 
 
+def test_api_converts_non_utf8_200_to_standard_truncated_system_exit():
+    raw = b"\xff<html>invalid encoding</html>" + (b"x" * 400)
+
+    with patch("agileplace.urllib.request.urlopen") as urlopen_mock:
+        urlopen_mock.return_value.__enter__.return_value.read.return_value = raw
+        with pytest.raises(SystemExit) as exc_info:
+            api(CFG, "GET", "card")
+
+    message = str(exc_info.value)
+    prefix = "AgilePlace GET /card failed: invalid JSON response "
+    assert message == prefix + raw.decode(errors="replace")[:300]
+
+
 # --- list_cards: response-driven, bounded pagination (issue #16) ---------
 
 def test_list_cards_honors_server_page_size_clamp_and_uses_contiguous_offsets():
@@ -333,6 +346,15 @@ def test_card_tags_skips_non_string_elements_and_warns_with_card_id(capsys):
     assert all("card-7" in line for line in warnings)
 
 
+def test_card_tags_rejects_supplied_falsy_non_array_and_warns_with_card_id(capsys):
+    card = {"id": "card-7-falsy", "tags": ""}
+
+    assert card_tags(card) == set()
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 1
+    assert "card-7-falsy" in warnings[0]
+
+
 def test_card_external_urls_skips_non_dict_links_and_warns_with_card_id(capsys):
     card = {
         "id": "card-8",
@@ -345,6 +367,19 @@ def test_card_external_urls_skips_non_dict_links_and_warns_with_card_id(capsys):
     assert all("card-8" in line for line in warnings)
 
 
+def test_card_external_urls_rejects_supplied_falsy_non_array_before_legacy_fallback(capsys):
+    card = {
+        "id": "card-8-falsy",
+        "externalLinks": {},
+        "externalLink": {"url": "https://example.test/issues/8"},
+    }
+
+    assert card_external_urls(card) == []
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 1
+    assert "card-8-falsy" in warnings[0]
+
+
 def test_blocked_readers_ignore_string_status_and_warn_with_card_id(capsys):
     card = {"id": "card-9", "blockedStatus": "blocked"}
 
@@ -353,6 +388,15 @@ def test_blocked_readers_ignore_string_status_and_warn_with_card_id(capsys):
     warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
     assert len(warnings) == 2
     assert all("card-9" in line for line in warnings)
+
+
+def test_blocked_reader_rejects_supplied_falsy_non_object_and_warns_with_card_id(capsys):
+    card = {"id": "card-9-falsy", "blockedStatus": 0}
+
+    assert card_is_blocked(card) is False
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 1
+    assert "card-9-falsy" in warnings[0]
 
 
 def test_card_block_reason_reads_nested_blockedstatus_reason():
