@@ -75,17 +75,42 @@ def known_date_kinds(issues_state: dict) -> frozenset[str]:
     return frozenset(kind for kind in ("start", "target") if any(v.get(kind) for v in issues_state.values()))
 
 
-def epic_task_numbers(cfg: dict, epic: dict, by_key: dict) -> list[int]:
-    """Native sub-issues; fall back to the [KEY] title convention ONLY on a query FAILURE (None), never
-    on a genuine empty result."""
+def _epic_task_resolution(cfg: dict, epic: dict, by_key: dict) -> tuple[list[int], bool]:
+    """Return ``(numbers, authoritative)`` for an epic's tasks.
+
+    A successful native sub-issue read is authoritative, including an empty result. The title-key
+    fallback is only a heuristic, so callers may use it to add connections but must not use it to
+    authorize removals.
+    """
     nums = ghkit.sub_issue_numbers(cfg, epic["number"])
     if nums is not None:
-        return nums
+        return nums, True
     print(f"WARN  [{title_key(epic['title']) or epic['number']}] native sub-issues unavailable -- "
           f"falling back to the [KEY] title convention")
     epic_key = title_key(epic["title"])
-    return [i["number"] for i in by_key.values()
-            if epic_key_for_task(title_key(i["title"]) or "") == epic_key]
+    if epic_key is None:
+        print(f"WARN  [{epic['number']}] epic has no [KEY] prefix -- fallback matches nothing")
+        return [], False
+    return ([i["number"] for i in by_key.values()
+             if epic_key_for_task(title_key(i["title"]) or "") == epic_key], False)
+
+
+def epic_task_numbers(cfg: dict, epic: dict, by_key: dict) -> list[int]:
+    """Native sub-issues, or [KEY] convention matches when the native read fails."""
+    numbers, _ = _epic_task_resolution(cfg, epic, by_key)
+    return numbers
+
+
+def _child_connection_changes(desired: set[str], existing: set[str], managed: set[str],
+                              *, authoritative: bool) -> tuple[list[str], list[str]]:
+    """Return child-card additions and safe removals for one epic.
+
+    Additions are safe from either native or title-fallback discovery. Removals require an
+    authoritative native snapshot and remain limited to cards managed by this sync.
+    """
+    adds = sorted(desired - existing)
+    removes = sorted((existing & managed) - desired) if authoritative else []
+    return adds, removes
 
 
 def issue_card_title(issue: dict) -> str:
@@ -426,18 +451,20 @@ def main() -> None:
             sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue,
                        unmatched_kinds)
 
-    # 3) parent/child connections: make each epic card's children EQUAL its sub-issues (add + remove)
+    # 3) parent/child connections: authoritative native reads reconcile exactly; title-key fallback
+    # is add-only because a heuristic must never authorize destructive reconciliation.
     our_card_ids = {str(c["id"]) for c in card_by_url.values() if c.get("id")}
     for epic in epics:
         parent = card_for(epic)
         if not parent or not parent.get("id"):
             continue
         key = title_key(epic["title"]) or str(epic["number"])
-        task_urls = [by_number[n]["url"] for n in epic_task_numbers(cfg, epic, by_key) if n in by_number]
+        task_numbers, authoritative = _epic_task_resolution(cfg, epic, by_key)
+        task_urls = [by_number[n]["url"] for n in task_numbers if n in by_number]
         desired = {str(card_by_url[u]["id"]) for u in task_urls if u in card_by_url and card_by_url[u].get("id")}
         existing = agileplace.card_child_ids(parent)
-        adds = sorted(desired - existing)
-        removes = sorted((existing & our_card_ids) - desired)  # only detach cards WE manage
+        adds, removes = _child_connection_changes(
+            desired, existing, our_card_ids, authoritative=authoritative)
         if adds:
             agileplace.connect_children(cfg, apply, str(parent["id"]), adds)
             print(f"{'link ' if apply else 'DRY  '} [{key}] +{len(adds)} child card(s)")
