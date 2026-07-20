@@ -689,3 +689,72 @@ def test_existing_card_lane_resolution_is_never_called_when_project_read_failed(
 
     resolve_mock.assert_not_called()
     patch_card_mock.assert_not_called()
+
+
+# --- child hierarchy read authority (issue #4) -----------------------------------------------
+
+@pytest.mark.parametrize(
+    ("child_snapshot", "expected_connect", "expected_disconnect"),
+    [
+        (None, ["C2"], None),
+        (frozenset({"C2", "C3"}), None, ["C3"]),
+    ],
+    ids=["failed-read-is-add-only", "successful-read-can-remove"],
+)
+def test_child_snapshot_authority_gates_epic_removals(
+        tmp_path, child_snapshot, expected_connect, expected_disconnect):
+    task_url = "https://github.com/acme/repo/issues/2"
+    stale_url = "https://github.com/acme/repo/issues/3"
+    issues = [
+        {**_issue(), "title": "[EP-1] epic", "labels": ["type:epic"]},
+        {**_issue(), "number": 2, "title": "task", "url": task_url},
+        {**_issue(), "number": 3, "title": "stale", "url": stale_url},
+    ]
+    cards = [
+        {**_card(), "customId": "EP-1"},
+        {**_card(), "id": "C2", "customId": "2", "externalLink": {"url": task_url}},
+        {**_card(), "id": "C3", "customId": "3", "externalLink": {"url": stale_url}},
+    ]
+    parsed = {
+        issue["url"]: {"item_id": f"PVTI_{issue['number']}", "number": issue["number"],
+                       "status": "Backlog", "start": None, "target": None}
+        for issue in issues
+    }
+    stack, _, _, _ = _mock_io(
+        cards[0], (parsed, []), field_meta_return=None,
+        existing_cards=cards, issue_return=issues)
+    state_file = tmp_path / ".sync-state.json"
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+         patch("ghkit.sub_issue_numbers", return_value=[2]), \
+         patch("agileplace.card_child_ids", return_value=child_snapshot) as child_read_mock, \
+         patch("agileplace.connect_children") as connect_mock, \
+         patch("agileplace.disconnect_children") as disconnect_mock:
+        sync.main()
+
+    child_read_mock.assert_called_once_with(_cfg(tmp_path), "C1")
+    if expected_connect:
+        connect_mock.assert_called_once_with(_cfg(tmp_path), True, "C1", expected_connect)
+    else:
+        connect_mock.assert_not_called()
+    if expected_disconnect:
+        disconnect_mock.assert_called_once_with(_cfg(tmp_path), True, "C1", expected_disconnect)
+    else:
+        disconnect_mock.assert_not_called()
+
+
+def test_non_epic_cards_do_not_trigger_child_reads(tmp_path):
+    parsed = {ISSUE_URL: {
+        "item_id": "PVTI_1", "number": 1, "status": "Backlog",
+        "start": None, "target": None,
+    }}
+    stack, _, _, _ = _mock_io(_card(), (parsed, []), field_meta_return=None)
+    state_file = tmp_path / ".sync-state.json"
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+         patch("agileplace.card_child_ids") as child_read_mock:
+        sync.main()
+
+    child_read_mock.assert_not_called()

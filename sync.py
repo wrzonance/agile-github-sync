@@ -99,7 +99,8 @@ def _child_connection_changes(desired: set[str], existing: set[str], managed: se
     """Return child-card additions and safe removals for one epic.
 
     Additions are safe from either native or title-fallback discovery. Removals require an
-    authoritative native snapshot and remain limited to cards managed by this sync.
+    authoritative native GitHub and AgilePlace snapshots and remain limited to cards managed by
+    this sync.
     """
     adds = sorted(desired - existing)
     removes = sorted((existing & managed) - desired) if authoritative else []
@@ -612,9 +613,11 @@ def main() -> None:
         task_numbers, authoritative = _epic_task_resolution(cfg, epic, by_key)
         task_urls = [by_number[n]["url"] for n in task_numbers if n in by_number]
         desired = {str(card_by_url[u]["id"]) for u in task_urls if u in card_by_url and card_by_url[u].get("id")}
-        existing = agileplace.card_child_ids(parent)
+        existing_snapshot = agileplace.card_child_ids(cfg, str(parent["id"]))
+        existing = set(existing_snapshot or ())
         adds, removes = _child_connection_changes(
-            desired, existing, our_card_ids, authoritative=authoritative)
+            desired, existing, our_card_ids,
+            authoritative=authoritative and existing_snapshot is not None)
         if adds:
             agileplace.connect_children(cfg, apply, str(parent["id"]), adds)
             print(f"{'link ' if apply else 'DRY  '} [{key}] +{len(adds)} child card(s)")

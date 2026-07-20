@@ -311,10 +311,7 @@ def test_epic_disconnects_only_retired_url_matched_child(tmp_path, monkeypatch):
         "state": "OPEN",
         "stateReason": "",
     }
-    epic_card = {
-        **_card(1, "L1", blocked=False),
-        "childCards": [{"id": "C2"}, {"id": "C10"}],
-    }
+    epic_card = _card(1, "L1", blocked=False)
     lanes = [
         {"id": "L1", "title": "Backlog", "cardStatus": "notStarted"},
         {"id": "L5", "title": "Done", "cardStatus": "finished"},
@@ -322,6 +319,7 @@ def test_epic_disconnects_only_retired_url_matched_child(tmp_path, monkeypatch):
     connect_children = Mock()
     disconnect_children = Mock()
     monkeypatch.setattr("ghkit.sub_issue_numbers", lambda *_args: [2, 10])
+    monkeypatch.setattr("agileplace.card_child_ids", lambda *_args: frozenset({"C2", "C10"}))
     monkeypatch.setattr("agileplace.connect_children", connect_children)
     monkeypatch.setattr("agileplace.disconnect_children", disconnect_children)
 
