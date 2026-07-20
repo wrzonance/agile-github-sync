@@ -99,7 +99,8 @@ def _child_connection_changes(desired: set[str], existing: set[str], managed: se
     """Return child-card additions and safe removals for one epic.
 
     Additions are safe from either native or title-fallback discovery. Removals require an
-    authoritative native snapshot and remain limited to cards managed by this sync.
+    authoritative native GitHub and AgilePlace snapshots and remain limited to cards managed by
+    this sync.
     """
     adds = sorted(desired - existing)
     removes = sorted((existing & managed) - desired) if authoritative else []
@@ -606,18 +607,28 @@ def main() -> None:
 
     # 3) parent/child connections: authoritative native reads reconcile exactly; title-key fallback
     # is add-only because a heuristic must never authorize destructive reconciliation.
-    our_card_ids = {str(c["id"]) for c in all_card_by_url.values() if c.get("id")}
+    managed_card_ids = (
+        {str(card["id"])
+         for issue in syncable_issues
+         if (card := card_for(issue)) and card.get("id")}
+        | {str(card["id"])
+           for card in retired_card_by_url.values() if card.get("id")}
+    )
     for epic in epics:
         parent = card_for(epic)
         if not parent or not parent.get("id"):
             continue
         key = issue_custom_id(epic)
         task_numbers, authoritative = _epic_task_resolution(cfg, epic, by_key)
-        task_urls = [by_number[n]["url"] for n in task_numbers if n in by_number]
-        desired = {str(card_by_url[u]["id"]) for u in task_urls if u in card_by_url and card_by_url[u].get("id")}
-        existing = agileplace.card_child_ids(parent)
+        task_issues = [by_number[number] for number in task_numbers if number in by_number]
+        desired = {str(card["id"])
+                   for issue in task_issues
+                   if (card := card_for(issue)) and card.get("id")}
+        existing_snapshot = agileplace.card_child_ids(cfg, str(parent["id"]))
+        existing = set(existing_snapshot or ())
         adds, removes = _child_connection_changes(
-            desired, existing, our_card_ids, authoritative=authoritative)
+            desired, existing, managed_card_ids,
+            authoritative=authoritative and existing_snapshot is not None)
         if adds:
             agileplace.connect_children(cfg, apply, str(parent["id"]), adds)
             print(f"{'link ' if apply else 'DRY  '} [{key}] +{len(adds)} child card(s)")

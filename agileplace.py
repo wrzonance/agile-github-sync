@@ -222,8 +222,7 @@ def _card_path(card_id) -> str:
 
 
 def list_cards(cfg: dict) -> list[dict]:
-    """All cards on the board, paginated to exhaustion. Requests childCards so connection reconciliation
-    can see the existing hierarchy (VALIDATE LIVE: `include` param name + payload shape).
+    """All cards on the board, paginated to exhaustion.
 
     AgilePlace may clamp the requested page size, so offsets advance by the number of cards actually
     returned and short-page detection uses the response's effective limit. Pagination fails closed
@@ -234,7 +233,7 @@ def list_cards(cfg: dict) -> list[dict]:
     trust_total = True
     for _request_count in range(1, MAX_CARD_PAGE_REQUESTS + 1):
         data = api(cfg, "GET", "card", params={"board": cfg["board_id"], "limit": limit,
-                                                "offset": offset, "include": "childCards"})
+                                                "offset": offset})
         page = data.get("cards", [])
         cards.extend(page)
         page_meta = data.get("pageMeta")
@@ -369,11 +368,80 @@ def card_block_reason(card: dict) -> str:
     return _blocked_status(card).get("reason") or ""
 
 
-def card_child_ids(card: dict) -> set[str]:
-    """Existing child-card ids on a parent (from the `childCards` include). VALIDATE LIVE: field/shape."""
-    kids = card.get("childCards") or card.get("connectedCards") or []
-    return {str(c.get("id") or c.get("cardId")) for c in kids
-            if isinstance(c, dict) and (c.get("id") or c.get("cardId"))}
+def _parse_child_page(data, expected_offset: int, requested_limit: int) -> tuple[tuple[str, ...], int, int]:
+    """Validate one documented ``connection/children`` response page."""
+    if data is None:
+        raise ValueError("response is null")
+    if not isinstance(data, dict):
+        raise ValueError(f"response is {type(data).__name__}, expected object")
+    if "cards" not in data:
+        raise ValueError("response is missing cards")
+    cards = data["cards"]
+    page_meta = data.get("pageMeta")
+    if not isinstance(cards, list):
+        raise ValueError(f"cards is {type(cards).__name__}, expected array")
+    if not isinstance(page_meta, dict):
+        raise ValueError(f"pageMeta is {type(page_meta).__name__}, expected object")
+
+    total = page_meta.get("totalRecords")
+    offset = page_meta.get("offset")
+    limit = page_meta.get("limit")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise ValueError(f"invalid totalRecords {total!r}")
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset != expected_offset:
+        raise ValueError(f"invalid offset {offset!r}, expected {expected_offset}")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        raise ValueError(f"invalid limit {limit!r}")
+    effective_limit = min(requested_limit, limit)
+    if len(cards) > effective_limit:
+        raise ValueError(f"page contains {len(cards)} cards but effective limit is {effective_limit}")
+    if expected_offset + len(cards) > total:
+        raise ValueError(f"page ends after totalRecords {total}")
+
+    child_ids = []
+    for card in cards:
+        card_id = card.get("id") if isinstance(card, dict) else None
+        if (not isinstance(card_id, (str, int)) or isinstance(card_id, bool)
+                or not str(card_id).strip()):
+            raise ValueError("child card has invalid id")
+        child_ids.append(str(card_id))
+    return tuple(child_ids), total, effective_limit
+
+
+def _warn_child_read(parent_card_id: str, detail: str) -> None:
+    print(f"WARN  card {parent_card_id} child-card read FAILED: {detail} -- reconciliation is add-only")
+
+
+def card_child_ids(cfg: dict, parent_card_id: str) -> frozenset[str] | None:
+    """Return a complete child-id snapshot, or ``None`` when the read is not authoritative."""
+    parent_id = str(parent_card_id)
+    path = f"{_card_path(parent_id)}/connection/children"
+    child_ids: list[str] = []
+    offset, requested_limit, expected_total = 0, 200, None
+    for _request_count in range(1, MAX_CARD_PAGE_REQUESTS + 1):
+        try:
+            data = api(cfg, "GET", path, params={"offset": offset, "limit": requested_limit})
+            page_ids, total, effective_limit = _parse_child_page(data, offset, requested_limit)
+        except (SystemExit, ValueError) as err:
+            _warn_child_read(parent_id, str(err) or "request aborted")
+            return None
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            _warn_child_read(parent_id, f"totalRecords changed from {expected_total} to {total}")
+            return None
+        child_ids.extend(page_ids)
+        if len(set(child_ids)) != len(child_ids):
+            _warn_child_read(parent_id, "duplicate child id across pages")
+            return None
+        offset += len(page_ids)
+        if offset == expected_total:
+            return frozenset(child_ids)
+        if not page_ids or len(page_ids) < effective_limit:
+            _warn_child_read(parent_id, f"pagination ended at {offset} before totalRecords {expected_total}")
+            return None
+    _warn_child_read(parent_id, f"pagination exceeded defensive limit of {MAX_CARD_PAGE_REQUESTS} requests")
+    return None
 
 
 # --- existing-card field updates: op-builders + one versioned PATCH per card ---

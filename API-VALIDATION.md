@@ -16,12 +16,14 @@ on 2026-07-18.
 | Move lane | `{op:"replace", path:"/laneId", value:<laneId>}` | io v2 "Update a card" docs (`/laneId` replace example) |
 | Optimistic concurrency | `x-lk-resource-version` header (card `version`) | Core-concepts doc: version via the `x-lk-resource-version` header or a `/version` test op |
 | List cards | `GET /io/card?limit&offset`, read `pageMeta.totalRecords` and `pageMeta.limit` | Docs: `pageMeta:{totalRecords,offset,limit,startRow,endRow}`; the code advances by the returned card count, honors a server-clamped limit, and fails closed at a defensive request ceiling |
+| List child cards | `GET /io/card/{cardId}/connection/children?limit&offset`, read `cards[]` and `pageMeta` | io v2 "Get a list of child cards" documents the singular path, pagination parameters, and successful `{pageMeta,cards}` response; the code rejects malformed, inconsistent, or incomplete snapshots |
 | Board layout | `GET /io/board/{id}` returns `lanes[]` with `id/title/cardStatus/parentLaneId/isDefaultDropLane` | io v2 board schema; `cardStatus` has only three values (`notStarted`, `started`, `finished`), so In progress and In review are told apart by lane title |
 | Tags representation | array of plain strings | io v2 card/update schemas; the Node client's add-tag example appends a string |
 
-Sources: the LeanKit io v2 pages "Update a card", "Get a list of cards", "Get board", and "Core
-concepts" (`success.planview.com/Planview_AgilePlace/AgilePlace_API/01_v2/...`), and the official client
-at `github.com/LeanKit/leankit-node-client`.
+Sources: the LeanKit io v2 pages "Update a card", "Get a list of cards",
+["Get a list of child cards"](https://success.planview.com/Planview_AgilePlace/AgilePlace_API/01_v2/connections/children),
+"Get board", and "Core concepts" (`success.planview.com/Planview_AgilePlace/AgilePlace_API/01_v2/...`),
+and the official client at `github.com/LeanKit/leankit-node-client`.
 
 The Node client is evidence only for the rows that name it: it forwards update operations without
 interpreting their paths, and it does not add `x-lk-resource-version`. The lane operation and
@@ -78,13 +80,17 @@ today the code fails closed (refetch, validate, or abort) rather than assuming e
   item-list JSON shape on your board.
 - Card create (`POST /io/card`, `agileplace.create_card`): the same shape the init used
   successfully. Confirm `customId` and `externalLink` are accepted on a fresh card.
-- Parent/child connections (`connect_children`): posts `card/connections` with
-  `{cardIds:[parent], connections:{children:[...]}}`, matching `agileplace.py`. An earlier draft
-  of this doc said `card/connect` with `{parentCardId, childCardIds}`, which is not what the code
-  sends. Validate the exact endpoint and body against the Connections API
+- Parent/child connections: `card_child_ids` reads each epic through the documented singular
+  `GET card/{cardId}/connection/children` endpoint and paginates only while `pageMeta` remains
+  complete and internally consistent. A failed or malformed read returns a distinct unavailable
+  result, warns, and makes that epic's reconciliation add-only; a successful empty `cards` array is
+  still authoritative. `connect_children`/`disconnect_children` write `card/connections` with
+  `{cardIds:[parent], connections:{children:[...]}}`. No AgilePlace credentials were available for
+  this change, so a disposable-card read/connect/disconnect round-trip remains pending: confirm the
+  documented read response in the target tenant and validate the exact write endpoint/body against
+  the Connections API
   ([create](https://success.planview.com/Planview_AgilePlace/AgilePlace_API/01_v2/connections/create) /
-  connect-many) on a disposable card, and confirm how existing children read back
-  (`card_child_ids`).
+  connect-many).
 - Planned dates (Phase 4): `plannedStart`/`plannedFinish` via the card PATCH; Project Start and
   Target values read from paginated GraphQL `ProjectV2Item.fieldValues` by field id; writes via
   `item-edit --date`. A successful GraphQL snapshot with no matching values means the field is
