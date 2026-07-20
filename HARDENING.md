@@ -38,9 +38,11 @@ past roughly 1,000 records.
   (`{op:remove, path:/tags/{i}}`, without a `value`, in descending index order) plus
   `{op:replace, path:/plannedStart, value:null}`. Confirm that the chosen indexed form and null as
   "clear this date" are accepted by the target tenant.
-- `gh project` JSON shapes. `item-list` returns field values as flattened top-level keys (the
-  parser is defensive about casing); `field-list` provides Status option ids and date field ids.
-  Pin a minimum `gh` version and confirm the shapes on your board.
+- GitHub Project read shapes. `item-list` returns Status as a flattened top-level key (the parser is
+  defensive about casing); `field-list` provides Status option ids and date field ids. Planned dates
+  are read separately through paginated GraphQL `ProjectV2Item.fieldValues` and matched by field id;
+  any incomplete or malformed date snapshot disables date sync for the run. Pin a minimum `gh`
+  version and confirm the shapes on your board.
 - Metadata that only exists on one side. A card tag with no matching GitHub label, or a milestone
   name GitHub doesn't have, makes `gh issue edit --add-label/--milestone` fail and halts the run.
   Decide whether to auto-create the label or milestone, skip it with a warning, or require it to
@@ -54,10 +56,11 @@ past roughly 1,000 records.
   key relationships by URL, and skip cross-repo children with a warning (or handle them
   explicitly).
 - Pagination. `list_issues` (1,000), `open_pr_issue_numbers` (100 PRs, 20 closing refs each), and
-  the Projects `item-list` (1,000) silently truncate above their caps. An issue missing from the
-  Project read falls back to the stage derived from labels, assignees, and open PRs, so truncation
-  produces wrong results at scale, not just missing ones. Fix: paginate to exhaustion and validate
-  totals.
+  the Projects Status `item-list` (1,000) silently truncate above their caps. (The separate GraphQL
+  planned-date read paginates Project items to exhaustion and fails closed if an item's first 100
+  field values are insufficient.) An issue missing from the Status read falls back to the stage
+  derived from labels, assignees, and open PRs, so truncation produces wrong results at scale, not
+  just missing ones. Fix: paginate the remaining reads to exhaustion and validate totals.
 - The blocked-by read spawns one `gh` process per issue (`ghkit.blocked_by_map`), each with a 60s
   timeout. At thousands of issues this can exceed the 10-minute scheduled-task window, in which
   case the writes happen but the state save does not. Fix: batch the blocked-by read (GraphQL or

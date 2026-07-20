@@ -66,15 +66,6 @@ def save_state(state: dict) -> None:
             os.unlink(tmp)
 
 
-def known_date_kinds(issues_state: dict) -> frozenset[str]:
-    """Kinds ("start"/"target") that some issue's merge-base has actually held a real (non-empty) value
-    for -- i.e. a prior run successfully read/wrote that date kind against GitHub. Feeds
-    ghproject.unmatched_date_kinds so a field that has NEVER carried a value project-wide (the common
-    case on a project's first rollout) isn't mistaken for a name mismatch and permanently blocked --
-    see issue #6 follow-up."""
-    return frozenset(kind for kind in ("start", "target") if any(v.get(kind) for v in issues_state.values()))
-
-
 def _epic_task_resolution(cfg: dict, epic: dict, by_key: dict) -> tuple[list[int], bool]:
     """Return ``(numbers, authoritative)`` for an epic's tasks.
 
@@ -331,11 +322,11 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
         prev.update({"labels": sorted(new_base), "milestone": new_ms})
 
 
-def sync_dates(cfg, apply, issue, card, pitem, field_meta, issues_state, queue,
-               unmatched_kinds: frozenset[str] = frozenset()) -> None:
-    """Bidirectional planned dates (AgilePlace-wins). Only a date whose Project field id is known AND
-    not flagged as unmatched (see ghproject.unmatched_date_kinds) is synced -- otherwise it is skipped
-    entirely (never advanced), so a missing/mismatched field can't be read as a deletion next run.
+def sync_dates(cfg, apply, issue, card, pitem, field_meta, issues_state, queue) -> None:
+    """Bidirectional planned dates (AgilePlace-wins) from an authoritative field-ID snapshot.
+
+    Only a date whose Project field id is known is synced. main() skips this function entirely when
+    the GraphQL date snapshot failed, so a read failure cannot be mistaken for a project-wide clear.
 
     Merge-base gating: the GH-side merge base (prev[kind]) only advances when the GitHub value is
     already correct (new == gh_date, nothing to write) or the write is confirmed to have happened
@@ -351,8 +342,8 @@ def sync_dates(cfg, apply, issue, card, pitem, field_meta, issues_state, queue,
     item_id = pitem.get("item_id")
     for kind, field_id, ap_field in (("start", field_meta.get("start_field_id"), "plannedStart"),
                                      ("target", field_meta.get("target_field_id"), "plannedFinish")):
-        if not field_id or kind in unmatched_kinds:
-            continue  # field not resolved, or resolved-but-unmatched -> do not sync or advance this date
+        if not field_id:
+            continue
         gh_date = pitem.get(kind)
         ap_date = card.get(ap_field)
         new = reconcile_value(prev.get(kind), gh_date, ap_date, prefer="ap")
@@ -411,16 +402,26 @@ def main() -> None:
     # despite the Project actually having issue-linked items (misspelled GH_PROJECT_STATUS_FIELD, or a
     # gh output-shape change): that is the same mass-move reached through a different door (issue #5).
     if ghproject.configured(cfg):
-        pit, raw_items = ghproject.items_and_raw(cfg)
+        pit = ghproject.items(cfg)
         call_failed = pit is None
         project_items = pit or {}
     else:
-        call_failed, project_items, raw_items = False, {}, []
+        call_failed, project_items = False, {}
     project_status = {u: v["status"] for u, v in project_items.items() if v.get("status")}
     zero_status_despite_items = (ghproject.configured(cfg) and not call_failed
                                   and bool(project_items) and not project_status)
     project_read_failed = call_failed or zero_status_despite_items
     field_meta = ghproject.field_meta(cfg) if (ghproject.configured(cfg) and not project_read_failed) else None
+    if field_meta and not (field_meta.get("start_field_id") or field_meta.get("target_field_id")):
+        field_meta = None
+    date_read_failed = False
+    if field_meta:
+        dated_items = ghproject.hydrate_item_dates(cfg, project_items, field_meta)
+        if dated_items is None:
+            date_read_failed = True
+            field_meta = None
+        else:
+            project_items = dated_items
     move_lanes = not project_read_failed
     if zero_status_despite_items:
         print(f"WARN  Projects v2 has {len(project_items)} issue item(s) but none carry a recognized "
@@ -430,13 +431,8 @@ def main() -> None:
         print("WARN  Projects v2 read FAILED -- leaving lanes untouched this run (Status is the source of truth)")
     elif ghproject.configured(cfg):
         print(f"projects v2: {len(project_status)} items carry Status{'; dates enabled' if field_meta else ''}")
-    unmatched_kinds = (
-        ghproject.unmatched_date_kinds(raw_items, field_meta, cfg["gh_project"]["start_field"],
-                                        cfg["gh_project"]["target_field"], known_date_kinds(issues_state))
-        if field_meta else frozenset())
-    for kind in sorted(unmatched_kinds):
-        print(f"WARN  Projects v2 '{kind}' field resolved but no item ever exposed a matching key -- "
-              f"skipping {kind} date sync this run")
+    if date_read_failed:
+        print("WARN  Projects v2 date field-value read FAILED -- skipping all date sync this run")
 
     lanes = agileplace.board_layout(cfg) if online else []
     cards = agileplace.list_cards(cfg) if online else []
@@ -513,8 +509,7 @@ def main() -> None:
                     print(f"{'move ' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {lane_stage})")
         sync_metadata(cfg, apply, issue, card, cfg["label_sync_ignore"], issues_state, queue)
         if field_meta:
-            sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue,
-                       unmatched_kinds)
+            sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue)
 
     # 3) parent/child connections: authoritative native reads reconcile exactly; title-key fallback
     # is add-only because a heuristic must never authorize destructive reconciliation.

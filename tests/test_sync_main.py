@@ -1,10 +1,9 @@
-"""End-to-end wiring tests for sync.main() (issue #6, task 5): items_and_raw swap, unmatched_kinds
-computation + WARN print, and threading unmatched_kinds into the sync_dates call site.
+"""End-to-end wiring tests for sync.main() project reads and persisted sync state.
 
 Unlike test_sync_dates.py (which calls sync_dates directly), these mock every I/O boundary (ghkit,
 ghproject's gh-touching functions, agileplace's HTTP client) but exercise the REAL main(),
-load_state/save_state, and sync_dates -- so they pin that main() actually plumbs raw_items and
-unmatched_kinds through, and that the merge-base advance invariant holds across real state persisted
+load_state/save_state, and sync_dates -- so they pin that main() actually plumbs authoritative date
+hydration through, and that the merge-base advance invariant holds across real state persisted
 to disk between two separate main() runs (not just within one sync_dates call).
 
 TEST-CONSTRUCTION NOTE (final design decision #1): the two-run merge-base test holds the GitHub-side
@@ -44,7 +43,7 @@ def _card():
 
 def _field_meta():
     return {"project_id": "PVT_1", "status_field_id": "STF", "status_options": {},
-            "start_field_id": "SF_1", "target_field_id": "TF_1"}
+            "start_field_id": "SF_1", "target_field_id": "TF_1", "host": "github.com"}
 
 
 def _cfg(tmp_path):
@@ -62,7 +61,7 @@ _UNSET = object()
 
 
 def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSET, lanes_return=(),
-             existing_cards=_UNSET, issue_return=_UNSET):
+             existing_cards=_UNSET, issue_return=_UNSET, hydrated_items_return=_UNSET):
     """ExitStack of patches covering every I/O boundary main() touches for one run. Returns the stack
     plus the ghkit.run, agileplace.patch_card, and agileplace.create_card mocks (for call-site
     assertions).
@@ -83,8 +82,11 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
     run_mock = stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
     stack.enter_context(patch("ghproject.configured", return_value=True))
-    stack.enter_context(patch("ghproject.items_and_raw", return_value=items_and_raw_return))
+    parsed_items = items_and_raw_return[0]
+    stack.enter_context(patch("ghproject.items", return_value=parsed_items))
     stack.enter_context(patch("ghproject.field_meta", return_value=field_meta_return))
+    hydrated = parsed_items if hydrated_items_return is _UNSET else hydrated_items_return
+    stack.enter_context(patch("ghproject.hydrate_item_dates", return_value=hydrated))
     stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes_return)))
     cards = [card] if existing_cards is _UNSET else list(existing_cards)
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))
@@ -94,10 +96,13 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
 
 
 def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_issues_state=None,
-                   open_pr_return=_UNSET, lanes_return=(), card=None, existing_cards=_UNSET):
-    """seed_issues_state pre-populates the on-disk state file's issues[ISSUE_URL] before main() runs --
-    used to simulate a kind that previously read real values (see ghproject.unmatched_date_kinds's
-    known_kinds gate). existing_cards is forwarded to _mock_io (see there)."""
+                   open_pr_return=_UNSET, lanes_return=(), card=None, existing_cards=_UNSET,
+                   hydrated_items_return=_UNSET):
+    """seed_issues_state pre-populates the on-disk state file's issues[ISSUE_URL] before main() runs.
+
+    ``items_and_raw_return`` retains the older pair-shaped fixture interface so the extensive status
+    tests below stay focused; only its parsed first element now feeds ghproject.items().
+    """
     cfg = _cfg(tmp_path)
     state_file = tmp_path / ".sync-state.json"
     if seed_issues_state is not None:
@@ -106,7 +111,8 @@ def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_
     card = card if card is not None else _card()
     stack, run_mock, patch_card_mock, create_card_mock = _mock_io(
         card, items_and_raw_return, field_meta_return, open_pr_return=open_pr_return,
-        lanes_return=lanes_return, existing_cards=existing_cards)
+        lanes_return=lanes_return, existing_cards=existing_cards,
+        hydrated_items_return=hydrated_items_return)
     with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
@@ -219,32 +225,8 @@ def test_merge_base_advances_only_after_confirmed_write_across_two_main_runs(tmp
     run_mock.assert_called_once()  # the real ghproject.set_project_date issued exactly one gh write
 
 
-# --- unmatched_kinds: computed in main(), WARNs, and gates sync_dates end-to-end -------------------
-
-def test_unmatched_kinds_warns_and_skips_both_date_kinds(tmp_path, capsys):
-    # Both kinds previously read real values (known_kinds), but NOW no raw row exposes ANY candidate
-    # key for "Start" or "Target" -> a genuine regression, both kinds are unmatched.
-    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}, "unrelated": "x"}]
-    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
-                          "start": None, "target": None}}
-    state, run_mock, patch_card_mock, _ = _run_main_once(
-        tmp_path, (parsed, raw_items), _field_meta(),
-        seed_issues_state={"card_id": "C1", "start": "2026-01-01", "target": "2026-01-09"})
-
-    out = capsys.readouterr().out
-    assert "WARN  Projects v2 'start' field resolved but no item ever exposed a matching key" in out
-    assert "WARN  Projects v2 'target' field resolved but no item ever exposed a matching key" in out
-    run_mock.assert_not_called()               # no GH date write attempted for either skipped kind
-    patch_card_mock.assert_not_called()        # no AgilePlace date write queued either
-    assert state["issues"][ISSUE_URL]["start"] == "2026-01-01"    # base untouched, not wiped/advanced
-    assert state["issues"][ISSUE_URL]["target"] == "2026-01-09"
-
-
-def test_no_warn_and_no_skip_on_first_rollout_with_no_known_date_history(tmp_path, capsys):
-    # Neither kind has ANY prior recorded value (fresh state, first run) and no raw row exposes a
-    # matching key for either -- the common case when a Project's date fields are configured correctly
-    # but nobody has set one on any item yet. This must sync normally, not be mistaken for a name
-    # mismatch and permanently blocked (issue #6 follow-up).
+def test_successful_all_cleared_snapshot_syncs_on_first_rollout(tmp_path, capsys):
+    # A successful field-ID snapshot with no values is authoritative even without prior history.
     raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}, "unrelated": "x"}]
     parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
                           "start": None, "target": None}}
@@ -256,12 +238,70 @@ def test_no_warn_and_no_skip_on_first_rollout_with_no_known_date_history(tmp_pat
     assert state["issues"][ISSUE_URL]["start"] == "2026-02-01"
 
 
-# --- guarded call site: frozenset() when field_meta is falsy, no crash, no WARN --------------------
+def test_all_cleared_date_snapshot_recovers_from_prior_history(tmp_path, capsys):
+    """A successful field-ID snapshot with no Start values is an authoritative project-wide clear.
+
+    Prior non-empty history must not turn that valid state into a permanent skip: a later AgilePlace
+    edit writes back to GitHub and advances the merge base normally.
+    """
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}, "unrelated": "x"}]
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
+                          "start": None, "target": None}}
+    state, run_mock, _, _ = _run_main_once(
+        tmp_path, (parsed, raw_items), _field_meta(),
+        seed_issues_state={"card_id": "C1", "start": "2026-01-01"},
+        hydrated_items_return=parsed)
+
+    out = capsys.readouterr().out
+    assert "resolved but no item ever exposed a matching key" not in out
+    run_mock.assert_called_once()
+    assert "2026-02-01" in run_mock.call_args.args[1]
+    assert state["issues"][ISSUE_URL]["start"] == "2026-02-01"
+
+
+def test_date_snapshot_failure_skips_dates_but_keeps_status_sync(tmp_path, capsys):
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
+                          "start": None, "target": None}}
+    lanes = [
+        {"id": "L1", "title": "Backlog", "cardStatus": "notStarted"},
+        {"id": "L2", "title": "In progress", "cardStatus": "started"},
+    ]
+    card = {**_card(), "laneId": "L1"}
+
+    state, run_mock, patch_card_mock, _ = _run_main_once(
+        tmp_path, (parsed, []), _field_meta(),
+        seed_issues_state={"card_id": "C1", "start": "2026-01-01"},
+        hydrated_items_return=None, lanes_return=lanes, card=card)
+
+    assert "date field-value read FAILED -- skipping all date sync" in capsys.readouterr().out
+    run_mock.assert_not_called()
+    assert state["issues"][ISSUE_URL]["start"] == "2026-01-01"
+    patch_card_mock.assert_called_once()
+    assert {op.get("value") for op in patch_card_mock.call_args.args[3]} == {"L2"}
+
+
+def test_no_resolved_date_fields_skips_hydration_and_reports_dates_disabled(tmp_path, capsys):
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
+                          "start": None, "target": None}}
+    field_meta = {**_field_meta(), "start_field_id": None, "target_field_id": None}
+    stack, _, _, _ = _mock_io(_card(), (parsed, []), field_meta)
+    state_file = tmp_path / ".sync-state.json"
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+         patch("ghproject.hydrate_item_dates") as hydrate_mock:
+        sync.main()
+
+    assert "dates enabled" not in capsys.readouterr().out
+    hydrate_mock.assert_not_called()
+
+
+# --- no date metadata: no hydration, no crash, no warning ------------------------------------------
 
 def test_no_warn_and_no_crash_when_field_meta_is_none(tmp_path, capsys):
     parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
                           "start": "2026-01-01", "target": None}}
-    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]  # would flag both kinds if checked
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
     state, run_mock, patch_card_mock, _ = _run_main_once(tmp_path, (parsed, raw_items), field_meta_return=None)
 
     out = capsys.readouterr().out
@@ -578,7 +618,7 @@ def test_zero_issue_linked_items_does_not_trip_zero_status_warn(tmp_path, capsys
     it, exist only for a NON-empty item set with no recognized Status. An empty item set must leave
     move_lanes True (lane resolution still attempted for new cards)."""
     raw_items = [{"id": "PVTI_9", "content": {}}]  # draft item: no linked issue/PR at all
-    parsed: dict = {}  # ghproject.items_and_raw resolved zero issue-linked items -- not a failure
+    parsed: dict = {}  # ghproject.items resolved zero issue-linked items -- not a failure
     fake_lane = {"id": "L1", "title": "Planning"}
 
     with patch("agileplace.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:

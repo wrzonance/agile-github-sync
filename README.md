@@ -96,7 +96,8 @@ The account running the schedule needs `python` and `gh` on PATH, `gh auth login
 - `reconcile.py`: pure three-way set and single-value merges (unit-tested).
 - `ghkit.py`: GitHub via the `gh` CLI (issues, sub-issues, open-PR and blocked-by reads,
   label/milestone writes).
-- `ghproject.py`: GitHub Projects v2 via `gh project` (Status/date reads and date writes).
+- `ghproject.py`: GitHub Projects v2 via `gh project` plus GraphQL (Status reads and field-id-keyed
+  date reads/writes).
 - `agileplace.py`: AgilePlace io v2 (board, cards, lanes, tags, dates, connections, blocked
   state).
 - `config.py`: `.env` config. `tests/`: pytest (`pytest -q`).

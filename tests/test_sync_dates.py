@@ -148,20 +148,3 @@ def test_queue_write_skipped_only_when_ap_already_matches_new():
         sync_dates({}, True, issue, card, pitem, _field_meta(), state, queue)
     write_mock.assert_not_called()
     assert queue.calls == []
-
-
-# --- unmatched_kinds guard ----------------------------------------------------
-
-def test_unmatched_kind_is_skipped_entirely():
-    """A kind flagged in unmatched_kinds is neither written to GitHub nor queued to AgilePlace, and
-    its merge-base entry is left untouched."""
-    issue = _issue()
-    card = _card(planned_start="2026-02-01")
-    pitem = _pitem(start="2026-01-01")
-    state = _issues_state(issue["url"], start="2026-01-01")
-    queue = _Queue()
-    with patch("sync.ghproject.set_project_date") as write_mock:
-        sync_dates({}, True, issue, card, pitem, _field_meta(), state, queue, frozenset({"start"}))
-    write_mock.assert_not_called()
-    assert queue.calls == []
-    assert state[issue["url"]]["start"] == "2026-01-01"

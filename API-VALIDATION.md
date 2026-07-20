@@ -69,8 +69,8 @@ today the code fails closed (refetch-or-skip-with-WARN) rather than assuming eit
 
 ## Model 2 additions, also [live-check]
 
-- `gh project` CLI shapes (`ghproject.py`, init `05`): `item-list --format json` (field values
-  come back as top-level keys; the parser is defensive about casing), `project view` (project id),
+- `gh project` CLI shapes (`ghproject.py`, init `05`): `item-list --format json` (Status comes back
+  as a top-level key; the parser is defensive about casing), `project view` (project id),
   `field-list` (Status field id and option ids), `item-add --url`, and
   `item-edit --single-select-option-id`. These need the `project` token scope. Confirm the
   item-list JSON shape on your board.
@@ -83,8 +83,10 @@ today the code fails closed (refetch-or-skip-with-WARN) rather than assuming eit
   ([create](https://success.planview.com/Planview_AgilePlace/AgilePlace_API/01_v2/connections/create) /
   connect-many) on a disposable card, and confirm how existing children read back
   (`card_child_ids`).
-- Planned dates (Phase 4): `plannedStart`/`plannedFinish` via the card PATCH; the Project Start
-  and Target date fields via `item-edit --date`.
+- Planned dates (Phase 4): `plannedStart`/`plannedFinish` via the card PATCH; Project Start and
+  Target values read from paginated GraphQL `ProjectV2Item.fieldValues` by field id; writes via
+  `item-edit --date`. A successful GraphQL snapshot with no matching values means the field is
+  cleared project-wide; a failed, malformed, or incomplete snapshot skips every date write that run.
 
 ## GitHub side (standard and stable, noted for completeness)
 
@@ -116,6 +118,10 @@ During the backlog stand-up, these formerly `[live-check]` GitHub shapes were ex
   limit is 30; the code already passes `--limit 200`.
 - `gh project item-add` and `item-edit --single-select-option-id` were used successfully by init
   `05`.
+
+On 2026-07-20, the paginated GraphQL date-read shape was also exercised against wrzonance Project
+`#4` (192 items across two pages). `ProjectV2Item.fieldValues` returned complete nested pagination
+metadata, and the successful zero-date result remained distinguishable from a query failure.
 
 Two gh behaviors learned the same day, recorded so this repo never has to rediscover them:
 
