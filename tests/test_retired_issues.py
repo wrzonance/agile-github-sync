@@ -193,3 +193,57 @@ def test_retirement_refuses_custom_id_only_match(tmp_path, monkeypatch, capsys):
 
     assert "retired issue has only a customId card match" in capsys.readouterr().out
     patch_card.assert_not_called()
+
+
+def test_active_issue_cannot_claim_url_owned_retired_card_by_custom_id(
+        tmp_path, monkeypatch, capsys):
+    active = {
+        **_github_issue(20, ""),
+        "title": "[ABC] active replacement",
+        "state": "OPEN",
+        "stateReason": "",
+    }
+    retired_card = {
+        **_card(10, "L2", blocked=False),
+        "customId": "ABC",
+    }
+    lanes = [
+        {"id": "L1", "title": "Backlog", "cardStatus": "notStarted"},
+        {"id": "L5", "title": "Done", "cardStatus": "finished"},
+    ]
+
+    create_card, patch_card, _, edit_label = _run_main(
+        tmp_path,
+        monkeypatch,
+        [_github_issue(10, "NOT_PLANNED"), active],
+        cards=[retired_card],
+        lanes=lanes,
+    )
+
+    out = capsys.readouterr().out
+    assert "deferring active card [ABC]: customId is held by retired card C10" in out
+    create_card.assert_not_called()
+    edit_label.assert_not_called()
+    assert patch_card.call_args.args[3] == [
+        {"op": "replace", "path": "/laneId", "value": "L5"},
+    ]
+
+
+def test_retirement_clears_reason_from_already_unblocked_card(tmp_path, monkeypatch):
+    card = {
+        **_card(10, "L5", blocked=False),
+        "blockedStatus": {"isBlocked": False, "reason": "stale reason"},
+    }
+
+    _, patch_card, _, _ = _run_main(
+        tmp_path,
+        monkeypatch,
+        [_github_issue(10, "DUPLICATE")],
+        cards=[card],
+        lanes=[{"id": "L5", "title": "Done", "cardStatus": "finished"}],
+    )
+
+    assert patch_card.call_args.args[3] == [
+        {"op": "replace", "path": "/isBlocked", "value": False},
+        {"op": "add", "path": "/blockReason", "value": ""},
+    ]

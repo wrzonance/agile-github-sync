@@ -238,7 +238,7 @@ def _retire_card(issue: dict, card: dict, lanes: list, stage_map: dict | None,
         actions.append(f"already '{agileplace.lane_title(target)}'")
     else:
         print(f"WARN  [{key}] cannot retire to Done: no unambiguous Done lane ({reason})")
-    if agileplace.card_is_blocked(card):
+    if agileplace.card_is_blocked(card) or agileplace.card_block_reason(card):
         ops.extend(agileplace.ops_blocked(False, None))
         actions.append("clear blocked")
     if ops:
@@ -477,13 +477,33 @@ def main() -> None:
     cards = agileplace.list_cards(cfg) if online else []
     smap = cfg.get("stage_lane_map")
 
-    card_by_url, card_by_cid = {}, {}
+    all_card_by_url, all_card_by_cid = {}, {}
     for card in cards:
         for u in agileplace.card_external_urls(card):
-            card_by_url[u] = card
+            all_card_by_url[u] = card
         cid = agileplace.custom_id_value(card)
         if cid:
-            card_by_cid[cid] = card
+            all_card_by_cid[cid] = card
+
+    retired_card_by_url = {
+        issue["url"]: all_card_by_url[issue["url"]]
+        for issue in retired_issues if issue["url"] in all_card_by_url
+    }
+    retired_cards = tuple(retired_card_by_url.values())
+
+    def reserved_for_retirement(card):
+        return any(card is retired or _same_card(card, retired) for retired in retired_cards)
+
+    retired_card_by_cid = {
+        agileplace.custom_id_value(card): card
+        for card in retired_cards if agileplace.custom_id_value(card)
+    }
+    card_by_url = {
+        url: card for url, card in all_card_by_url.items() if not reserved_for_retirement(card)
+    }
+    card_by_cid = {
+        cid: card for cid, card in all_card_by_cid.items() if not reserved_for_retirement(card)
+    }
     card_by_cid, pending_custom_id_releases = _reconciled_custom_id_index(
         active_issues, card_by_url, card_by_cid)
 
@@ -502,10 +522,10 @@ def main() -> None:
     # another issue's card. Retirement is independent of Projects/open-PR read health because the
     # CLOSED reason itself is the authoritative signal.
     for issue in retired_issues:
-        card = card_by_url.get(issue["url"])
+        card = retired_card_by_url.get(issue["url"])
         if card:
             _retire_card(issue, card, lanes, smap, apply, queue)
-        elif card_by_cid.get(issue_custom_id(issue)):
+        elif all_card_by_cid.get(issue_custom_id(issue)):
             print(f"WARN  [{issue_custom_id(issue)}] retired issue has only a customId card match; "
                   "refusing to retire without the GitHub external-link URL")
 
@@ -514,6 +534,16 @@ def main() -> None:
         if card_for(issue):
             continue
         key = issue_custom_id(issue)
+        reserved_url_card = all_card_by_url.get(issue["url"])
+        if reserved_url_card and reserved_for_retirement(reserved_url_card):
+            print(f"WARN  deferring active card [{key}]: external-link URL is held by retired card "
+                  f"{reserved_url_card.get('id') or '<unknown>'}")
+            continue
+        reserved_card = retired_card_by_cid.get(key)
+        if reserved_card:
+            print(f"WARN  deferring active card [{key}]: customId is held by retired card "
+                  f"{reserved_card.get('id') or '<unknown>'}")
+            continue
         if key in pending_custom_id_releases:
             print(f"WARN  deferring card [{key}] until the renamed customId is released by a prior run")
             continue
@@ -565,7 +595,7 @@ def main() -> None:
 
     # 3) parent/child connections: authoritative native reads reconcile exactly; title-key fallback
     # is add-only because a heuristic must never authorize destructive reconciliation.
-    our_card_ids = {str(c["id"]) for c in card_by_url.values() if c.get("id")}
+    our_card_ids = {str(c["id"]) for c in all_card_by_url.values() if c.get("id")}
     for epic in epics:
         parent = card_for(epic)
         if not parent or not parent.get("id"):
