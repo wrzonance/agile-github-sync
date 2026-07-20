@@ -1,27 +1,32 @@
 # AgilePlace (Planview LeanKit) io v2: API validation
 
 This file records how the API calls this tool makes were checked before running against a real
-account. On 2026-07-17 each call was compared with the public Planview LeanKit io v2 docs and the
-official LeanKit Node client, the best available reference for request shapes. Most calls are
-confirmed. A few, marked `[live-check]`, are not fully pinned down by public docs and should be
-smoke-tested once against a disposable card. The last section records what was verified against
-the live GitHub APIs on 2026-07-18.
+account. On 2026-07-17 each call was compared with the public Planview LeanKit io v2 docs and, where
+it documents the same operation, the official LeanKit Node client. Most calls are confirmed. A few,
+marked `[live-check]`, are not fully pinned down by public docs and should be smoke-tested once
+against a disposable card. The last section records what was verified against the live GitHub APIs
+on 2026-07-18.
 
-## Confirmed against docs and the official client
+## Confirmed against the cited sources
 
 | Call (in `agileplace.py`) | Format used | Evidence |
 |---|---|---|
-| Update card | `PATCH /io/card/{id}` with an RFC-6902 JSON Patch array | LeanKit Node client `client.card.update(id, [ops])` |
+| Update card | `PATCH /io/card/{id}` with an RFC-6902 JSON Patch array | io v2 "Update a card" docs; the Node client maps `card.update(id, ops)` to this PATCH and forwards the operation array unchanged |
 | Add tag | `{op:"add", path:"/tags/-", value:<str>}` | Node client: "appends the tag... existing tags are preserved" |
-| Move lane | `{op:"replace", path:"/laneId", value:<laneId>}` | Node client (lane change via `card.update`) |
+| Move lane | `{op:"replace", path:"/laneId", value:<laneId>}` | io v2 "Update a card" docs (`/laneId` replace example) |
 | Optimistic concurrency | `x-lk-resource-version` header (card `version`) | Core-concepts doc: version via the `x-lk-resource-version` header or a `/version` test op |
 | List cards | `GET /io/card?limit&offset`, read `pageMeta.totalRecords` and `pageMeta.limit` | Docs: `pageMeta:{totalRecords,offset,limit,startRow,endRow}`; the code advances by the returned card count, honors a server-clamped limit, and fails closed at a defensive request ceiling |
 | Board layout | `GET /io/board/{id}` returns `lanes[]` with `id/title/cardStatus/parentLaneId/isDefaultDropLane` | io v2 board schema; `cardStatus` has only three values (`notStarted`, `started`, `finished`), so In progress and In review are told apart by lane title |
-| Tags representation | array of plain strings | the add op's `value` is a string; `card_tags()` reads strings |
+| Tags representation | array of plain strings | io v2 card/update schemas; the Node client's add-tag example appends a string |
 
 Sources: the LeanKit io v2 pages "Update a card", "Get a list of cards", "Get board", and "Core
 concepts" (`success.planview.com/Planview_LeanKit/LeanKit_API/01_v2/...`), and the official client
 at `github.com/LeanKit/leankit-node-client`.
+
+The Node client is evidence only for the rows that name it: it forwards update operations without
+interpreting their paths, and it does not add `x-lk-resource-version`. The lane operation and
+optimistic-concurrency claims therefore rely on the io v2 update-card and core-concepts docs,
+respectively.
 
 ## [live-check]: verify once with real keys, on a disposable card
 
@@ -104,8 +109,8 @@ During the backlog stand-up, these formerly `[live-check]` GitHub shapes were ex
 - Issue dependencies REST: `GET repos/{owner}/{repo}/issues/{n}/dependencies/blocked_by` returns
   an array of issue objects, and `.number` extraction works, so `blocked_by_map` is sound.
 - `gh project item-list --format json`: items carry a top-level `id`, flattened lower-case field
-  values (`status`), and `content{number,title,url,state}`, which is exactly what `parse_items`
-  expects.
+  values (`status`), and `content{type,body,title,number,repository,url}` (no `state`) in gh 2.96.0.
+  `parse_items` consumes the `type`, `number`, and `url` members.
 - `gh project view --format json` (`.id`) and `field-list --format json`
   (`fields[].id/name/options[].id/name`): shapes as coded. Board #158's Status options are the
   standard five (Backlog / Ready / In progress / In review / Done). Note that field-list's default

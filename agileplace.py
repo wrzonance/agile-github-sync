@@ -2,8 +2,9 @@
 
 Auth: AGILEPLACE_TOKEN (Bearer). Tokens have NO scopes -- never commit or log one. Cards match GitHub
 issues by external-link URL (customId fallback). Lanes resolve to a stage by TITLE among LEAF lanes,
-failing closed when ambiguous. ALL mutations to one card are batched into a single versioned JSON-Patch
-(op-builders + patch_card) so the resource version can't go stale mid-run (optimistic concurrency).
+failing closed when ambiguous. Field updates queued for an existing card are batched into one
+versioned JSON-Patch (op-builders + patch_card) so the resource version can't go stale mid-run
+(optimistic concurrency); card creation and hierarchy connections use separate POST/DELETE requests.
 patch_card never sends an unversioned PATCH: a card missing `version` is refetched once first
 (_card_with_version); if the refetch is also version-less, the PATCH is skipped and a WARN is
 printed instead of risking a silent stale overwrite (issue #8).
@@ -343,7 +344,7 @@ def card_child_ids(card: dict) -> set[str]:
             if isinstance(c, dict) and (c.get("id") or c.get("cardId"))}
 
 
-# --- card mutations: op-builders + one versioned PATCH per card ------------
+# --- existing-card field updates: op-builders + one versioned PATCH per card ---
 
 def op_lane(lane_id: str) -> dict:
     return {"op": "replace", "path": "/laneId", "value": lane_id}

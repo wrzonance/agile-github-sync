@@ -1,9 +1,9 @@
 """GitHub side of the sync via the `gh` CLI. Every call runs with cwd = TARGET_REPO_PATH so gh resolves
-the repo from that clone's remote. List args, never shell=True. Reads are one cheap JSON call; native
-sub-issues use GraphQL (with a title-key fallback in sync.py); the two writes (add/remove label) flow
-through the dry-run gate.
+the repo from that clone's remote. List args, never shell=True. Commands use structured JSON; native
+sub-issues use GraphQL (with a title-key fallback in sync.py), while dependency reads use REST. Label
+and milestone writes flow through the dry-run gate.
 
-NOTE: the GitHub calls here are validated at first live run (no remote is reachable offline).
+NOTE: the GitHub calls here are validated at first live run; unit tests mock the remote boundary.
 """
 from __future__ import annotations
 

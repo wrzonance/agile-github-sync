@@ -1,8 +1,9 @@
-"""Pure kanban-stage logic: derive an issue's stage from GitHub facts, roll an epic up from its tasks,
-and match board lanes to stages. No I/O -- exhaustively unit-tested.
+"""Pure kanban-stage logic: derive each issue's stage from its own GitHub facts and match board lanes
+to stages. No I/O -- exhaustively unit-tested.
 
 Stage vocabulary mirrors the board columns: Backlog -> Ready -> In progress -> In review -> Done. As
-issues advance, an epic's card advances lane-for-lane.
+issues advance, each card follows its issue. Epic helpers identify child connections only; an epic's
+lane comes from the epic issue's own Status or fallback signals, not from task rollup.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ _STAGE_BY_LOWER = {s.lower(): s for s in STAGES}
 
 def normalize_status(name: str) -> str | None:
     """Map a GitHub Projects v2 Status option name to a canonical stage (case-insensitive), or None if
-    it isn't one of ours (caller then falls back to label/PR derivation)."""
+    it isn't one of ours (caller then falls back to label/assignee/PR derivation)."""
     return _STAGE_BY_LOWER.get((name or "").strip().lower())
 
 # LeanKit lane.cardStatus has only three values; In progress and In review both live under "started",

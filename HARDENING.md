@@ -28,8 +28,9 @@ past roughly 1,000 records.
 - Blocked state. The code reads `blockedStatus.{isBlocked,reason}` and writes flat `/isBlocked`
   (replace) + `/blockReason` (add). Confirm the write field paths and that a PATCH round-trips
   (block, unblock, change the reason).
-- Tag removal and date clearing. The code sends `{op:remove, path:/tags, value}` and
-  `{op:replace, path:/plannedStart, value:null}`. Confirm that value-based tag removal and null as
+- Tag removal and date clearing. The code sends standard RFC-6902 index-based tag removals
+  (`{op:remove, path:/tags/{i}}`, without a `value`, in descending index order) and
+  `{op:replace, path:/plannedStart, value:null}`. Confirm that indexed tag removal and null as
   "clear this date" are accepted.
 - `gh project` JSON shapes. `item-list` returns field values as flattened top-level keys (the
   parser is defensive about casing); `field-list` provides Status option ids and date field ids.
@@ -48,8 +49,9 @@ past roughly 1,000 records.
   explicitly).
 - Pagination. `list_issues` (1,000), `open_pr_issue_numbers` (100 PRs, 20 closing refs each), and
   the Projects `item-list` (1,000) silently truncate above their caps. An issue missing from the
-  Project read falls back to the label-derived stage, so truncation produces wrong results at
-  scale, not just missing ones. Fix: paginate to exhaustion and validate totals.
+  Project read falls back to the stage derived from labels, assignees, and open PRs, so truncation
+  produces wrong results at scale, not just missing ones. Fix: paginate to exhaustion and validate
+  totals.
 - The blocked-by read spawns one `gh` process per issue (`ghkit.blocked_by_map`), each with a 60s
   timeout. At thousands of issues this can exceed the 10-minute scheduled-task window, in which
   case the writes happen but the state save does not. Fix: batch the blocked-by read (GraphQL or
