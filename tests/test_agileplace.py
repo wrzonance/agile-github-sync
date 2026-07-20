@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agileplace import (  # noqa: E402
     _card_with_version,
-    _has_index_tag_remove,
     api,
     card_external_urls,
     card_block_reason,
@@ -551,18 +550,6 @@ def test_card_with_version_skips_refetch_when_apply_is_false():
     assert result == card
 
 
-def test_card_with_version_refetches_and_fills_in_version_on_success():
-    """apply=True + missing version -> one refetch; a NEW dict carries the refetched version."""
-    card = {"id": "42", "title": "x"}
-    refetched = {"card": {"id": "42", "title": "x", "version": 9}}
-    with patch("agileplace.api", return_value=refetched) as api_mock:
-        result = _card_with_version(CFG, True, card)
-    api_mock.assert_called_once_with(CFG, "GET", "card/42")
-    assert result == {"id": "42", "title": "x", "version": 9}
-    assert result is not card
-    assert "version" not in card  # input never mutated
-
-
 def test_card_with_version_returns_none_when_refetch_also_has_no_version(capsys):
     """apply=True, missing version, refetch also version-less -> None sentinel + one WARN naming the id."""
     card = {"id": "42", "title": "x"}
@@ -626,18 +613,7 @@ def test_card_with_version_never_mutates_input_card():
     assert miss_card == before
 
 
-# --- refetch must not pair stale tag indices with a fresh version (issue #3) --
-
-def test_has_index_tag_remove_detects_only_index_based_removes():
-    """Index-based /tags/{i} removes are position-dependent; appends (/tags/-) and value-carrying
-    ops are not -- only the former must gate the stale-snapshot guard."""
-    assert _has_index_tag_remove([{"op": "remove", "path": "/tags/0"}])
-    assert _has_index_tag_remove(
-        [{"op": "add", "path": "/tags/-", "value": "x"}, {"op": "remove", "path": "/tags/2"}]
-    )
-    assert not _has_index_tag_remove([{"op": "add", "path": "/tags/-", "value": "x"}])
-    assert not _has_index_tag_remove([{"op": "replace", "path": "/laneId", "value": "L1"}])
-    assert not _has_index_tag_remove([])
+# --- refetch must not pair stale ops with a fresh version -----------------
 
 
 def test_card_with_version_refetch_allows_index_removes_when_tags_unchanged():
@@ -663,17 +639,6 @@ def test_card_with_version_refetch_refuses_index_removes_when_tags_shifted(capsy
     warn_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
     assert len(warn_lines) == 1
     assert "7" in warn_lines[0]
-
-
-def test_card_with_version_refetch_allows_shifted_tags_when_no_index_remove():
-    """Tags shifting is only dangerous for index-based removes; an append-only batch stays safe even
-    if the tags array changed between snapshot and refetch."""
-    card = {"id": "7", "tags": ["a"]}
-    ops = [{"op": "add", "path": "/tags/-", "value": "new"}]
-    refetched = {"card": {"id": "7", "tags": ["a", "b"], "version": 5}}
-    with patch("agileplace.api", return_value=refetched):
-        result = _card_with_version(CFG, True, card, ops)
-    assert result == {"id": "7", "tags": ["a"], "version": 5}
 
 
 def test_patch_card_version_present_is_byte_identical_to_pre_fix_behavior():
@@ -715,20 +680,6 @@ def test_patch_card_dry_run_makes_no_network_call_regardless_of_version():
         patch_card(CFG, False, {"id": "1", "version": 7}, ops)
         patch_card(CFG, False, {"id": "2"}, ops)
     api_mock.assert_not_called()
-
-
-def test_patch_card_sends_zero_patches_and_one_warn_when_double_miss(capsys):
-    """apply=True, version-less card whose refetch is also version-less -> zero PATCH calls, one WARN."""
-    card = {"id": "42"}
-    ops = [{"op": "replace", "path": "/laneId", "value": "L"}]
-    with patch("agileplace.api", return_value={"card": {"id": "42"}}) as api_mock:
-        result = patch_card(CFG, True, card, ops)
-    assert result == {}
-    api_mock.assert_called_once_with(CFG, "GET", "card/42")  # refetch only, no PATCH
-    out = capsys.readouterr().out
-    warn_lines = [line for line in out.splitlines() if line.startswith("WARN")]
-    assert len(warn_lines) == 1
-    assert "42" in warn_lines[0]
 
 
 def test_patch_card_refetches_and_never_sends_empty_string_version_header():
@@ -793,12 +744,9 @@ def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
         with patch("agileplace.api", side_effect=fake_api):
             patch_card(CFG, apply, card, ops)
 
-    # version-less + apply False + double-miss all send zero PATCH -> vacuously satisfy the invariant.
+    # Version-less + apply False sends zero PATCH -> vacuously satisfies the invariant.
     no_patch_scenarios = [
         (False, {"id": "3"}, None),
-        (True, {"id": "4"}, {"card": {"id": "4"}}),
-        (True, {"id": "6", "version": ""}, {"card": {"id": "6", "version": ""}}),      # empty-string double-miss
-        (True, {"id": "9", "version": "  "}, {"card": {"id": "9", "version": "  "}}),  # whitespace double-miss
     ]
     for apply, card, refetch_response in no_patch_scenarios:
         def fake_api_no_patch(cfg, method, path, body=None, params=None, headers=None, _attempt=0,
@@ -807,6 +755,20 @@ def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
             return _refetch or {}
         with patch("agileplace.api", side_effect=fake_api_no_patch):
             patch_card(CFG, apply, card, ops)
+
+    # Apply-mode double misses also send zero PATCH, then fail the run so state cannot advance.
+    double_miss_scenarios = [
+        ({"id": "4"}, {"card": {"id": "4"}}),
+        ({"id": "6", "version": ""}, {"card": {"id": "6", "version": ""}}),
+        ({"id": "9", "version": "  "}, {"card": {"id": "9", "version": "  "}}),
+    ]
+    for card, refetch_response in double_miss_scenarios:
+        def fake_api_double_miss(cfg, method, path, body=None, params=None, headers=None, _attempt=0,
+                                 _refetch=refetch_response):
+            assert method != "PATCH"
+            return _refetch
+        with patch("agileplace.api", side_effect=fake_api_double_miss), pytest.raises(SystemExit):
+            patch_card(CFG, True, card, ops)
 
 
 def test_connect_children_disconnect_children_create_card_have_no_version_header_logic():

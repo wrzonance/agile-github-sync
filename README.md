@@ -39,9 +39,11 @@ With `--apply`, each run:
 
 Field updates queued for an existing card -- lane, tags, dates, and blocked state -- are combined
 into at most one versioned PATCH per run, so a stale write fails instead of silently overwriting
-someone else's edit. Card creation and hierarchy connections use separate POST/DELETE requests,
-and GitHub-side writes are issued separately. Dry run is the default: `python sync.py` prints every
-planned action and writes nothing.
+someone else's edit. A version-less card is refetched once; the PATCH proceeds only if every queued
+field still matches that fresh snapshot, and otherwise the run aborts before saving merge state.
+Card creation and hierarchy connections use separate POST/DELETE requests, and GitHub-side writes
+are issued separately. Dry run is the default: `python sync.py` prints every planned action and
+writes nothing.
 
 > Before the first live run: `API-VALIDATION.md` records which API shapes are confirmed and which
 > still need a one-time check against the live APIs (the AgilePlace connection, blocked-state, tag,
