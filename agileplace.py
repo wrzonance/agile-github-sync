@@ -92,8 +92,24 @@ def _lanes_with_ids(lanes: list) -> list[dict]:
         if not isinstance(lane, dict):
             print(f"WARN  lane <{type(lane).__name__}> is not an object -- skipping malformed lane")
             continue
+        malformed_text = next(
+            (field for field in ("title", "name")
+             if lane.get(field) and not isinstance(lane[field], str)),
+            None,
+        )
+        if malformed_text:
+            value = lane[malformed_text]
+            print(f"WARN  lane id {lane.get('id', '<unknown>')!r} has non-string {malformed_text} "
+                  f"({type(value).__name__}) -- skipping malformed lane")
+            continue
         if "id" not in lane or lane["id"] is None:
             print(f"WARN  lane '{lane_title(lane) or '<untitled>'}' has no id -- skipping malformed lane")
+            continue
+        try:
+            hash(lane["id"])
+        except TypeError:
+            print(f"WARN  lane '{lane_title(lane) or '<untitled>'}' has unhashable id "
+                  f"({type(lane['id']).__name__}) -- skipping malformed lane")
             continue
         valid.append(lane)
     return valid
@@ -274,7 +290,11 @@ def card_external_urls(card: dict) -> list[str]:
             _warn_card_field(card, f"has non-object external link ({type(link).__name__})")
             continue
         if link:
-            urls.append(link.get("url", ""))
+            url = link.get("url", "")
+            if not isinstance(url, str):
+                _warn_card_field(card, f"has non-string external link URL ({type(url).__name__})")
+                continue
+            urls.append(url)
     return urls
 
 

@@ -26,6 +26,7 @@ from agileplace import (  # noqa: E402
     ops_blocked,
     ops_tag_remove,
     patch_card,
+    resolve_lane_for_stage,
 )
 
 CFG = {"token": "t", "host": "h", "board_id": "b1"}
@@ -367,6 +368,21 @@ def test_card_external_urls_skips_non_dict_links_and_warns_with_card_id(capsys):
     assert all("card-8" in line for line in warnings)
 
 
+def test_card_external_urls_skips_non_string_urls_and_warns_with_card_id(capsys):
+    card = {
+        "id": "card-8-url",
+        "externalLinks": [
+            {"url": "https://example.test/issues/8"},
+            {"url": {"host": "example.test"}},
+        ],
+    }
+
+    assert card_external_urls(card) == ["https://example.test/issues/8"]
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 1
+    assert "card-8-url" in warnings[0]
+
+
 def test_card_external_urls_rejects_supplied_falsy_non_array_before_legacy_fallback(capsys):
     card = {
         "id": "card-8-falsy",
@@ -397,6 +413,23 @@ def test_blocked_reader_rejects_supplied_falsy_non_object_and_warns_with_card_id
     warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
     assert len(warnings) == 1
     assert "card-9-falsy" in warnings[0]
+
+
+def test_lane_resolution_skips_non_string_titles_and_unhashable_ids(capsys):
+    lanes = [
+        {"id": "valid", "title": "Ready"},
+        {"id": "bad-title", "title": {"text": "Ready"}},
+        {"id": ["bad-id"], "title": "Ready"},
+    ]
+
+    lane, acceptable = resolve_lane_for_stage(lanes, "Ready", "")
+
+    assert lane == {"id": "valid", "title": "Ready"}
+    assert acceptable == {"valid"}
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 2
+    assert any("bad-title" in line for line in warnings)
+    assert any("Ready" in line and "unhashable" in line for line in warnings)
 
 
 def test_card_block_reason_reads_nested_blockedstatus_reason():
