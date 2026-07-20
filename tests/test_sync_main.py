@@ -37,7 +37,8 @@ def _issue():
 
 
 def _card():
-    return {"id": "C1", "version": 1, "externalLink": {"url": ISSUE_URL}, "tags": [],
+    return {"id": "C1", "version": 1, "customId": "1",
+            "externalLink": {"url": ISSUE_URL}, "tags": [],
             "plannedStart": "2026-02-01", "plannedFinish": None, "laneId": None}
 
 
@@ -75,7 +76,8 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     stack = ExitStack()
     stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
     issue = _issue() if issue_return is _UNSET else issue_return
-    stack.enter_context(patch("ghkit.list_issues", return_value=[issue]))
+    issues = issue if isinstance(issue, list) else [issue]
+    stack.enter_context(patch("ghkit.list_issues", return_value=issues))
     stack.enter_context(patch("ghkit.open_pr_issue_numbers",
                               return_value=set() if open_pr_return is _UNSET else open_pr_return))
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
@@ -275,6 +277,145 @@ _LANES = [
     {"id": "L1", "title": "Backlog", "cardStatus": "notStarted"},
     {"id": "L2", "title": "In review", "cardStatus": "started"},
 ]
+
+
+# --- customId lifecycle (issue #11) --------------------------------------------------------------
+
+def test_keyless_issue_uses_number_custom_id_after_external_link_is_lost(tmp_path):
+    card = {**_card(), "customId": "1", "externalLink": {"url": "https://example.test/lost-link"}}
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "Backlog",
+                          "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+
+    state, _, patch_card_mock, create_card_mock = _run_main_once(
+        tmp_path, (parsed, raw_items), field_meta_return=None, card=card)
+
+    create_card_mock.assert_not_called()
+    patch_card_mock.assert_not_called()
+    assert state["issues"][ISSUE_URL]["card_id"] == "C1"
+
+
+def test_title_key_rename_joins_custom_id_repair_into_single_card_patch(tmp_path):
+    issue = {**_issue(), "title": "[XYZ] renamed widget"}
+    card = {**_card(), "customId": "ABC", "laneId": "L1"}
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In review",
+                          "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    stack, _, patch_card_mock, create_card_mock = _mock_io(
+        card, (parsed, raw_items), field_meta_return=None, lanes_return=_LANES, issue_return=issue)
+    state_file = tmp_path / ".sync-state.json"
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    create_card_mock.assert_not_called()
+    patch_card_mock.assert_called_once()
+    ops = patch_card_mock.call_args.args[3]
+    assert len(ops) == 2
+    assert {"op": "replace", "path": "/customId", "value": "XYZ"} in ops
+    assert {"op": "replace", "path": "/laneId", "value": "L2"} in ops
+
+
+def test_url_and_custom_id_matching_different_cards_fails_before_writes(tmp_path):
+    issue = {**_issue(), "title": "[XYZ] widget"}
+    url_card = {**_card(), "customId": "ABC"}
+    custom_id_card = {
+        **_card(),
+        "id": "C2",
+        "customId": "XYZ",
+        "externalLink": {"url": "https://github.com/acme/repo/issues/2"},
+    }
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "Backlog",
+                          "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    stack, run_mock, patch_card_mock, create_card_mock = _mock_io(
+        url_card,
+        (parsed, raw_items),
+        field_meta_return=None,
+        existing_cards=[url_card, custom_id_card],
+        issue_return=issue,
+    )
+    state_file = tmp_path / ".sync-state.json"
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+         pytest.raises(SystemExit) as raised:
+        sync.main()
+
+    message = str(raised.value)
+    assert ISSUE_URL in message
+    assert "customId 'XYZ'" in message
+    assert "C1" in message and "C2" in message
+    create_card_mock.assert_not_called()
+    patch_card_mock.assert_not_called()
+    run_mock.assert_not_called()
+    assert not state_file.exists()
+
+
+def test_same_run_key_reuse_defers_creation_until_rename_repair_is_applied(tmp_path, capsys):
+    renamed_issue = {**_issue(), "title": "[XYZ] renamed widget"}
+    reused_key_issue = {
+        **_issue(),
+        "number": 2,
+        "title": "[ABC] new widget",
+        "url": "https://github.com/acme/repo/issues/2",
+    }
+    renamed_card = {**_card(), "customId": "ABC"}
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "Backlog",
+                          "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    stack, _, patch_card_mock, create_card_mock = _mock_io(
+        renamed_card,
+        (parsed, raw_items),
+        field_meta_return=None,
+        issue_return=[renamed_issue, reused_key_issue],
+    )
+    state_file = tmp_path / ".sync-state.json"
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    create_card_mock.assert_not_called()
+    patch_card_mock.assert_called_once()
+    assert patch_card_mock.call_args.args[3] == [
+        {"op": "replace", "path": "/customId", "value": "XYZ"},
+    ]
+    assert "deferring card [ABC] until the renamed customId is released" in capsys.readouterr().out
+
+
+def test_reused_key_is_created_after_rename_repair_is_visible(tmp_path):
+    renamed_issue = {**_issue(), "title": "[XYZ] renamed widget"}
+    reused_key_issue = {
+        **_issue(),
+        "number": 2,
+        "title": "[ABC] new widget",
+        "url": "https://github.com/acme/repo/issues/2",
+    }
+    renamed_card = {**_card(), "customId": "XYZ"}
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "Backlog",
+                          "start": None, "target": None}}
+    raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
+    stack, _, patch_card_mock, create_card_mock = _mock_io(
+        renamed_card,
+        (parsed, raw_items),
+        field_meta_return=None,
+        issue_return=[renamed_issue, reused_key_issue],
+    )
+    state_file = tmp_path / ".sync-state.json"
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.args[2:5] == (
+        "new widget",
+        "ABC",
+        reused_key_issue["url"],
+    )
+    patch_card_mock.assert_not_called()
 
 
 def test_open_pr_read_failure_does_not_crash_and_leaves_has_open_pr_false(tmp_path, capsys):

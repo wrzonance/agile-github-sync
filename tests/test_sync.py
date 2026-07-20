@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agileplace import resolve_lane_for_stage  # noqa: E402
@@ -15,8 +17,9 @@ from reconcile import reconcile, reconcile_value  # noqa: E402
 from stages import (blocked_reason, epic_key_for_task, issue_stage,  # noqa: E402
                     lane_matches_stage, normalize_status, title_key)
 from sync import (MS_PREFIX, _card_milestones, _child_connection_changes,  # noqa: E402
-                  _epic_task_resolution, _protect_open_pr_stage, _stale_milestone_tags,
-                  epic_task_numbers, explicit_stage_status, issue_card_title, resolve_issue_stage)
+                  _epic_task_resolution, _protect_open_pr_stage, _reconciled_custom_id_index,
+                  _stale_milestone_tags, epic_task_numbers, explicit_stage_status, issue_card_title,
+                  resolve_issue_stage)
 
 
 def _board_lanes():
@@ -287,6 +290,40 @@ def test_reconcile_noop_when_all_equal():
     r = reconcile(base={"a", "b"}, gh_now={"a", "b"}, ap_now={"a", "b"})
     assert not (r.gh_add or r.gh_remove or r.ap_add or r.ap_remove)
     assert r.new_base == frozenset({"a", "b"})
+
+
+# --- card identity --------------------------------------------------------
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_custom_id_disagreement_fails_independent_of_issue_order(reverse):
+    issue_one = {"number": 1, "title": "[X] first", "url": "https://example.test/issues/1"}
+    issue_two = {"number": 2, "title": "[A] second", "url": "https://example.test/issues/2"}
+    card_one = {"id": "C1", "customId": "A"}
+    card_two = {"id": "C2", "customId": "B"}
+    issues = [issue_two, issue_one] if reverse else [issue_one, issue_two]
+
+    with pytest.raises(SystemExit, match=r"by URL but card C1 by customId 'A'"):
+        _reconciled_custom_id_index(
+            issues,
+            {issue_one["url"]: card_one, issue_two["url"]: card_two},
+            {"A": card_one, "B": card_two},
+        )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_duplicate_desired_custom_ids_fail_independent_of_issue_order(reverse):
+    issue_one = {"number": 1, "title": "[X] first", "url": "https://example.test/issues/1"}
+    issue_two = {"number": 2, "title": "[X] second", "url": "https://example.test/issues/2"}
+    card_one = {"id": "C1", "customId": "A"}
+    card_two = {"id": "C2", "customId": "B"}
+    issues = [issue_two, issue_one] if reverse else [issue_one, issue_two]
+
+    with pytest.raises(SystemExit, match=r"by URL but card C[12] by customId 'X'"):
+        _reconciled_custom_id_index(
+            issues,
+            {issue_one["url"]: card_one, issue_two["url"]: card_two},
+            {"A": card_one, "B": card_two},
+        )
 
 
 # --- title-key convention (sub-issue fallback) ---------------------------

@@ -22,6 +22,7 @@ from agileplace import (  # noqa: E402
     disconnect_children,
     get_card,
     list_cards,
+    op_custom_id,
     op_tag,
     ops_blocked,
     ops_tag_remove,
@@ -258,6 +259,12 @@ def test_ops_blocked_unblock_forces_empty_reason():
     write "" to /blockReason -- never the self-contradictory isBlocked=False + non-empty reason."""
     ops = ops_blocked(False, "some reason")
     assert ops[1] == {"op": "add", "path": "/blockReason", "value": ""}
+
+
+# --- op_custom_id ---------------------------------------------------------
+
+def test_op_custom_id_replaces_the_card_custom_id():
+    assert op_custom_id("XYZ") == {"op": "replace", "path": "/customId", "value": "XYZ"}
 
 
 # --- op_tag / ops_tag_remove: index-based tag removal (issue #3) ----------

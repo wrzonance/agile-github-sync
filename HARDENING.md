@@ -17,6 +17,11 @@ past roughly 1,000 records.
   makes the whole blocked-by snapshot incomplete so existing card blocked states remain untouched.
   This is defensive parsing; whether GitHub permits creating cross-repository dependency edges has
   not been verified against the live API.
+- Card identity reconciliation derives one customId for creation and lookup, repairs customId drift
+  in the card's single versioned PATCH, and fails before writes when URL and customId identify
+  different cards. URL-owned cards also update the in-run customId index before fallback matching,
+  so a renamed key cannot claim the old card; creation with that released key waits until the next
+  run, after the rename PATCH has applied.
 
 ## [first-live-run]: confirm the exact API behavior (see also API-VALIDATION.md)
 
@@ -64,6 +69,3 @@ past roughly 1,000 records.
 - Fuller state identity. State is currently scoped by target owner/repo, board id, and schema
   version. For multi-host or multi-project safety, also fold in the GitHub host, the AgilePlace
   host/tenant, and the Project owner and number, and refuse to reuse state when they don't match.
-- Duplicate or ambiguous card match. Matching by URL and then customId resolves the common cases.
-  If a URL match and a different customId match both exist, the run should fail loudly rather than
-  pick one.
