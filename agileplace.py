@@ -77,12 +77,25 @@ def mutate(cfg: dict, apply: bool, method: str, path: str, body=None, headers=No
 
 # --- board / lanes --------------------------------------------------------
 
-def board_layout(cfg: dict) -> list:
-    return api(cfg, "GET", f"board/{cfg['board_id']}").get("lanes", [])
-
-
 def lane_title(lane: dict) -> str:
     return (lane.get("title") or lane.get("name") or "").strip()
+
+
+def _lanes_with_ids(lanes: list) -> list[dict]:
+    valid = []
+    for lane in lanes:
+        if not isinstance(lane, dict):
+            print(f"WARN  lane <{type(lane).__name__}> is not an object -- skipping malformed lane")
+            continue
+        if "id" not in lane or lane["id"] is None:
+            print(f"WARN  lane '{lane_title(lane) or '<untitled>'}' has no id -- skipping malformed lane")
+            continue
+        valid.append(lane)
+    return valid
+
+
+def board_layout(cfg: dict) -> list:
+    return _lanes_with_ids(api(cfg, "GET", f"board/{cfg['board_id']}").get("lanes", []))
 
 
 def _ancestor_titles(lane: dict, by_id: dict) -> list[str]:
@@ -95,6 +108,7 @@ def _ancestor_titles(lane: dict, by_id: dict) -> list[str]:
 
 def _leaf_lanes(lanes: list) -> list:
     """Only leaf lanes hold cards; parent/container lanes must never be a move target."""
+    lanes = _lanes_with_ids(lanes)
     parent_ids = {l.get("parentLaneId") for l in lanes if l.get("parentLaneId")}
     return [l for l in lanes if l["id"] not in parent_ids]
 
@@ -107,6 +121,7 @@ def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dic
     quiet=True suppresses the STAGE_LANE_MAP-misconfiguration WARN -- for callers that evaluate this
     purely as an internal membership check (not the actual, decisive lane-move call), so one
     misconfiguration doesn't print a duplicate WARN per such check."""
+    lanes = _lanes_with_ids(lanes)
     leaves = _leaf_lanes(lanes)
     by_id = {l["id"]: l for l in lanes}
 

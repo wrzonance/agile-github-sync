@@ -338,6 +338,21 @@ def test_inference_resolves_distinct_titles():
     assert resolve_lane_for_stage(L, "Done", "")[0]["id"] == "rf"
 
 
+def test_lane_resolution_skips_idless_lane_and_warns_with_lane_title(capsys):
+    lanes = [
+        {"title": "Broken Ready Lane", "cardStatus": "Not Started"},
+        {"id": "ready", "title": "Ready", "cardStatus": "Not Started"},
+    ]
+
+    lane, acceptable = resolve_lane_for_stage(lanes, "Ready", "")
+
+    assert lane == lanes[1]
+    assert acceptable == {"ready"}
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 1
+    assert "Broken Ready Lane" in warnings[0]
+
+
 def test_inference_backlog_ambiguous_fails_closed():
     # 3 not-started leaves, none titled "Backlog", and the matching "Not Started..." lane is a parent
     # container (excluded) -> no move rather than a wrong guess.
