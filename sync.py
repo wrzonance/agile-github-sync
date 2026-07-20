@@ -121,6 +121,61 @@ def issue_card_title(issue: dict) -> str:
     return t
 
 
+def issue_custom_id(issue: dict) -> str:
+    """The customId written to and read from AgilePlace for one GitHub issue."""
+    return title_key(issue["title"]) or str(issue["number"])
+
+
+def _same_card(left: dict | None, right: dict | None) -> bool:
+    if not left or not right:
+        return False
+    if left is right:
+        return True
+    left_id = str(left.get("id") or "")
+    right_id = str(right.get("id") or "")
+    return bool(left_id) and left_id == right_id
+
+
+def _matching_card(issue: dict, card_by_url: dict, card_by_cid: dict) -> dict | None:
+    """Match by URL first, then customId, refusing an ambiguous cross-card match."""
+    custom_id = issue_custom_id(issue)
+    url_match = card_by_url.get(issue["url"])
+    custom_id_match = card_by_cid.get(custom_id)
+    if url_match and custom_id_match:
+        url_card_id = str(url_match.get("id") or "")
+        custom_id_card_id = str(custom_id_match.get("id") or "")
+        if not _same_card(url_match, custom_id_match):
+            raise SystemExit(
+                f"ERROR: GitHub issue {issue['url']} matches AgilePlace card {url_card_id or '<unknown>'} "
+                f"by URL but card {custom_id_card_id or '<unknown>'} by customId {custom_id!r}. "
+                "Refusing to reconcile an ambiguous card match."
+            )
+    return url_match or custom_id_match
+
+
+def _reconciled_custom_id_index(issues: list[dict], card_by_url: dict,
+                                card_by_cid: dict) -> tuple[dict, frozenset[str]]:
+    """Return the URL-corrected customId index and IDs released by pending rename repairs."""
+    reconciled = dict(card_by_cid)
+    released = set()
+    # Validate the immutable board snapshot first: issue order must never erase a disagreement.
+    for issue in issues:
+        if card_by_url.get(issue["url"]):
+            _matching_card(issue, card_by_url, card_by_cid)
+    for issue in issues:
+        url_match = card_by_url.get(issue["url"])
+        if not url_match:
+            continue
+        desired_custom_id = issue_custom_id(issue)
+        current_custom_id = agileplace.custom_id_value(url_match)
+        if current_custom_id and _same_card(reconciled.get(current_custom_id), url_match):
+            del reconciled[current_custom_id]
+            if current_custom_id != desired_custom_id:
+                released.add(current_custom_id)
+        reconciled[desired_custom_id] = url_match
+    return reconciled, frozenset(released)
+
+
 def explicit_stage_status(issue: dict, project_status: dict) -> str | None:
     """The canonical stage this issue's Projects v2 Status maps to, or None when there's no Status set
     OR it's a custom option name that doesn't match one of our five stages -- i.e. exactly the case
@@ -236,7 +291,7 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
     ap_label_tags = _label_set((t for t in agileplace.card_tags(card) if not t.startswith(MS_PREFIX)), ignore)
     base_labels = _label_set(prev.get("labels", []), ignore)
     r = reconcile(base_labels, gh_labels, ap_label_tags)
-    key = title_key(issue["title"]) or str(issue["number"])
+    key = issue_custom_id(issue)
 
     gh_add_safe = _filter_gh_safe_labels(r.gh_add, key=key, action="add")
     gh_remove_safe = _filter_gh_safe_labels(r.gh_remove, key=key, action="remove")
@@ -290,7 +345,7 @@ def sync_dates(cfg, apply, issue, card, pitem, field_meta, issues_state, queue,
     if not pitem:
         return
     prev = issues_state[issue["url"]]
-    key = title_key(issue["title"]) or str(issue["number"])
+    key = issue_custom_id(issue)
     item_id = pitem.get("item_id")
     for kind, field_id, ap_field in (("start", field_meta.get("start_field_id"), "plannedStart"),
                                      ("target", field_meta.get("target_field_id"), "plannedFinish")):
@@ -343,7 +398,7 @@ def main() -> None:
         for i in issues:
             i["has_open_pr"] = i["number"] in open_pr
     by_number = {i["number"]: i for i in issues}
-    by_key = {title_key(i["title"]) or str(i["number"]): i for i in issues}
+    by_key = {issue_custom_id(i): i for i in issues}
     epics = [i for i in issues if "type:epic" in i["labels"]]
 
     state = load_state(target, str(cfg["board_id"])) if online else {"issues": {}}
@@ -392,9 +447,11 @@ def main() -> None:
         cid = agileplace.custom_id_value(card)
         if cid:
             card_by_cid[cid] = card
+    card_by_cid, pending_custom_id_releases = _reconciled_custom_id_index(
+        issues, card_by_url, card_by_cid)
 
     def card_for(issue):
-        return card_by_url.get(issue["url"]) or card_by_cid.get(title_key(issue["title"]) or "")
+        return _matching_card(issue, card_by_url, card_by_cid)
 
     card_ops: dict = {}
 
@@ -407,7 +464,10 @@ def main() -> None:
     for issue in issues:
         if card_for(issue):
             continue
-        key = title_key(issue["title"]) or str(issue["number"])
+        key = issue_custom_id(issue)
+        if key in pending_custom_id_releases:
+            print(f"WARN  deferring card [{key}] until the renamed customId is released by a prior run")
+            continue
         stage = resolve_issue_stage(issue, project_status)  # informational only when the read failed
         lane = None
         if not project_read_failed:
@@ -424,7 +484,7 @@ def main() -> None:
 
     # 2) per issue: base reset if card changed; lane; metadata; dates
     for issue in issues:
-        key = title_key(issue["title"]) or str(issue["number"])
+        key = issue_custom_id(issue)
         card = card_for(issue)
         if not card or not card.get("id"):
             continue  # freshly dry-run-created (no id yet), or unresolved
@@ -432,6 +492,9 @@ def main() -> None:
         st = issues_state.setdefault(issue["url"], {})
         if st.get("card_id") != cid:
             issues_state[issue["url"]] = {"card_id": cid}  # fresh/migrated/replaced -> reset merge base
+        if agileplace.custom_id_value(card) != key:
+            queue(card, [agileplace.op_custom_id(key)], f"customId->{key}")
+            print(f"{'sync ' if apply else 'DRY  '} [{key}] customId")
 
         stage = resolve_issue_stage(issue, project_status)
         if move_lanes:
@@ -458,7 +521,7 @@ def main() -> None:
         parent = card_for(epic)
         if not parent or not parent.get("id"):
             continue
-        key = title_key(epic["title"]) or str(epic["number"])
+        key = issue_custom_id(epic)
         task_numbers, authoritative = _epic_task_resolution(cfg, epic, by_key)
         task_urls = [by_number[n]["url"] for n in task_numbers if n in by_number]
         desired = {str(card_by_url[u]["id"]) for u in task_urls if u in card_by_url and card_by_url[u].get("id")}
@@ -486,7 +549,7 @@ def main() -> None:
             want = reason is not None
             if want != agileplace.card_is_blocked(card) or (want and reason != agileplace.card_block_reason(card)):
                 queue(card, agileplace.ops_blocked(want, reason), f"{'block' if want else 'unblock'}")
-                key = title_key(issue["title"]) or str(issue["number"])
+                key = issue_custom_id(issue)
                 print(f"{'block  ' if want else 'unblock'} [{key}]{': ' + reason if reason else ''}")
 
     # 5) flush: ONE versioned PATCH per card (optimistic concurrency)
