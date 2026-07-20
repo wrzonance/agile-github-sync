@@ -578,7 +578,7 @@ def main() -> None:
         key = issue_custom_id(issue)
         card = card_for(issue)
         if not card or not card.get("id"):
-            continue  # freshly dry-run-created (no id yet), or unresolved
+            continue  # unresolved (no matching or newly created card this run)
         cid = str(card["id"])
         st = issues_state.setdefault(issue["url"], {})
         if st.get("card_id") != cid:

@@ -84,24 +84,23 @@ class FixtureWorld:
             "url": TASK_URL,
         },
     )
-    epic_card = {
-        "id": "C1",
-        "version": "v1",
-        "title": "Parent",
-        "customId": "EP",
-        "externalLink": {"url": EPIC_URL},
-        "tags": ["type:epic", "from-ap"],
-        "laneId": "L2",
-        "plannedStart": None,
-        "plannedFinish": None,
-        "blockedStatus": {"isBlocked": False, "reason": ""},
-        "childCards": [],
-    }
-
     def __init__(self):
         self.http_writes: list[HttpWrite] = []
         self.process_writes: list[tuple[str, ...]] = []
         self.created_card: dict | None = None
+        self.epic_card = {
+            "id": "C1",
+            "version": "v1",
+            "title": "Parent",
+            "customId": "EP",
+            "externalLink": {"url": EPIC_URL},
+            "tags": ["type:epic", "from-ap"],
+            "laneId": "L2",
+            "plannedStart": None,
+            "plannedFinish": None,
+            "blockedStatus": {"isBlocked": False, "reason": ""},
+            "childCards": [],
+        }
 
     def run_process(self, argv, **_kwargs):
         args = tuple(argv[1:])
