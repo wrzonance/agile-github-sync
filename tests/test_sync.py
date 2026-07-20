@@ -5,6 +5,7 @@ These need no network or gh -- they pin the invariants the live sync depends on.
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -13,9 +14,9 @@ from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
 from stages import (blocked_reason, epic_key_for_task, issue_stage,  # noqa: E402
                     lane_matches_stage, normalize_status, title_key)
-from sync import (MS_PREFIX, _card_milestones, _protect_open_pr_stage,  # noqa: E402
-                  _stale_milestone_tags, explicit_stage_status, issue_card_title,
-                  resolve_issue_stage)
+from sync import (MS_PREFIX, _card_milestones, _child_connection_changes,  # noqa: E402
+                  _epic_task_resolution, _protect_open_pr_stage, _stale_milestone_tags,
+                  epic_task_numbers, explicit_stage_status, issue_card_title, resolve_issue_stage)
 
 
 def _board_lanes():
@@ -289,6 +290,60 @@ def test_reconcile_noop_when_all_equal():
 
 
 # --- title-key convention (sub-issue fallback) ---------------------------
+
+def test_sub_issue_fallback_never_yields_removals():
+    epic = {"number": 1, "title": "[EP-0C] API epic"}
+    task = {"number": 2, "title": "[0C2] Add endpoint"}
+    with patch("sync.ghkit.sub_issue_numbers", return_value=None):
+        numbers, authoritative = _epic_task_resolution(
+            {}, epic, {"EP-0C": epic, "0C2": task})
+
+    adds, removes = _child_connection_changes(
+        desired={f"child-{number}" for number in numbers},
+        existing={"stale-child"},
+        managed={"stale-child"},
+        authoritative=authoritative,
+    )
+
+    assert adds == ["child-2"]
+    assert removes == []
+
+
+def test_authoritative_empty_sub_issue_read_can_remove_managed_children():
+    adds, removes = _child_connection_changes(
+        desired=set(),
+        existing={"managed-child", "foreign-child"},
+        managed={"managed-child"},
+        authoritative=True,
+    )
+
+    assert adds == []
+    assert removes == ["managed-child"]
+
+
+def test_unkeyed_epic_fallback_matches_nothing_and_warns(capsys):
+    epic = {"number": 1, "title": "Unkeyed epic"}
+    by_key = {
+        "1": epic,
+        "2": {"number": 2, "title": "Unkeyed task"},
+        "3": {"number": 3, "title": "Another unkeyed issue"},
+    }
+
+    with patch("sync.ghkit.sub_issue_numbers", return_value=None):
+        numbers = epic_task_numbers({}, epic, by_key)
+
+    assert numbers == []
+    assert "has no [KEY] prefix -- fallback matches nothing" in capsys.readouterr().out
+
+
+def test_native_empty_sub_issue_read_is_authoritative():
+    epic = {"number": 1, "title": "[EP-0C] API epic"}
+
+    with patch("sync.ghkit.sub_issue_numbers", return_value=[]):
+        numbers, authoritative = _epic_task_resolution({}, epic, {})
+
+    assert numbers == []
+    assert authoritative is True
 
 def test_title_key():
     assert title_key("[EP-0C] API conventions") == "EP-0C"
