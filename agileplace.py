@@ -6,8 +6,8 @@ failing closed when ambiguous. Field updates queued for an existing card are bat
 versioned JSON-Patch (op-builders + patch_card) so the resource version can't go stale mid-run
 (optimistic concurrency); card creation and hierarchy connections use separate POST/DELETE requests.
 patch_card never sends an unversioned PATCH: a card missing `version` is refetched once first
-(_card_with_version); if the refetch is also version-less, the PATCH is skipped and a WARN is
-printed instead of risking a silent stale overwrite (issue #8).
+(_card_with_version); if the refetch is also version-less or a queued field changed concurrently,
+the PATCH and run abort instead of risking a silent stale overwrite or advancing sync state.
 API shapes marked "VALIDATE LIVE" follow current Planview docs but are confirmed at first live run.
 """
 from __future__ import annotations
@@ -410,28 +410,18 @@ def patch_card(cfg: dict, apply: bool, card: dict, ops: list[dict], note: str = 
     """Send ONE JSON Patch for a card with its resource version (optimistic concurrency). Batching every
     op for a card into a single PATCH is what prevents the version going stale between writes.
     Never sends a PATCH without a resource version: if `card` arrives without one, a fresh refetch is
-    attempted first; if that refetch also has no version, the PATCH is skipped entirely (see
-    _card_with_version)."""
+    attempted first. The fresh snapshot must still match every field targeted by the queued ops;
+    otherwise the run aborts before its caller can persist merge state (see _card_with_version)."""
     if not ops:
         return {}
     versioned = _card_with_version(cfg, apply, card, ops)
     if versioned is None:
-        return {}
+        raise SystemExit(
+            f"AgilePlace card {card.get('id', '<unknown>')} PATCH aborted after version refetch "
+            "validation failed -- refusing to save sync state"
+        )
     return mutate(cfg, apply, "PATCH", _card_path(versioned["id"]), body=ops,
                   headers=_version_headers(versioned), note=note or f"patch card {versioned['id']} ({len(ops)} ops)")
-
-
-def _has_index_tag_remove(ops: list[dict]) -> bool:
-    """True when `ops` contains an index-based tag remove ({"op":"remove","path":"/tags/<i>"}).
-    Such ops (ops_tag_remove) encode positions in a specific tags snapshot, so their correctness
-    depends on the sent resource version still describing that exact array. The append form
-    (/tags/-) and value-carrying ops are position-independent and never match here."""
-    return any(
-        op.get("op") == "remove"
-        and op.get("path", "").startswith("/tags/")
-        and op.get("path") != "/tags/-"
-        for op in ops
-    )
 
 
 def _has_usable_version(version) -> bool:
@@ -446,19 +436,57 @@ def _has_usable_version(version) -> bool:
     return True
 
 
+def _lane_id(card: dict) -> str:
+    lane = card.get("lane")
+    nested_id = lane.get("id") if isinstance(lane, dict) else None
+    lane_id = card.get("laneId")
+    return str(lane_id if lane_id is not None else nested_id if nested_id is not None else "")
+
+
+def _card_value_for_patch_path(card: dict, path: str):
+    """Return the read-side value whose snapshot a supported JSON-Patch path depends on."""
+    root = path.removeprefix("/").split("/", 1)[0]
+    if not path.startswith("/") or not root:
+        raise ValueError(f"invalid JSON-Patch path {path!r}")
+    if root == "customId":
+        return custom_id_value(card)
+    if root == "laneId":
+        return _lane_id(card)
+    if root == "tags":
+        return card.get("tags") or []
+    if root in {"plannedStart", "plannedFinish"}:
+        return card.get(root)
+    if root == "isBlocked":
+        return card_is_blocked(card)
+    if root == "blockReason":
+        return card_block_reason(card)
+    raise ValueError(f"unsupported JSON-Patch path {path!r}")
+
+
+def _changed_patch_paths(card: dict, fresh: dict, ops: list[dict]) -> list[str]:
+    """List queued paths whose read-side values changed, including malformed/unknown paths."""
+    changed = set()
+    for op in ops:
+        path = op.get("path") if isinstance(op, dict) else None
+        if not isinstance(path, str):
+            changed.add("<missing>")
+            continue
+        try:
+            if _card_value_for_patch_path(card, path) != _card_value_for_patch_path(fresh, path):
+                changed.add(path)
+        except ValueError:
+            changed.add(path)
+    return sorted(changed)
+
+
 def _card_with_version(cfg: dict, apply: bool, card: dict, ops: list[dict] | None = None) -> dict | None:
     """Guarantee `card` carries a usable resource version before patch_card is allowed to PATCH it.
     Returns `card` unchanged (zero network calls) when a usable version is already present or apply
     is False -- dry runs never trigger a refetch. Otherwise refetches the card fresh: on success
-    returns a NEW dict (never mutates `card`) with the refetched version filled in; if the refetch
-    also has no usable version, returns None and prints one WARN naming the card so the caller can
-    refuse to send an unversioned PATCH instead of risking a silent stale overwrite.
-
-    The refetch fills in a fresh resource version but keeps `card`'s original tags snapshot. Index-based
-    tag removes (ops_tag_remove) were computed against that snapshot, so pairing them with a version
-    the server may have bumped since would pass optimistic concurrency yet delete the WRONG tag if the
-    tags array shifted meanwhile. When the batch carries such ops AND the refetched tags differ from the
-    snapshot, fail closed: return None with a WARN rather than risk a silent mis-deletion (issue #3)."""
+    returns the fresh card dict (never mutates `card`) only when every field targeted by `ops` still
+    matches the original snapshot. If the refetch has no usable version, returns a different card,
+    carries an unknown op path, or reveals a concurrent change to a targeted field, returns None and
+    prints one WARN so patch_card can abort the run before sync state advances."""
     if _has_usable_version(card.get("version")) or not apply:
         return card
     fresh = get_card(cfg, card["id"])
@@ -466,11 +494,16 @@ def _card_with_version(cfg: dict, apply: bool, card: dict, ops: list[dict] | Non
         print(f"WARN  card {card['id']} has no resource version after refetch -- "
               f"refusing unversioned PATCH, skipping ops")
         return None
-    if ops and _has_index_tag_remove(ops) and (card.get("tags") or []) != (fresh.get("tags") or []):
-        print(f"WARN  card {card['id']} tags changed between snapshot and version refetch -- "
-              f"refusing PATCH with stale tag indices, skipping ops")
+    if fresh.get("id") is None or str(fresh["id"]) != str(card["id"]):
+        print(f"WARN  card {card['id']} refetch returned different card id {fresh.get('id')!r} -- "
+              "refusing PATCH with mismatched identity, skipping ops")
         return None
-    return {**card, "version": fresh["version"]}
+    changed_paths = _changed_patch_paths(card, fresh, ops or [])
+    if changed_paths:
+        print(f"WARN  card {card['id']} fields {changed_paths} changed between snapshot and version "
+              "refetch -- refusing PATCH with stale ops, skipping ops")
+        return None
+    return fresh
 
 
 def _version_headers(card: dict) -> dict:

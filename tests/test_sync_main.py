@@ -205,6 +205,34 @@ def test_legacy_state_resets_merge_base_before_relearning_live_metadata(tmp_path
 
 # --- merge-base advance invariant, end-to-end through two real main() runs -----------------------
 
+def test_patch_abort_preserves_persisted_merge_base(tmp_path):
+    """A fail-closed card PATCH must abort before metadata's in-memory base reaches disk."""
+    original_state = {
+        "schema": sync.STATE_SCHEMA,
+        "target": "acme/repo",
+        "board": "42",
+        "issues": {ISSUE_URL: {"card_id": "C1", "labels": [], "milestone": None}},
+    }
+    state_file = tmp_path / ".sync-state.json"
+    state_file.write_text(json.dumps(original_state), encoding="utf-8")
+    issue = {**_issue(), "labels": ["bug"]}
+    parsed = {ISSUE_URL: {
+        "item_id": "PVTI_1", "number": 1, "status": "Backlog",
+        "start": None, "target": None,
+    }}
+    stack, _, patch_card_mock, _ = _mock_io(
+        _card(), (parsed, []), field_meta_return=None, issue_return=issue)
+    patch_card_mock.side_effect = SystemExit("AgilePlace card C1 PATCH aborted")
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+         pytest.raises(SystemExit, match="card C1 PATCH aborted"):
+        sync.main()
+
+    patch_card_mock.assert_called_once()
+    assert json.loads(state_file.read_text(encoding="utf-8")) == original_state
+
+
 def test_merge_base_advances_only_after_confirmed_write_across_two_main_runs(tmp_path, capsys):
     raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}, "Start": "2026-01-01", "Target": None}]
     field_meta = _field_meta()

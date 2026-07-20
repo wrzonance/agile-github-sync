@@ -59,13 +59,15 @@ respectively.
    card. If it does, a card created earlier in the same run could skip `_card_with_version`'s
    refetch and PATCH immediately with the version from the create response. Until confirmed,
    `patch_card` treats every version-less card the same way regardless of origin: refetch via
-   `get_card`, and refuse the PATCH with a WARN if the refetch is also version-less (see `[live-check]`
-   item 4 and `_card_with_version` in `agileplace.py`). Confirming this field would let a follow-up
-   pass the create response's version straight through instead of paying for an extra refetch.
+   `get_card`, then PATCH only when the refetch has a usable version and every queued field still
+   matches the original snapshot. A failed validation warns and aborts before sync state is saved
+   (see `[live-check]` item 4 and `_card_with_version` in `agileplace.py`). Confirming this field
+   would let a follow-up pass the create response's version straight through instead of paying for
+   an extra refetch.
 
 Together, items 4 and 5 are what closes the fail-open optimistic-concurrency gap from issue #8
 (`patch_card` no longer ever sends an unversioned PATCH) pending those two live confirmations --
-today the code fails closed (refetch-or-skip-with-WARN) rather than assuming either shape.
+today the code fails closed (refetch, validate, or abort) rather than assuming either shape.
 
 ## Model 2 additions, also [live-check]
 
