@@ -42,9 +42,11 @@ def _http_error(url: str, code: int, body: str) -> urllib.error.HTTPError:
 class FakeTenant:
     """Minimal stateful AgilePlace io v2 double for the whole smoke sequence."""
 
-    def __init__(self, *, accept_stale: bool = False, fail_child_create_body: str | None = None):
+    def __init__(self, *, accept_stale: bool = False, fail_child_create_body: str | None = None,
+                 create_returns_version: bool = True):
         self.accept_stale = accept_stale
         self.fail_child_create_body = fail_child_create_body
+        self.create_returns_version = create_returns_version
         self.writes: list[tuple[str, str]] = []
         self.cards: dict[str, dict] = {
             "P1": {"id": "P1", "title": "Existing card", "customId": "EX-1",
@@ -105,7 +107,10 @@ class FakeTenant:
         if "externalLink" in body:
             card["externalLink"] = body["externalLink"]
         self.cards[card_id] = card
-        return _Response({"id": card_id, "version": "1", **body})
+        response = {"id": card_id, **body}
+        if self.create_returns_version:
+            response["version"] = "1"
+        return _Response(response)
 
     def _patch(self, req, card_id: str, ops: list):
         card = self.cards[card_id]
@@ -189,6 +194,19 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
     assert "wrapped" in out            # single-card GET shape reported
     assert "HTTP 409" in out           # stale probe rejection surfaced verbatim
     assert "404" in out                # post-delete GET confirms the cards are gone
+
+
+def test_versionless_create_response_is_informational_not_a_failure(tenant_env, capsys):
+    """Live tenants return no version on create (confirmed 2026-07-20); the sync's
+    refetch-before-PATCH path handles that, so smoke must report the fact without failing."""
+    tenant_env(FakeTenant(create_returns_version=False))
+
+    assert smoke.main([]) == 0
+
+    out = capsys.readouterr().out
+    assert "FAIL" not in out
+    assert "INFO" in out
+    assert "refetch" in out  # the report says which patch path the sync will take
 
 
 def test_yes_flag_skips_the_confirmation_prompt(tenant_env):

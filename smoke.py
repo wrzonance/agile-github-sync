@@ -109,8 +109,12 @@ def _check_create_parent(cfg: dict, lane_id: str | None, created: list[str],
     created.append(parent_id)
     print(f"      created card {parent_id}")
     results.append(("card create (customId + externalLink accepted)", True, f"id {parent_id}"))
-    results.append(("create response carries a resource version", _has_version(dict(parent)),
-                    f"version={parent.get('version')!r}"))
+    # Fact-finding, not pass/fail: both outcomes are handled (a version-less card is refetched
+    # before any PATCH), so this only reports which patch path the sync will take.
+    results.append(("create response carries a resource version", None,
+                    f"version={parent.get('version')!r} -- "
+                    + ("PATCHes can reuse it" if _has_version(dict(parent))
+                       else "the sync's refetch-before-PATCH path is required")))
 
     _step(2, "single-card GET response shape")
     raw = agileplace.api(cfg, "GET", f"card/{parent_id}")
@@ -238,8 +242,9 @@ def _summarize(results: list) -> int:
     print("\n--- smoke summary (cross-check the [live-check] items in API-VALIDATION.md) ---")
     failed = False
     for name, ok, detail in results:
-        failed = failed or not ok
-        print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f" -- {detail}" if detail else ""))
+        failed = failed or ok is False  # ok=None is informational and never fails the run
+        marker = {True: "PASS", False: "FAIL", None: "INFO"}[ok]
+        print(f"{marker}  {name}" + (f" -- {detail}" if detail else ""))
     if failed:
         print("smoke FAILED -- fix the shapes above before trusting a live --apply run")
         return 1

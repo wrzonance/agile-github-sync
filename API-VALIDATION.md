@@ -34,8 +34,10 @@ respectively.
 
 > `python smoke.py` automates these checks (plus the Connections round-trip below): it previews the
 > configured board, asks for confirmation, then exercises every write shape on two throwaway cards
-> and reports PASS/FAIL per item with the server's full response body on any rejection. Run it once
-> against the target tenant and record the outcome here.
+> and reports PASS/FAIL per item with the server's full response body on any rejection.
+>
+> **2026-07-20: a smoke.py run against the production tenant confirmed every item below** -- see
+> "Validated live on 2026-07-20 (smoke.py run)" at the end of this file for the outcomes.
 
 1. Tag removal. The code now sends standard RFC-6902 index-based removal --
    `{op:"remove", path:"/tags/{i}"}`, no `value` member -- with indices computed from the card's
@@ -144,3 +146,30 @@ Two gh behaviors learned the same day, recorded so this repo never has to redisc
 2. `gh issue edit --add-blocked-by` is not idempotent. Re-adding an existing edge fails with
    "Target issue has already been taken", which for the caller's intent means the edge is already
    there.
+
+## Validated live on 2026-07-20 (smoke.py run, production tenant board)
+
+A confirmed `python smoke.py` run (create -> mutate -> connect -> stale-probe -> delete on two
+throwaway cards) retired every remaining AgilePlace `[live-check]` item:
+
+1. **Tag removal (item 1): confirmed.** Index-based `{op:"remove", path:"/tags/{i}"}` cleared the
+   tag in an add-then-remove round-trip (`tags` ended empty).
+2. **External link add (item 2): confirmed.** `{op:"add", path:"/externalLink", value:{label,url}}`
+   succeeded on a card created with no link.
+3. **Version conflict (item 3): confirmed.** A PATCH with a stale `x-lk-resource-version` was
+   rejected with **HTTP 428 Precondition Required**; the body shows the server running a JSON-Patch
+   `test` op on `/version` built from the header (`error: "Test operation failed"`, with
+   `actualValue` reporting the current version). Optimistic concurrency is real; no silent stale
+   overwrite. A conflict surfaces as a failed run, as coded.
+4. **Single-card GET shape (item 4): confirmed FLAT.** `GET /io/card/{id}` returns the card fields
+   at the top level, not wrapped in `{"card": ...}`. `get_card`'s defensive unwrap stays (it is
+   harmless and covers both shapes), but the wrapped branch is now known to be unused live.
+5. **Card create response `version` (item 5): confirmed ABSENT.** The create response carries no
+   resource version, so `patch_card`'s refetch-before-PATCH path for version-less cards is
+   *required* behavior, not an optimization opportunity -- the contemplated follow-up (reusing the
+   create response's version to skip the refetch) is moot.
+
+Model 2 additions confirmed by the same run: card create with `customId`+`externalLink` and without
+an external link both accepted; `card/connections` connect/disconnect round-trip works and the
+children read reflects it immediately (including the authoritative empty read after disconnect).
+`DELETE /io/card/{id}` (smoke cleanup only) deletes for real -- a follow-up GET returns 404.
