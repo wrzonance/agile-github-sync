@@ -14,10 +14,11 @@ With `--apply`, each run:
    card's external-link URL, with the card's customId as a fallback. Issues closed as
    `NOT_PLANNED`/`DUPLICATE` never get new cards; if one already has a URL-matched card, the run
    retires it to Done and clears its stale blocked state without syncing its metadata back to GitHub.
-2. Moves each card to the lane for its stage. The stage is the issue's Status on the GitHub
-   Projects v2 board (Backlog / Ready / In progress / In review / Done), which is the source of
-   truth. Issues that are not on the Project fall back to a stage derived from labels, assignees,
-   and open PRs.
+2. Moves each card to the lane for its stage. For open issues, the stage is the issue's Status on
+   the GitHub Projects v2 board (Backlog / Ready / In progress / In review / Done), which is the
+   source of truth. A closed issue always resolves to Done, even when its Project item retains a
+   stale Status. Issues that are not on the Project fall back to a stage derived from labels,
+   assignees, and open PRs.
    Lanes are matched by title among leaf lanes; if a match is ambiguous, the card stays where it
    is. If reading the Project fails outright -- or technically succeeds but yields zero recognized
    statuses for a Project that does have issue-linked items (e.g. a misconfigured
