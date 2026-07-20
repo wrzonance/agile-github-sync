@@ -230,9 +230,28 @@ def get_card(cfg: dict, card_id: str) -> dict:
     return card
 
 
+def _warn_card_field(card: dict, detail: str) -> None:
+    print(f"WARN  card {card.get('id', '<unknown>')} {detail} -- skipping malformed value")
+
+
 def card_external_urls(card: dict) -> list[str]:
-    links = card.get("externalLinks") or ([card["externalLink"]] if card.get("externalLink") else [])
-    return [(l or {}).get("url", "") for l in links if l]
+    links = card.get("externalLinks")
+    if links:
+        if not isinstance(links, list):
+            _warn_card_field(card, f"has non-array externalLinks ({type(links).__name__})")
+            return []
+    else:
+        link = card.get("externalLink")
+        links = [link] if link else []
+
+    urls = []
+    for link in links:
+        if not isinstance(link, dict):
+            _warn_card_field(card, f"has non-object external link ({type(link).__name__})")
+            continue
+        if link:
+            urls.append(link.get("url", ""))
+    return urls
 
 
 def custom_id_value(card: dict) -> str:
@@ -243,15 +262,34 @@ def custom_id_value(card: dict) -> str:
 
 
 def card_tags(card: dict) -> set[str]:
-    return {t for t in (card.get("tags") or []) if t}
+    tags = card.get("tags") or []
+    if not isinstance(tags, list):
+        _warn_card_field(card, f"has non-array tags ({type(tags).__name__})")
+        return set()
+    valid = set()
+    for tag in tags:
+        if not isinstance(tag, str):
+            _warn_card_field(card, f"has non-string tag ({type(tag).__name__})")
+            continue
+        if tag:
+            valid.add(tag)
+    return valid
+
+
+def _blocked_status(card: dict) -> dict:
+    status = card.get("blockedStatus") or {}
+    if not isinstance(status, dict):
+        _warn_card_field(card, f"has non-object blockedStatus ({type(status).__name__})")
+        return {}
+    return status
 
 
 def card_is_blocked(card: dict) -> bool:
-    return bool((card.get("blockedStatus") or {}).get("isBlocked"))
+    return bool(_blocked_status(card).get("isBlocked"))
 
 
 def card_block_reason(card: dict) -> str:
-    return (card.get("blockedStatus") or {}).get("reason") or ""
+    return _blocked_status(card).get("reason") or ""
 
 
 def card_child_ids(card: dict) -> set[str]:
@@ -295,12 +333,13 @@ def ops_tag_remove(current_tags: list[str], tags_to_remove: set[str]) -> list[di
     """
     if not tags_to_remove:
         return []
-    missing = tags_to_remove - set(current_tags)
+    missing = {tag for tag in tags_to_remove if tag not in current_tags}
     if missing:
         raise ValueError(
             f"ops_tag_remove: tag(s) {sorted(missing)} not found in current_tags {current_tags!r}"
         )
-    indices = [i for i, t in enumerate(current_tags) if t in tags_to_remove]
+    indices = [i for i, t in enumerate(current_tags)
+               if isinstance(t, str) and t in tags_to_remove]
     return [{"op": "remove", "path": f"/tags/{i}"} for i in sorted(indices, reverse=True)]
 
 

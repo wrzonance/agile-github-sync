@@ -12,8 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agileplace import (  # noqa: E402
     _card_with_version,
     _has_index_tag_remove,
+    card_external_urls,
     card_block_reason,
     card_is_blocked,
+    card_tags,
     connect_children,
     create_card,
     disconnect_children,
@@ -168,6 +170,19 @@ def test_list_cards_fails_loud_when_hostile_page_meta_never_terminates():
     assert [call.kwargs["params"]["offset"] for call in api_mock.call_args_list] == [0, 1, 2]
 
 
+def test_list_cards_ignores_truthy_non_dict_page_meta():
+    pages = [
+        {"cards": [{"id": "1"}], "pageMeta": "not-an-object"},
+        {"cards": [], "pageMeta": "still-not-an-object"},
+    ]
+
+    with patch("agileplace.api", side_effect=pages) as api_mock:
+        cards = list_cards(CFG)
+
+    assert cards == [{"id": "1"}]
+    assert [call.kwargs["params"]["offset"] for call in api_mock.call_args_list] == [0, 1]
+
+
 def test_ops_blocked_block_with_reason():
     ops = ops_blocked(True, "waiting on design review")
     assert len(ops) == 2
@@ -264,6 +279,12 @@ def test_ops_tag_remove_empty_set_returns_empty_list():
     assert ops_tag_remove(["alpha", "beta"], set()) == []
 
 
+def test_ops_tag_remove_handles_unhashable_malformed_raw_tag_elements():
+    current_tags = ["alpha", {"name": "bad"}, "beta"]
+
+    assert ops_tag_remove(current_tags, {"beta"}) == [{"op": "remove", "path": "/tags/2"}]
+
+
 def test_ops_tag_remove_interleaved_with_op_tag_add_stays_consistent():
     """Covers the issue's 'interleaved add+remove in one patch stays consistent' criterion: adds
     and removes combined into one ops list, with the remove ops still strictly descending among
@@ -285,6 +306,37 @@ def test_card_is_blocked_reads_nested_blockedstatus_isblocked():
     assert card_is_blocked({"blockedStatus": {"isBlocked": False, "reason": ""}}) is False
     assert card_is_blocked({}) is False
     assert card_is_blocked({"isBlocked": True}) is False  # flat write shape must not be read
+
+
+def test_card_tags_skips_non_string_elements_and_warns_with_card_id(capsys):
+    card = {"id": "card-7", "tags": ["alpha", {"name": "bad"}, 42, ""]}
+
+    assert card_tags(card) == {"alpha"}
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 2
+    assert all("card-7" in line for line in warnings)
+
+
+def test_card_external_urls_skips_non_dict_links_and_warns_with_card_id(capsys):
+    card = {
+        "id": "card-8",
+        "externalLinks": [{"url": "https://example.test/issues/8"}, "bad-link", 8],
+    }
+
+    assert card_external_urls(card) == ["https://example.test/issues/8"]
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 2
+    assert all("card-8" in line for line in warnings)
+
+
+def test_blocked_readers_ignore_string_status_and_warn_with_card_id(capsys):
+    card = {"id": "card-9", "blockedStatus": "blocked"}
+
+    assert card_is_blocked(card) is False
+    assert card_block_reason(card) == ""
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 2
+    assert all("card-9" in line for line in warnings)
 
 
 def test_card_block_reason_reads_nested_blockedstatus_reason():
