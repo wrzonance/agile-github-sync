@@ -15,6 +15,9 @@ import sync  # noqa: E402
 from stages import blocked_reason  # noqa: E402
 
 
+_PROJECT_DISABLED = object()
+
+
 def _github_issue(number: int, state_reason: str) -> dict:
     return {
         "number": number,
@@ -41,7 +44,7 @@ def _config(tmp_path) -> dict:
 
 
 def _run_main(tmp_path, monkeypatch, raw_issues, cards, blocked_by=None, lanes=(),
-              open_pr_result=frozenset(), project_snapshot=None):
+              open_pr_result=frozenset(), project_snapshot=_PROJECT_DISABLED):
     monkeypatch.setattr(
         ghkit,
         "run",
@@ -53,8 +56,14 @@ def _run_main(tmp_path, monkeypatch, raw_issues, cards, blocked_by=None, lanes=(
     blocked_by_read = stack.enter_context(patch("ghkit.blocked_by_map", return_value=blocked_by or {}))
     edit_label = stack.enter_context(patch("ghkit.edit_label"))
     stack.enter_context(patch("ghkit.set_milestone"))
-    stack.enter_context(patch("ghproject.configured", return_value=project_snapshot is not None))
-    stack.enter_context(patch("ghproject.items_and_raw", return_value=project_snapshot))
+    project_configured = project_snapshot is not _PROJECT_DISABLED
+    stack.enter_context(patch("ghproject.configured", return_value=project_configured))
+    stack.enter_context(patch(
+        "ghproject.items",
+        return_value=project_snapshot if project_configured else {},
+    ))
+    stack.enter_context(patch("ghproject.field_meta", return_value=None))
+    stack.enter_context(patch("ghproject.hydrate_item_dates", return_value=project_snapshot))
     stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes)))
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))
     create_card = stack.enter_context(patch("agileplace.create_card", return_value={}))
@@ -136,6 +145,7 @@ def test_existing_retired_card_is_retired_and_unblocks_dependent(
         cards=[_card(10, "L2", blocked=True), _card(20, "L1", blocked=True)],
         blocked_by={10: [], 20: [10]},
         lanes=lanes,
+        project_snapshot={},
     )
 
     out = capsys.readouterr().out
@@ -166,7 +176,7 @@ def test_retirement_uses_authoritative_closure_when_other_reads_fail(
         cards=[_card(10, "L2", blocked=False)],
         lanes=[{"id": "L5", "title": "Done", "cardStatus": "finished"}],
         open_pr_result=None,
-        project_snapshot=(None, []),
+        project_snapshot=None,
     )
 
     out = capsys.readouterr().out
