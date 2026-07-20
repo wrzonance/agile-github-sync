@@ -10,8 +10,10 @@ GitHub state.
 
 With `--apply`, each run:
 
-1. Creates a card for every issue, epics and tasks alike. Cards are matched to issues by the card's
-   external-link URL, with the card's customId as a fallback.
+1. Creates a card for every active issue, epics and tasks alike. Cards are matched to issues by the
+   card's external-link URL, with the card's customId as a fallback. Issues closed as
+   `NOT_PLANNED`/`DUPLICATE` never get new cards; if one already has a URL-matched card, the run
+   retires it to Done and clears its stale blocked state without syncing its metadata back to GitHub.
 2. Moves each card to the lane for its stage. The stage is the issue's Status on the GitHub
    Projects v2 board (Backlog / Ready / In progress / In review / Done), which is the source of
    truth. Issues that are not on the Project fall back to a stage derived from labels, assignees,
@@ -19,14 +21,16 @@ With `--apply`, each run:
    Lanes are matched by title among leaf lanes; if a match is ambiguous, the card stays where it
    is. If reading the Project fails outright -- or technically succeeds but yields zero recognized
    statuses for a Project that does have issue-linked items (e.g. a misconfigured
-   `GH_PROJECT_STATUS_FIELD`) -- no lanes are changed that run, so the fallback cannot mass-move the
-   board. New cards created during such a run are left laneless rather than fallback-laned; a later
-   run lanes them normally once the read succeeds.
+   `GH_PROJECT_STATUS_FIELD`) -- no active-issue lanes are changed that run, so the fallback cannot
+   mass-move the board. Authoritative `NOT_PLANNED`/`DUPLICATE` retirement still moves an existing
+   card to Done. New cards created during such a run are left laneless rather than fallback-laned; a
+   later run lanes them normally once the read succeeds.
 3. Mirrors sub-issues as parent/child card connections, adding and removing links so the card
    hierarchy matches the GitHub graph. LeanKit then rolls child progress up to the parent on its
    own.
 4. Marks a card blocked while any issue blocking it is not Done, and clears the blocked state
-   otherwise.
+   otherwise. A `NOT_PLANNED`/`DUPLICATE` blocker is known Done, so it cannot block dependents
+   forever; a blocker missing from the complete issue snapshot remains incomplete (fail-closed).
 5. Reconciles metadata and dates in both directions using a three-way merge against
    `.sync-state.json`. GitHub labels and milestone sync with card tags, and removals carry over in
    both directions. The Project's Start and Target date fields sync with the card's `plannedStart`

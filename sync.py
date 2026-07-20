@@ -2,11 +2,12 @@
 """Ongoing GitHub -> AgilePlace sync (Model 2). Agnostic: derives everything from live GitHub + the
 board + the GitHub Projects v2 Status, with no manifest/issue-map.
 
-Per run: ensure a card per issue (matched by URL, then customId); move each card to the lane for its
-stage (Projects v2 Status = source of truth, label/PR fallback); mirror sub-issues as parent/child
-connections; mirror blocked-by as the card Blocked state; bidirectionally reconcile labels/milestone
-<-> tags and planned dates <-> Project date fields. Every mutation to one card is batched into a single
-versioned PATCH (optimistic concurrency).
+Per run: ensure a card per active issue (matched by URL, then customId); retire existing cards for
+NOT_PLANNED/DUPLICATE issues; move each active card to the lane for its stage (Projects v2 Status =
+source of truth, label/PR fallback); mirror sub-issues as parent/child connections; mirror blocked-by
+as the card Blocked state; bidirectionally reconcile labels/milestone <-> tags and planned dates <->
+Project date fields. Every mutation to one card is batched into a single versioned PATCH (optimistic
+concurrency).
 
 DRY RUN by default. State is target-scoped, issue-URL-keyed, records each issue's card id (so a
 re-created card resets its merge base instead of wiping GitHub), atomic, and fail-closed.
@@ -508,7 +509,7 @@ def main() -> None:
             print(f"WARN  [{issue_custom_id(issue)}] retired issue has only a customId card match; "
                   "refusing to retire without the GitHub external-link URL")
 
-    # 1) ensure a card per issue
+    # 1) ensure a card per active issue
     for issue in active_issues:
         if card_for(issue):
             continue
@@ -530,7 +531,7 @@ def main() -> None:
                      else " lane=deferred (Projects v2 read failed)" if project_read_failed else "")
         print(f"{'made ' if apply else 'DRY  '} card [{key}] stage={stage}{lane_note}")
 
-    # 2) per issue: base reset if card changed; lane; metadata; dates
+    # 2) per active issue: base reset if card changed; lane; metadata; dates
     for issue in active_issues:
         key = issue_custom_id(issue)
         card = card_for(issue)
