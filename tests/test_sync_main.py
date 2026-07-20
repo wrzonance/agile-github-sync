@@ -131,6 +131,28 @@ def test_load_state_refuses_explicit_wrong_schema(tmp_path):
     assert "Inspect or delete it, then re-run." in message
 
 
+@pytest.mark.parametrize("card_id", ["", 0])
+def test_load_state_resets_falsy_card_id_merge_bases(tmp_path, card_id):
+    state_file = tmp_path / ".sync-state.json"
+    state_file.write_text(json.dumps({
+        "schema": sync.STATE_SCHEMA,
+        "target": "acme/repo",
+        "board": "42",
+        "issues": {
+            ISSUE_URL: {
+                "card_id": card_id,
+                "start": "2026-01-01",
+                "target": "2026-01-09",
+            },
+        },
+    }), encoding="utf-8")
+
+    with patch("sync.STATE_FILE", state_file):
+        state = sync.load_state("acme/repo", "42")
+
+    assert state["issues"][ISSUE_URL] == {}
+
+
 def test_legacy_state_resets_merge_base_before_relearning_live_metadata(tmp_path):
     state_file = tmp_path / ".sync-state.json"
     state_file.write_text(json.dumps({
@@ -152,7 +174,7 @@ def test_legacy_state_resets_merge_base_before_relearning_live_metadata(tmp_path
     }}
     raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
     stack, run_mock, patch_card_mock, _ = _mock_io(
-        _card(), (parsed, raw_items), field_meta_return=None, issue_return=issue)
+        _card(), (parsed, raw_items), field_meta_return=_field_meta(), issue_return=issue)
 
     with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
          patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
@@ -162,8 +184,11 @@ def test_legacy_state_resets_merge_base_before_relearning_live_metadata(tmp_path
     assert state["schema"] == sync.STATE_SCHEMA
     assert state["issues"][ISSUE_URL] == {
         "card_id": "C1", "labels": ["bug"], "milestone": "1.0",
+        "start": "2026-02-01", "target": None,
     }
-    run_mock.assert_not_called()  # live GitHub metadata was retained, never removed
+    run_mock.assert_called_once()
+    assert run_mock.call_args.args[1][:2] == ["project", "item-edit"]
+    assert "--date" in run_mock.call_args.args[1]  # live card date was relearned on the first run
     patch_card_mock.assert_called_once()
     ops = patch_card_mock.call_args.args[3]
     assert all(op["op"] != "remove" for op in ops)
