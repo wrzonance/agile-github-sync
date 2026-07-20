@@ -624,7 +624,13 @@ def main() -> None:
         desired = {str(card["id"])
                    for issue in task_issues
                    if (card := card_for(issue)) and card.get("id")}
-        existing_snapshot = agileplace.card_child_ids(cfg, str(parent["id"]))
+        # A plan-only parent has not reached AgilePlace yet, so its authoritative server-side child
+        # set is empty. Never send its synthetic identity across a real read boundary.
+        existing_snapshot = (
+            frozenset()
+            if parent.get("_planOnly")
+            else agileplace.card_child_ids(cfg, str(parent["id"]))
+        )
         existing = set(existing_snapshot or ())
         adds, removes = _child_connection_changes(
             desired, existing, managed_card_ids,

@@ -81,7 +81,7 @@ def mutate(cfg: dict, apply: bool, method: str, path: str, body=None, headers=No
     """The single write gate. Dry mode prints the request instead of sending it."""
     if apply:
         return api(cfg, method, path, body=body, headers=headers)
-    print(f"DRY   {method} /io/{path} {note} body={json.dumps(body)[:200]}")
+    print(f"DRY   {method} /io/{path} {note} body={json.dumps(body)}")
     return {}
 
 

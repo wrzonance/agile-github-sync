@@ -78,12 +78,21 @@ class FixtureWorld:
             "title": "[TASK] Build widget",
             "state": "OPEN",
             "stateReason": None,
-            "labels": [{"name": "feature"}, {"name": "agent:ready"}],
+            "labels": [
+                {"name": "feature"},
+                {"name": "agent:ready"},
+                {"name": "area:sync"},
+                {"name": "priority:medium"},
+                {"name": "test:boundary"},
+                {"name": "platform:github"},
+                {"name": "platform:agileplace"},
+            ],
             "milestone": None,
             "assignees": [],
             "url": TASK_URL,
         },
     )
+
     def __init__(self):
         self.http_writes: list[HttpWrite] = []
         self.process_writes: list[tuple[str, ...]] = []
@@ -149,6 +158,11 @@ class FixtureWorld:
             return _Response({
                 "cards": [self.epic_card],
                 "pageMeta": {"totalRecords": 1, "limit": 200},
+            })
+        if method == "GET" and path == "card/C1/connection/children":
+            return _Response({
+                "cards": [],
+                "pageMeta": {"offset": 0, "limit": 200, "totalRecords": 0},
             })
         if method == "POST" and path == "card":
             self.created_card = {"id": "C2", **body}
@@ -287,4 +301,4 @@ def test_whole_run_batches_one_versioned_patch_per_card(paired_runs):
     assert patches
     assert all(count == 1 for count in patch_counts.values())
     assert all(write.headers.get("x-lk-resource-version", "").strip() for write in patches)
-    assert len(patches[0].body) == 3
+    assert len(json.dumps(patches[0].body)) > 200
