@@ -59,8 +59,11 @@ def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None,
         if err.code == 429 and _attempt < 3:
             time.sleep(_retry_after_seconds(err))
             return api(cfg, method, path, body, params, headers, _attempt + 1)
-        detail = err.read().decode(errors="replace")[:300]
-        raise SystemExit(f"AgilePlace {method} /{path} failed: HTTP {err.code} {detail}") from err
+        detail = err.read().decode(errors="replace")
+        exc = SystemExit(f"AgilePlace {method} /{path} failed: HTTP {err.code} {detail[:300]}")
+        exc.http_status = err.code  # full, untruncated server response for verbose reporters
+        exc.http_body = detail
+        raise exc from err
     except urllib.error.URLError as err:  # DNS / refused / TLS / timeout -- no writes performed
         raise SystemExit(f"AgilePlace {method} /{path} unreachable: {err.reason}") from err
 
@@ -645,6 +648,12 @@ def create_card(cfg: dict, apply: bool, title: str, custom_id: str, external_url
         mutate(cfg, False, "POST", "card", body=body, note=f"create card {custom_id}")
         return _planned_card_snapshot(title, custom_id, external_url, lane_id)
     return mutate(cfg, True, "POST", "card", body=body, note=f"create card {custom_id}")
+
+
+def delete_card(cfg: dict, apply: bool, card_id: str) -> None:
+    """Delete a card outright (io v2 DELETE /io/card/{cardId}). Used by smoke mode cleanup only --
+    the ongoing sync never deletes cards."""
+    mutate(cfg, apply, "DELETE", _card_path(card_id), note=f"delete card {card_id}")
 
 
 # --- parent/child connections (hierarchy) -- VALIDATE LIVE -------------------

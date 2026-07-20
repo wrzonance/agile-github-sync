@@ -32,6 +32,11 @@ respectively.
 
 ## [live-check]: verify once with real keys, on a disposable card
 
+> `python smoke.py` automates these checks (plus the Connections round-trip below): it previews the
+> configured board, asks for confirmation, then exercises every write shape on two throwaway cards
+> and reports PASS/FAIL per item with the server's full response body on any rejection. Run it once
+> against the target tenant and record the outcome here.
+
 1. Tag removal. The code now sends standard RFC-6902 index-based removal --
    `{op:"remove", path:"/tags/{i}"}`, no `value` member -- with indices computed from the card's
    current tags and removals applied in descending index order within one patch (`agileplace.py`'s
