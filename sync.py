@@ -584,7 +584,8 @@ def main() -> None:
             print(f"{'unlink' if apply else 'DRY  '} [{key}] -{len(removes)} child card(s)")
 
     # 4) dependencies -> card Blocked state (skip entirely unless the whole blocked-by snapshot is complete)
-    blocked_by = ghkit.blocked_by_map(cfg, [i["number"] for i in active_issues]) if online else None
+    blocked_by = (ghkit.blocked_by_map(cfg, [i["number"] for i in active_issues])
+                  if online and active_issues else {} if online else None)
     if online and blocked_by is None:
         print("WARN  blocked-by snapshot incomplete -- leaving ALL card Blocked states untouched this run")
     if blocked_by is not None:

@@ -40,7 +40,8 @@ def _config(tmp_path) -> dict:
     }
 
 
-def _run_main(tmp_path, monkeypatch, raw_issues, cards, blocked_by=None, lanes=()):
+def _run_main(tmp_path, monkeypatch, raw_issues, cards, blocked_by=None, lanes=(),
+              open_pr_result=frozenset(), project_snapshot=None):
     monkeypatch.setattr(
         ghkit,
         "run",
@@ -48,11 +49,12 @@ def _run_main(tmp_path, monkeypatch, raw_issues, cards, blocked_by=None, lanes=(
     )
     stack = ExitStack()
     stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
-    stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
+    stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=open_pr_result))
     blocked_by_read = stack.enter_context(patch("ghkit.blocked_by_map", return_value=blocked_by or {}))
     edit_label = stack.enter_context(patch("ghkit.edit_label"))
     stack.enter_context(patch("ghkit.set_milestone"))
-    stack.enter_context(patch("ghproject.configured", return_value=False))
+    stack.enter_context(patch("ghproject.configured", return_value=project_snapshot is not None))
+    stack.enter_context(patch("ghproject.items_and_raw", return_value=project_snapshot))
     stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes)))
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))
     create_card = stack.enter_context(patch("agileplace.create_card", return_value={}))
@@ -102,7 +104,7 @@ def test_retired_issues_remain_known_done_blockers(monkeypatch):
 
 
 def test_retired_issue_without_card_is_not_created(tmp_path, monkeypatch):
-    create_card, patch_card, _, _ = _run_main(
+    create_card, patch_card, blocked_by_read, _ = _run_main(
         tmp_path,
         monkeypatch,
         [_github_issue(10, "NOT_PLANNED")],
@@ -111,6 +113,7 @@ def test_retired_issue_without_card_is_not_created(tmp_path, monkeypatch):
 
     create_card.assert_not_called()
     patch_card.assert_not_called()
+    blocked_by_read.assert_not_called()
 
 
 def test_existing_retired_card_is_retired_and_unblocks_dependent(
@@ -152,3 +155,41 @@ def test_existing_retired_card_is_retired_and_unblocks_dependent(
             {"op": "add", "path": "/blockReason", "value": ""},
         ],
     }
+
+
+def test_retirement_uses_authoritative_closure_when_other_reads_fail(
+        tmp_path, monkeypatch, capsys):
+    _, patch_card, _, _ = _run_main(
+        tmp_path,
+        monkeypatch,
+        [_github_issue(10, "DUPLICATE")],
+        cards=[_card(10, "L2", blocked=False)],
+        lanes=[{"id": "L5", "title": "Done", "cardStatus": "finished"}],
+        open_pr_result=None,
+        project_snapshot=(None, []),
+    )
+
+    out = capsys.readouterr().out
+    assert "open-PR read FAILED" in out
+    assert "Projects v2 read FAILED" in out
+    assert "DRY   retire [10] -> 'Done' (DUPLICATE)" in out
+    assert patch_card.call_args.args[3] == [
+        {"op": "replace", "path": "/laneId", "value": "L5"},
+    ]
+
+
+def test_retirement_refuses_custom_id_only_match(tmp_path, monkeypatch, capsys):
+    unrelated_card = {
+        **_card(99, "L1", blocked=False),
+        "customId": "10",
+    }
+
+    _, patch_card, _, _ = _run_main(
+        tmp_path,
+        monkeypatch,
+        [_github_issue(10, "NOT_PLANNED")],
+        cards=[unrelated_card],
+    )
+
+    assert "retired issue has only a customId card match" in capsys.readouterr().out
+    patch_card.assert_not_called()
