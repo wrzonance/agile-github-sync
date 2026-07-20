@@ -217,6 +217,35 @@ def _protect_open_pr_stage(stage: str, current_lane_id: str, lanes: list, milest
     return stage
 
 
+def _retire_card(issue: dict, card: dict, lanes: list, stage_map: dict | None,
+                 apply: bool, queue) -> None:
+    """Move one URL-matched retired issue card to Done and clear its stale blocked state."""
+    key = issue_custom_id(issue)
+    reason = issue["state_reason"]
+    if not card.get("id"):
+        print(f"WARN  [{key}] cannot retire card without an id ({reason})")
+        return
+
+    current = str(card.get("laneId") or (card.get("lane") or {}).get("id") or "")
+    target, acceptable = agileplace.resolve_lane_for_stage(
+        lanes, "Done", issue.get("milestone") or "", stage_map)
+    ops, actions = [], []
+    if target and current not in {str(lane_id) for lane_id in acceptable}:
+        ops.append(agileplace.op_lane(target["id"]))
+        actions.append(f"-> '{agileplace.lane_title(target)}'")
+    elif target:
+        actions.append(f"already '{agileplace.lane_title(target)}'")
+    else:
+        print(f"WARN  [{key}] cannot retire to Done: no unambiguous Done lane ({reason})")
+    if agileplace.card_is_blocked(card):
+        ops.extend(agileplace.ops_blocked(False, None))
+        actions.append("clear blocked")
+    if ops:
+        queue(card, ops, f"retire:{reason}")
+    action = "; ".join(actions) or "no card changes available"
+    print(f"{'retire' if apply else 'DRY   retire'} [{key}] {action} ({reason})")
+
+
 def _label_set(labels, ignore: frozenset) -> set[str]:
     return {l for l in labels if l not in ignore and not l.startswith(MS_PREFIX)}
 
@@ -396,16 +425,17 @@ def main() -> None:
 
     issues = ghkit.list_issues(cfg)
     active_issues = [issue for issue in issues if not is_retired_issue(issue)]
+    retired_issues = [issue for issue in issues if is_retired_issue(issue)]
     open_pr = ghkit.open_pr_issue_numbers(cfg)
     open_pr_read_failed = open_pr is None
     if open_pr_read_failed:
         print("WARN  open-PR read FAILED -- leaving PR-derived 'In review' stages untouched this run")
     else:
-        for i in issues:
+        for i in active_issues:
             i["has_open_pr"] = i["number"] in open_pr
-    by_number = {i["number"]: i for i in issues}
-    by_key = {issue_custom_id(i): i for i in issues}
-    epics = [i for i in issues if "type:epic" in i["labels"]]
+    by_number = {i["number"]: i for i in active_issues}
+    by_key = {issue_custom_id(i): i for i in active_issues}
+    epics = [i for i in active_issues if "type:epic" in i["labels"]]
 
     state = load_state(target, str(cfg["board_id"])) if online else {"issues": {}}
     issues_state = state.setdefault("issues", {})
@@ -454,7 +484,7 @@ def main() -> None:
         if cid:
             card_by_cid[cid] = card
     card_by_cid, pending_custom_id_releases = _reconciled_custom_id_index(
-        issues, card_by_url, card_by_cid)
+        active_issues, card_by_url, card_by_cid)
 
     def card_for(issue):
         return _matching_card(issue, card_by_url, card_by_cid)
@@ -465,6 +495,18 @@ def main() -> None:
         entry = card_ops.setdefault(str(card["id"]), {"card": card, "ops": [], "notes": []})
         entry["ops"].extend(ops)
         entry["notes"].append(note)
+
+    # Retired issues are dependency facts, not active work. Existing cards are matched by their
+    # authoritative GitHub URL only: a customId may have been reused and must never make us retire
+    # another issue's card. Retirement is independent of Projects/open-PR read health because the
+    # CLOSED reason itself is the authoritative signal.
+    for issue in retired_issues:
+        card = card_by_url.get(issue["url"])
+        if card:
+            _retire_card(issue, card, lanes, smap, apply, queue)
+        elif card_by_cid.get(issue_custom_id(issue)):
+            print(f"WARN  [{issue_custom_id(issue)}] retired issue has only a customId card match; "
+                  "refusing to retire without the GitHub external-link URL")
 
     # 1) ensure a card per issue
     for issue in active_issues:
@@ -489,7 +531,7 @@ def main() -> None:
         print(f"{'made ' if apply else 'DRY  '} card [{key}] stage={stage}{lane_note}")
 
     # 2) per issue: base reset if card changed; lane; metadata; dates
-    for issue in issues:
+    for issue in active_issues:
         key = issue_custom_id(issue)
         card = card_for(issue)
         if not card or not card.get("id"):
@@ -542,12 +584,12 @@ def main() -> None:
             print(f"{'unlink' if apply else 'DRY  '} [{key}] -{len(removes)} child card(s)")
 
     # 4) dependencies -> card Blocked state (skip entirely unless the whole blocked-by snapshot is complete)
-    blocked_by = ghkit.blocked_by_map(cfg, [i["number"] for i in issues]) if online else None
+    blocked_by = ghkit.blocked_by_map(cfg, [i["number"] for i in active_issues]) if online else None
     if online and blocked_by is None:
         print("WARN  blocked-by snapshot incomplete -- leaving ALL card Blocked states untouched this run")
     if blocked_by is not None:
         stage_by_number = {i["number"]: resolve_issue_stage(i, project_status) for i in issues}
-        for issue in issues:
+        for issue in active_issues:
             card = card_for(issue)
             if not card or not card.get("id"):
                 continue
