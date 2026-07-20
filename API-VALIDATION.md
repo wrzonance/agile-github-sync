@@ -20,7 +20,7 @@ on 2026-07-18.
 | Tags representation | array of plain strings | io v2 card/update schemas; the Node client's add-tag example appends a string |
 
 Sources: the LeanKit io v2 pages "Update a card", "Get a list of cards", "Get board", and "Core
-concepts" (`success.planview.com/Planview_LeanKit/LeanKit_API/01_v2/...`), and the official client
+concepts" (`success.planview.com/Planview_AgilePlace/AgilePlace_API/01_v2/...`), and the official client
 at `github.com/LeanKit/leankit-node-client`.
 
 The Node client is evidence only for the rows that name it: it forwards update operations without
@@ -34,15 +34,14 @@ respectively.
    `{op:"remove", path:"/tags/{i}"}`, no `value` member -- with indices computed from the card's
    current tags and removals applied in descending index order within one patch (`agileplace.py`'s
    `ops_tag_remove`), so an earlier removal in the batch never shifts a later op's target index.
-   This replaces an earlier, undocumented value-based form (`{op:"remove", path:"/tags",
-   value:<str>}`) that this doc previously (and incorrectly) attributed to "LeanKit's documented
-   value-based removal" -- no public LeanKit docs describe that shape. The evidence for the
-   index-based form: the Node client README documents tag *add* only (silent on remove); RFC 6902
-   itself says "the 'remove' operation removes the value at the target location" with no `value`
-   member; and source-index quotes of the update-card doc show index-based tag ops (e.g. `/tags/1`).
-   Still needs a human-run live check: confirm an add-then-remove round-trip on a disposable card
-   actually clears the tag (not attempted here -- no live AgilePlace credentials available/authorized
-   for this task).
+   This replaces the previously used value-based form (`{op:"remove", path:"/tags", value:<str>}`).
+   The current io v2 "Update a card" docs describe both forms: `/tags/{i}` removes by position,
+   while `/tags` plus `value` removes by value. This implementation intentionally uses the
+   deterministic index form: it follows RFC 6902's standard `remove` shape and ties each removal to
+   the versioned tag snapshot used to build the batch. The Node client README documents tag *add*
+   only and is not evidence for either removal form. Still needs a human-run live check: confirm an
+   add-then-remove round-trip on a disposable card actually clears the tag (not attempted here -- no
+   live AgilePlace credentials available/authorized for this task).
 2. External link add (init `04`). `{op:"add", path:"/externalLink", value:{label,url}}` on a card
    that has no link yet. Confirm `add` succeeds on the absent property (the code uses `add`, not
    `replace`).

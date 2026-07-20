@@ -28,10 +28,11 @@ past roughly 1,000 records.
 - Blocked state. The code reads `blockedStatus.{isBlocked,reason}` and writes flat `/isBlocked`
   (replace) + `/blockReason` (add). Confirm the write field paths and that a PATCH round-trips
   (block, unblock, change the reason).
-- Tag removal and date clearing. The code sends standard RFC-6902 index-based tag removals
-  (`{op:remove, path:/tags/{i}}`, without a `value`, in descending index order) and
-  `{op:replace, path:/plannedStart, value:null}`. Confirm that indexed tag removal and null as
-  "clear this date" are accepted.
+- Tag removal and date clearing. The io v2 docs describe both index-based and value-based tag
+  removal; the code intentionally sends deterministic RFC-6902 index removals
+  (`{op:remove, path:/tags/{i}}`, without a `value`, in descending index order) plus
+  `{op:replace, path:/plannedStart, value:null}`. Confirm that the chosen indexed form and null as
+  "clear this date" are accepted by the target tenant.
 - `gh project` JSON shapes. `item-list` returns field values as flattened top-level keys (the
   parser is defensive about casing); `field-list` provides Status option ids and date field ids.
   Pin a minimum `gh` version and confirm the shapes on your board.
