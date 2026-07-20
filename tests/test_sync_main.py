@@ -131,6 +131,28 @@ def test_load_state_refuses_explicit_wrong_schema(tmp_path):
     assert "Inspect or delete it, then re-run." in message
 
 
+@pytest.mark.parametrize("card_id", ["", 0])
+def test_load_state_resets_falsy_card_id_merge_bases(tmp_path, card_id):
+    state_file = tmp_path / ".sync-state.json"
+    state_file.write_text(json.dumps({
+        "schema": sync.STATE_SCHEMA,
+        "target": "acme/repo",
+        "board": "42",
+        "issues": {
+            ISSUE_URL: {
+                "card_id": card_id,
+                "start": "2026-01-01",
+                "target": "2026-01-09",
+            },
+        },
+    }), encoding="utf-8")
+
+    with patch("sync.STATE_FILE", state_file):
+        state = sync.load_state("acme/repo", "42")
+
+    assert state["issues"][ISSUE_URL] == {}
+
+
 def test_legacy_state_resets_merge_base_before_relearning_live_metadata(tmp_path):
     state_file = tmp_path / ".sync-state.json"
     state_file.write_text(json.dumps({
