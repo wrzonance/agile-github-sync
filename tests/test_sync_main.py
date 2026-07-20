@@ -604,7 +604,7 @@ def test_new_card_gets_no_lane_when_project_read_outright_fails(tmp_path, capsys
         tmp_path, (None, None), field_meta_return=None, existing_cards=[])
 
     out = capsys.readouterr().out
-    assert "WARN  Projects v2 read FAILED -- leaving lanes untouched this run (Status is the source of truth)" in out, (
+    assert "WARN  Projects v2 read FAILED -- leaving active-issue lanes untouched this run (Status is the source of truth)" in out, (
         "the outright-failure WARN string must be printed byte-for-byte on the (None, None) call-failed path")
     create_card_mock.assert_called_once()
     assert create_card_mock.call_args.args[-1] is None, (

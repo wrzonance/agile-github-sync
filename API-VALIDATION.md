@@ -91,9 +91,9 @@ today the code fails closed (refetch-or-skip-with-WARN) rather than assuming eit
 ## GitHub side (standard and stable, noted for completeness)
 
 - `gh issue list --json number,title,state,stateReason,labels,milestone,assignees,url` is stable.
-  Issues closed as `NOT_PLANNED` or `DUPLICATE` are filtered out in `list_issues`; they are not
-  work and must not get cards. `stateReason` was confirmed a valid `--json` field on the installed
-  gh (2026-07-18).
+  Issues closed as `NOT_PLANNED` or `DUPLICATE` stay in `list_issues` as normalized retirement facts:
+  they count as Done blockers, never enter card creation, and retire any existing URL-matched card
+  to Done. `stateReason` was confirmed a valid `--json` field on the installed gh (2026-07-18).
 - Native sub-issues via `gh api graphql` and `repository.issue.subIssues` (on GitHub since 2024).
   `[live-check]` on the target host or GHES version. `sub_issue_numbers()` returns None on
   failure, so `sync.py` warns and falls back to the `[KEY]` title convention instead of silently
