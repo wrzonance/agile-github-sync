@@ -6,7 +6,7 @@ import sys
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -287,3 +287,41 @@ def test_active_card_is_not_renamed_to_retired_card_custom_id(
     assert patch_card.call_args.args[3] == [
         {"op": "replace", "path": "/laneId", "value": "L5"},
     ]
+
+
+def test_epic_disconnects_only_retired_url_matched_child(tmp_path, monkeypatch):
+    epic = {
+        **_github_issue(1, ""),
+        "state": "OPEN",
+        "stateReason": "",
+        "labels": [{"name": "type:epic"}],
+    }
+    active_child = {
+        **_github_issue(2, ""),
+        "state": "OPEN",
+        "stateReason": "",
+    }
+    epic_card = {
+        **_card(1, "L1", blocked=False),
+        "childCards": [{"id": "C2"}, {"id": "C10"}],
+    }
+    lanes = [
+        {"id": "L1", "title": "Backlog", "cardStatus": "notStarted"},
+        {"id": "L5", "title": "Done", "cardStatus": "finished"},
+    ]
+    connect_children = Mock()
+    disconnect_children = Mock()
+    monkeypatch.setattr("ghkit.sub_issue_numbers", lambda *_args: [2, 10])
+    monkeypatch.setattr("agileplace.connect_children", connect_children)
+    monkeypatch.setattr("agileplace.disconnect_children", disconnect_children)
+
+    _run_main(
+        tmp_path,
+        monkeypatch,
+        [epic, active_child, _github_issue(10, "NOT_PLANNED")],
+        cards=[epic_card, _card(2, "L1", blocked=False), _card(10, "L1", blocked=False)],
+        lanes=lanes,
+    )
+
+    connect_children.assert_not_called()
+    disconnect_children.assert_called_once_with(_config(tmp_path), False, "C1", ["C10"])
