@@ -395,6 +395,7 @@ def main() -> None:
         return
 
     issues = ghkit.list_issues(cfg)
+    active_issues = [issue for issue in issues if not is_retired_issue(issue)]
     open_pr = ghkit.open_pr_issue_numbers(cfg)
     open_pr_read_failed = open_pr is None
     if open_pr_read_failed:
@@ -466,7 +467,7 @@ def main() -> None:
         entry["notes"].append(note)
 
     # 1) ensure a card per issue
-    for issue in issues:
+    for issue in active_issues:
         if card_for(issue):
             continue
         key = issue_custom_id(issue)
