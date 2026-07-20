@@ -310,6 +310,22 @@ def test_custom_id_disagreement_fails_independent_of_issue_order(reverse):
         )
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_duplicate_desired_custom_ids_fail_independent_of_issue_order(reverse):
+    issue_one = {"number": 1, "title": "[X] first", "url": "https://example.test/issues/1"}
+    issue_two = {"number": 2, "title": "[X] second", "url": "https://example.test/issues/2"}
+    card_one = {"id": "C1", "customId": "A"}
+    card_two = {"id": "C2", "customId": "B"}
+    issues = [issue_two, issue_one] if reverse else [issue_one, issue_two]
+
+    with pytest.raises(SystemExit, match=r"by URL but card C[12] by customId 'X'"):
+        _reconciled_custom_id_index(
+            issues,
+            {issue_one["url"]: card_one, issue_two["url"]: card_two},
+            {"A": card_one, "B": card_two},
+        )
+
+
 # --- title-key convention (sub-issue fallback) ---------------------------
 
 def test_sub_issue_fallback_never_yields_removals():

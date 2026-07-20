@@ -166,6 +166,8 @@ def _reconciled_custom_id_index(issues: list[dict], card_by_url: dict,
         url_match = card_by_url.get(issue["url"])
         if not url_match:
             continue
+        # Catch two URL-owned issues planning the same previously-unclaimed customId.
+        _matching_card(issue, card_by_url, reconciled)
         desired_custom_id = issue_custom_id(issue)
         current_custom_id = agileplace.custom_id_value(url_match)
         if current_custom_id and _same_card(reconciled.get(current_custom_id), url_match):
