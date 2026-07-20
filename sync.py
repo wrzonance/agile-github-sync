@@ -23,7 +23,8 @@ import ghkit
 import ghproject
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
-from stages import blocked_reason, epic_key_for_task, issue_stage, normalize_status, title_key
+from stages import (blocked_reason, epic_key_for_task, is_retired_issue, issue_stage,
+                    normalize_status, title_key)
 
 MS_PREFIX = "milestone:"
 STATE_SCHEMA = 2
@@ -189,6 +190,8 @@ def explicit_stage_status(issue: dict, project_status: dict) -> str | None:
 
 
 def resolve_issue_stage(issue: dict, project_status: dict) -> str:
+    if is_retired_issue(issue):
+        return "Done"
     return explicit_stage_status(issue, project_status) or issue_stage(issue)
 
 

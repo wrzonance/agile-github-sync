@@ -104,21 +104,23 @@ def _repo_context(cfg: dict) -> RepoContext | None:
 
 
 def list_issues(cfg: dict) -> list[dict]:
-    """Every issue with the facts the sync needs, normalized, in one call. Issues closed as
-    not-planned or duplicate are excluded entirely: they are not work, and a card for one would sit
-    in the board's Done lane as if it were (the target repo carries 16 such neutralized husks)."""
+    """Every issue with the facts the sync needs, normalized, in one call.
+
+    Closed NOT_PLANNED/DUPLICATE issues remain in the snapshot so callers can treat them as known
+    Done dependencies and retire any card that predates their closure. ``sync`` keeps them out of
+    the card-creation path.
+    """
     out = run(cfg, ["issue", "list", "--state", "all", "--limit", "1000", "--json",
                     "number,title,state,stateReason,labels,milestone,assignees,url"])
     issues = json.loads(out.stdout or "[]")
     normalized = []
     for i in issues:
-        if str(i.get("stateReason") or "").upper() in ("NOT_PLANNED", "DUPLICATE"):
-            continue
         ms = i.get("milestone") or {}
         normalized.append({
             "number": i["number"],
             "title": i.get("title", ""),
             "state": i.get("state", ""),
+            "state_reason": str(i.get("stateReason") or "").upper(),
             "labels": [l["name"] for l in i.get("labels", [])],
             "milestone": ms.get("title") or None,
             "assignees": [a.get("login") for a in i.get("assignees", [])],

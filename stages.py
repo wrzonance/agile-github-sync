@@ -8,6 +8,7 @@ lane comes from the epic issue's own Status or fallback signals, not from task r
 from __future__ import annotations
 
 STAGES = ("Backlog", "Ready", "In progress", "In review", "Done")
+RETIRED_STATE_REASONS = frozenset({"NOT_PLANNED", "DUPLICATE"})
 
 _STAGE_BY_LOWER = {s.lower(): s for s in STAGES}
 
@@ -51,6 +52,12 @@ def issue_stage(issue: dict) -> str:
     if "agent:ready" in labels:
         return "Ready"
     return "Backlog"
+
+
+def is_retired_issue(issue: dict) -> bool:
+    """Whether GitHub closed an issue as work that will not be completed here."""
+    return (str(issue.get("state", "")).upper() == "CLOSED"
+            and str(issue.get("state_reason", "")).upper() in RETIRED_STATE_REASONS)
 
 
 def lane_matches_stage(lane_title: str, stage: str) -> bool:
