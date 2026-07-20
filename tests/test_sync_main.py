@@ -280,6 +280,22 @@ def test_date_snapshot_failure_skips_dates_but_keeps_status_sync(tmp_path, capsy
     assert {op.get("value") for op in patch_card_mock.call_args.args[3]} == {"L2"}
 
 
+def test_no_resolved_date_fields_skips_hydration_and_reports_dates_disabled(tmp_path, capsys):
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "In progress",
+                          "start": None, "target": None}}
+    field_meta = {**_field_meta(), "start_field_id": None, "target_field_id": None}
+    stack, _, _, _ = _mock_io(_card(), (parsed, []), field_meta)
+    state_file = tmp_path / ".sync-state.json"
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+         patch("ghproject.hydrate_item_dates") as hydrate_mock:
+        sync.main()
+
+    assert "dates enabled" not in capsys.readouterr().out
+    hydrate_mock.assert_not_called()
+
+
 # --- no date metadata: no hydration, no crash, no warning ------------------------------------------
 
 def test_no_warn_and_no_crash_when_field_meta_is_none(tmp_path, capsys):

@@ -412,6 +412,8 @@ def main() -> None:
                                   and bool(project_items) and not project_status)
     project_read_failed = call_failed or zero_status_despite_items
     field_meta = ghproject.field_meta(cfg) if (ghproject.configured(cfg) and not project_read_failed) else None
+    if field_meta and not (field_meta.get("start_field_id") or field_meta.get("target_field_id")):
+        field_meta = None
     date_read_failed = False
     if field_meta:
         dated_items = ghproject.hydrate_item_dates(cfg, project_items, field_meta)

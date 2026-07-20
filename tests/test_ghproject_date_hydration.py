@@ -85,6 +85,21 @@ def test_hydrate_item_dates_maps_values_by_field_id_not_flattened_name():
     assert hydrated[URL]["target"] == "2026-02-02"
 
 
+def test_hydrate_item_dates_accepts_nullable_configured_and_unrelated_dates():
+    response = _pages(_item_node(
+        _date_value("unrelated", None),
+        _date_value("SF_1", None),
+    ))
+
+    with patch("ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
+        hydrated = ghproject.hydrate_item_dates({}, _items(), _meta())
+
+    assert hydrated is not None
+    assert hydrated[URL]["start"] is None
+    assert ghproject._date_values_for_item(
+        [_date_value("SF_1", None)], {"start": "SF_1"}) == {"start": None}
+
+
 def test_hydrate_item_dates_accepts_complete_outer_pagination():
     paged_items = {
         URL: _items(None, None)[URL],

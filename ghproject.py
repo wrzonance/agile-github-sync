@@ -109,7 +109,8 @@ _DATE_VALUES_QUERY = """query($project:ID!,$endCursor:String){node(id:$project){
 }}}"""
 
 
-def _date_values_from_pages(stdout: str, field_ids: dict[str, str]) -> dict[str, dict[str, str]]:
+def _date_values_from_pages(stdout: str,
+                            field_ids: dict[str, str]) -> dict[str, dict[str, str | None]]:
     """Parse a complete `gh api graphql --paginate --slurp` date snapshot by Project item id."""
     pages = json.loads(stdout or "[]")
     if not isinstance(pages, list) or not pages:
@@ -137,7 +138,7 @@ def _date_values_from_pages(stdout: str, field_ids: dict[str, str]) -> dict[str,
     return result
 
 
-def _date_values_for_item(nodes: list, field_ids: dict[str, str]) -> dict[str, str]:
+def _date_values_for_item(nodes: list, field_ids: dict[str, str]) -> dict[str, str | None]:
     """Extract configured date kinds from one item's GraphQL field-value union nodes."""
     if not isinstance(nodes, list):
         raise TypeError("date snapshot field values must be a list")
@@ -146,16 +147,20 @@ def _date_values_for_item(nodes: list, field_ids: dict[str, str]) -> dict[str, s
     for node in nodes:
         if node == {}:  # expected for non-date union members excluded by the inline fragment
             continue
-        date = node.get("date") if isinstance(node, dict) else None
-        field = node.get("field") if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            raise TypeError("date snapshot contains a malformed date value")
+        field = node.get("field")
         field_id = field.get("id") if isinstance(field, dict) else None
-        if not isinstance(date, str) or not isinstance(field_id, str):
+        if not isinstance(field_id, str):
             raise TypeError("date snapshot contains a malformed date value")
         kind = by_id.get(field_id)
-        if kind:
-            if kind in result:
-                raise ValueError("date snapshot contains duplicate values for one field")
-            result[kind] = date
+        if not kind:
+            continue
+        if "date" not in node or (node["date"] is not None and not isinstance(node["date"], str)):
+            raise TypeError("date snapshot contains a malformed date value")
+        if kind in result:
+            raise ValueError("date snapshot contains duplicate values for one field")
+        result[kind] = node["date"]
     return result
 
 
@@ -200,15 +205,6 @@ def issue_status_map(cfg: dict) -> dict[str, str]:
     if parsed is None:
         return {}
     return {url: v["status"] for url, v in parsed.items() if v.get("status")}
-
-
-def issue_dates_map(cfg: dict) -> dict[str, dict]:
-    """issue URL -> {start, target, item_id} from the Project (Phase 4). Empty when unavailable."""
-    parsed = items(cfg)
-    if parsed is None:
-        return {}
-    return {url: {"start": v["start"], "target": v["target"], "item_id": v["item_id"]}
-            for url, v in parsed.items()}
 
 
 def field_meta(cfg: dict) -> dict | None:

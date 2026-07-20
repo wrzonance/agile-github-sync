@@ -120,7 +120,7 @@ During the backlog stand-up, these formerly `[live-check]` GitHub shapes were ex
   `05`.
 
 On 2026-07-20, the paginated GraphQL date-read shape was also exercised against wrzonance Project
-#4 (192 items across two pages). `ProjectV2Item.fieldValues` returned complete nested pagination
+`#4` (192 items across two pages). `ProjectV2Item.fieldValues` returned complete nested pagination
 metadata, and the successful zero-date result remained distinguishable from a query failure.
 
 Two gh behaviors learned the same day, recorded so this repo never has to rediscover them:
