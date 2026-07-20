@@ -563,7 +563,10 @@ def main() -> None:
             lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
         created = agileplace.create_card(cfg, apply, issue_card_title(issue), key, issue["url"],
                                          lane["id"] if lane else None)
-        if apply and created.get("id"):
+        # Real creates carry a server id; dry creates carry an obvious plan-only id. Index either
+        # snapshot so metadata, hierarchy, dependency, and batched patch planning stay in parity.
+        # Dry-run state is never saved, so the plan-only identity cannot escape this run.
+        if created.get("id"):
             card_by_url[issue["url"]] = created
             if key:
                 card_by_cid[key] = created
@@ -576,7 +579,7 @@ def main() -> None:
         key = issue_custom_id(issue)
         card = card_for(issue)
         if not card or not card.get("id"):
-            continue  # freshly dry-run-created (no id yet), or unresolved
+            continue  # unresolved (no matching or newly created card this run)
         cid = str(card["id"])
         st = issues_state.setdefault(issue["url"], {})
         if st.get("card_id") != cid:
@@ -621,7 +624,13 @@ def main() -> None:
         desired = {str(card["id"])
                    for issue in task_issues
                    if (card := card_for(issue)) and card.get("id")}
-        existing_snapshot = agileplace.card_child_ids(cfg, str(parent["id"]))
+        # A plan-only parent has not reached AgilePlace yet, so its authoritative server-side child
+        # set is empty. Never send its synthetic identity across a real read boundary.
+        existing_snapshot = (
+            frozenset()
+            if parent.get("_planOnly")
+            else agileplace.card_child_ids(cfg, str(parent["id"]))
+        )
         existing = set(existing_snapshot or ())
         adds, removes = _child_connection_changes(
             desired, existing, managed_card_ids,

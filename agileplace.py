@@ -12,19 +12,23 @@ API shapes marked "VALIDATE LIVE" follow current Planview docs but are confirmed
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from types import MappingProxyType
 
 from stages import STAGES, STAGE_CARD_STATUS, lane_matches_stage, title_contains_phrase
 
 REQUEST_TIMEOUT = 30      # seconds per request
 MAX_RETRY_SLEEP = 60      # cap a hostile/large Retry-After so a run can't stall for hours
 MAX_CARD_PAGE_REQUESTS = 1_000  # absolute guard against absent/hostile pagination metadata
+PLANNED_CARD_ID_PREFIX = "planned-card:"
 
 
 def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None, _attempt=0):
@@ -77,7 +81,7 @@ def mutate(cfg: dict, apply: bool, method: str, path: str, body=None, headers=No
     """The single write gate. Dry mode prints the request instead of sending it."""
     if apply:
         return api(cfg, method, path, body=body, headers=headers)
-    print(f"DRY   {method} /io/{path} {note} body={json.dumps(body)[:200]}")
+    print(f"DRY   {method} /io/{path} {note} body={json.dumps(body)}")
     return {}
 
 
@@ -607,14 +611,40 @@ def _version_headers(card: dict) -> dict:
     return {"x-lk-resource-version": str(v)} if _has_usable_version(v) else {}
 
 
-def create_card(cfg: dict, apply: bool, title: str, custom_id: str, external_url: str, lane_id: str | None):
-    """Create a card (POST /io/card). Returns the new card dict (with id) on --apply, else {}."""
+def _planned_card_snapshot(title: str, custom_id: str, external_url: str,
+                           lane_id: str | None) -> Mapping[str, object]:
+    """Read-only card defaults for continuing one dry run after a planned creation.
+
+    The synthetic identity is deterministic for this plan but has meaning only inside the current
+    dry run. It is never a server identity and callers must not persist it. Keeping every value in
+    the mapping immutable makes the snapshot itself immutable without copying caller-owned inputs.
+    """
+    identity_source = f"{custom_id}\0{external_url}".encode("utf-8")
+    plan_id = PLANNED_CARD_ID_PREFIX + hashlib.sha256(identity_source).hexdigest()[:16]
+    return MappingProxyType({
+        "id": plan_id,
+        "title": title,
+        "customId": custom_id,
+        "laneId": lane_id,
+        "plannedStart": None,
+        "plannedFinish": None,
+        "_planOnly": True,
+        "_planOnlyExternalUrl": external_url,
+    })
+
+
+def create_card(cfg: dict, apply: bool, title: str, custom_id: str, external_url: str,
+                lane_id: str | None) -> Mapping[str, object]:
+    """Create a card, or return a plan-only read-only snapshot when ``apply`` is false."""
     body = {"boardId": cfg["board_id"], "title": title, "customId": custom_id}
     if lane_id:
         body["laneId"] = lane_id
     if external_url:
         body["externalLink"] = {"label": f"GitHub {custom_id}", "url": external_url}
-    return mutate(cfg, apply, "POST", "card", body=body, note=f"create card {custom_id}")
+    if not apply:
+        mutate(cfg, False, "POST", "card", body=body, note=f"create card {custom_id}")
+        return _planned_card_snapshot(title, custom_id, external_url, lane_id)
+    return mutate(cfg, True, "POST", "card", body=body, note=f"create card {custom_id}")
 
 
 # --- parent/child connections (hierarchy) -- VALIDATE LIVE -------------------
