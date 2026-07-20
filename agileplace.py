@@ -345,6 +345,10 @@ def card_child_ids(card: dict) -> set[str]:
 
 # --- card mutations: op-builders + one versioned PATCH per card ------------
 
+def op_custom_id(custom_id: str) -> dict:
+    return {"op": "replace", "path": "/customId", "value": custom_id}
+
+
 def op_lane(lane_id: str) -> dict:
     return {"op": "replace", "path": "/laneId", "value": lane_id}
 
