@@ -168,6 +168,10 @@ def _raise_if_before_total(offset: int, expected_total: int | None) -> None:
         )
 
 
+def _card_path(card_id) -> str:
+    return f"card/{urllib.parse.quote(str(card_id), safe='')}"
+
+
 def list_cards(cfg: dict) -> list[dict]:
     """All cards on the board, paginated to exhaustion. Requests childCards so connection reconciliation
     can see the existing hierarchy (VALIDATE LIVE: `include` param name + payload shape).
@@ -231,7 +235,7 @@ def get_card(cfg: dict, card_id: str) -> dict:
     The exact shape being unconfirmed also means a non-dict, non-null body (a bare list, string,
     number, or bool) is plausible -- that must fail loud too, rather than reaching `.get()` and
     raising an opaque AttributeError (see issue #3 review finding)."""
-    data = api(cfg, "GET", f"card/{card_id}")
+    data = api(cfg, "GET", _card_path(card_id))
     if data is None:
         raise SystemExit(f"AgilePlace GET card/{card_id} returned no card data (got null)")
     if not isinstance(data, dict):
@@ -388,7 +392,7 @@ def patch_card(cfg: dict, apply: bool, card: dict, ops: list[dict], note: str = 
     versioned = _card_with_version(cfg, apply, card, ops)
     if versioned is None:
         return {}
-    return mutate(cfg, apply, "PATCH", f"card/{versioned['id']}", body=ops,
+    return mutate(cfg, apply, "PATCH", _card_path(versioned["id"]), body=ops,
                   headers=_version_headers(versioned), note=note or f"patch card {versioned['id']} ({len(ops)} ops)")
 
 

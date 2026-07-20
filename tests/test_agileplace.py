@@ -384,6 +384,20 @@ def test_get_card_returns_already_flat_response_as_is():
     assert card == flat
 
 
+@pytest.mark.parametrize(
+    ("card_id", "encoded_path"),
+    [
+        ("1/../board/x", "card/1%2F..%2Fboard%2Fx"),
+        ("1?x=1", "card/1%3Fx%3D1"),
+    ],
+)
+def test_get_card_quotes_hostile_id_as_one_path_segment(card_id, encoded_path):
+    with patch("agileplace.api", return_value={"id": card_id}) as api_mock:
+        assert get_card(CFG, card_id) == {"id": card_id}
+
+    api_mock.assert_called_once_with(CFG, "GET", encoded_path)
+
+
 def test_get_card_fails_loud_when_card_is_null():
     """A live 200 response of {"card": null} must not silently become a bare None return -- that
     would crash callers like _card_with_version with an opaque AttributeError. get_card must
@@ -585,6 +599,29 @@ def test_patch_card_version_present_is_byte_identical_to_pre_fix_behavior():
     with patch("agileplace.api", return_value={}) as api_mock:
         patch_card(CFG, True, card, ops)
     api_mock.assert_called_once_with(CFG, "PATCH", "card/1", body=ops, headers={"x-lk-resource-version": "7"})
+
+
+@pytest.mark.parametrize(
+    ("card_id", "encoded_path"),
+    [
+        ("1/../board/x", "card/1%2F..%2Fboard%2Fx"),
+        ("1?x=1", "card/1%3Fx%3D1"),
+    ],
+)
+def test_patch_card_quotes_hostile_id_as_one_path_segment(card_id, encoded_path):
+    card = {"id": card_id, "version": 7}
+    ops = [{"op": "replace", "path": "/laneId", "value": "L"}]
+
+    with patch("agileplace.api", return_value={}) as api_mock:
+        patch_card(CFG, True, card, ops)
+
+    api_mock.assert_called_once_with(
+        CFG,
+        "PATCH",
+        encoded_path,
+        body=ops,
+        headers={"x-lk-resource-version": "7"},
+    )
 
 
 def test_patch_card_dry_run_makes_no_network_call_regardless_of_version():
