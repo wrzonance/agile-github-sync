@@ -45,6 +45,11 @@ def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None,
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             raw = resp.read()
             return json.loads(raw) if raw else {}
+    except json.JSONDecodeError as err:
+        detail = raw.decode(errors="replace")[:300]
+        raise SystemExit(
+            f"AgilePlace {method} /{path} failed: invalid JSON response {detail}"
+        ) from err
     except urllib.error.HTTPError as err:
         if err.code == 429 and _attempt < 3:
             time.sleep(_retry_after_seconds(err))

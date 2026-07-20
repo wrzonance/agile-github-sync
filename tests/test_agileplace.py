@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agileplace import (  # noqa: E402
     _card_with_version,
     _has_index_tag_remove,
+    api,
     card_external_urls,
     card_block_reason,
     card_is_blocked,
@@ -28,6 +29,21 @@ from agileplace import (  # noqa: E402
 )
 
 CFG = {"token": "t", "host": "h", "board_id": "b1"}
+
+
+# --- api: transport failures become clean command errors -----------------
+
+def test_api_converts_non_json_200_to_standard_truncated_system_exit():
+    raw = b"<html>captive portal</html>" + (b"x" * 400)
+
+    with patch("agileplace.urllib.request.urlopen") as urlopen_mock:
+        urlopen_mock.return_value.__enter__.return_value.read.return_value = raw
+        with pytest.raises(SystemExit) as exc_info:
+            api(CFG, "GET", "card")
+
+    message = str(exc_info.value)
+    prefix = "AgilePlace GET /card failed: invalid JSON response "
+    assert message == prefix + raw[:300].decode()
 
 
 # --- list_cards: response-driven, bounded pagination (issue #16) ---------
