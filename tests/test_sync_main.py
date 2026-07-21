@@ -25,6 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import ghproject  # noqa: E402
 import sync  # noqa: E402
 
 ISSUE_URL = "https://github.com/acme/repo/issues/1"
@@ -94,7 +95,8 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     stack.enter_context(patch("ghproject.field_meta", return_value=field_meta_return))
     hydrated = parsed_items if hydrated_items_return is _UNSET else hydrated_items_return
     stack.enter_context(patch("ghproject.hydrate_item_dates", return_value=hydrated))
-    add_item_default = "planned-item:test" if add_item_return is _UNSET else add_item_return
+    add_item_default = (ghproject.PLANNED_ITEM_ID_PREFIX + "test"
+                        if add_item_return is _UNSET else add_item_return)
     stack.add_item_mock = stack.enter_context(
         patch("ghproject.add_item", return_value=add_item_default))
     stack.set_item_status_mock = stack.enter_context(

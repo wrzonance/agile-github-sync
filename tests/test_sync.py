@@ -531,7 +531,7 @@ def test_stage_lane_map_unknown_lane_warns_by_default_but_not_when_quiet(capsys)
 # unmapped/inferred path (which walks STAGES) and the STAGE_LANE_MAP-mapped path (which doesn't).
 
 _STAGES_WITHOUT_INTAKE = tuple(s for s in STAGES if s != "Intake")
-_STAGES_WITH_INTAKE = ("Intake",) + _STAGES_WITHOUT_INTAKE
+_STAGES_WITH_INTAKE = ("Intake", *_STAGES_WITHOUT_INTAKE)
 
 
 def test_intake_membership_is_inert_for_unmapped_stage_resolution():

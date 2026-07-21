@@ -10,7 +10,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from stages import normalize_status  # noqa: E402
 from sync import resolve_issue_stage  # noqa: E402
+
+
+def test_status_literally_named_intake_never_resolves_intake():
+    """PR #68 review (Major): "Intake" is not part of the Project-Status vocabulary. A board
+    Status literally named "Intake" normalizes to None and falls back like any unrecognized
+    value -- flag off AND flag on. Board membership means vetted; only the off-board bare
+    fallback may ever produce the Intake stage."""
+    assert normalize_status("Intake") is None
+    assert normalize_status("intake") is None
+    issue = {"url": "u1", "state": "OPEN", "labels": []}
+    for stage_map in ({}, {"Intake": ["New Requests"]}):            # flag off and flag on
+        stage = resolve_issue_stage(issue, {"u1": "Intake"},
+                                    {"u1": {"item_id": "PVTI_1"}}, stage_map)
+        assert stage == "Backlog"                                   # classic fallback, never Intake
 
 
 def test_resolve_issue_stage_flag_off_is_byte_identical_to_pre_issue_63_behavior():

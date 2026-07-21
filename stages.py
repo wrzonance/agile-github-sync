@@ -10,7 +10,11 @@ from __future__ import annotations
 STAGES = ("Intake", "Backlog", "Ready", "In progress", "In review", "Done")
 RETIRED_STATE_REASONS = frozenset({"NOT_PLANNED", "DUPLICATE"})
 
-_STAGE_BY_LOWER = {s.lower(): s for s in STAGES}
+# "Intake" is deliberately absent from the Project-Status vocabulary: board membership itself means
+# vetted, so no explicit Status -- even one literally named "Intake" -- may ever resolve to the
+# pre-board holding stage, flag on or off. Such a Status normalizes to None and the caller falls
+# back to signal derivation, exactly the classic behavior (PR #68 review).
+_STAGE_BY_LOWER = {s.lower(): s for s in STAGES if s != "Intake"}
 
 
 def normalize_status(name: str) -> str | None:
