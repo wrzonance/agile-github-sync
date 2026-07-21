@@ -279,14 +279,15 @@ def add_item(cfg: dict, apply: bool, issue_url: str) -> str | None:
     """
     if not configured(cfg):
         return None
+    p = cfg["gh_project"]
     if not apply:
         placeholder = PLANNED_ITEM_ID_PREFIX + hashlib.sha256(issue_url.encode()).hexdigest()[:16]
-        print(f"DRY   gh project item-add ... --url {issue_url}")
+        print(f"DRY   gh project item-add {p['number']} --owner {p['owner']} --url {issue_url} "
+              "--format json")
         return placeholder
     ctx = ghkit._repo_context(cfg)
     if ctx is None:  # can't resolve the target host -> fail closed rather than hit the default host
         return None
-    p = cfg["gh_project"]
     try:
         out = ghkit.run(cfg, ["project", "item-add", str(p["number"]), "--owner", p["owner"],
                               "--url", issue_url, "--format", "json"], host=ctx.host)
@@ -317,7 +318,7 @@ def set_item_status(cfg: dict, apply: bool, item_id: str, stage: str) -> bool:
     args = ["project", "item-edit", "--id", item_id, "--project-id", meta["project_id"],
             "--field-id", status_field_id, "--single-select-option-id", option_id]
     if not apply:
-        print(f"DRY   gh project item-edit {item_id} --single-select-option-id {option_id}")
+        print(f"DRY   gh {' '.join(args)}")
         return True
     try:
         ghkit.run(cfg, args, host=meta.get("host"))

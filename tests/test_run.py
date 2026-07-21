@@ -25,6 +25,15 @@ EPIC_URL = "https://g.test/acme/widgets/issues/1"
 TASK_URL = "https://g.test/acme/widgets/issues/2"
 PLAN_ID_PREFIX = sync.agileplace.PLANNED_CARD_ID_PREFIX
 
+# The Intake vetting latch's Project item id (issue #63, task 7/8): apply mode gets this real,
+# gh-issued id back from "project item-add"; dry mode never calls gh at all, so it only ever sees
+# ghproject.add_item's own deterministic placeholder (ITEM_ID_PREFIX + a hash). _normalize_gh
+# collapses both to one token so a dry-planned and apply-executed "item-edit --id ..." compare
+# equal -- the same idea as _card_role below, just for GitHub Project items instead of AgilePlace
+# cards.
+LATCH_ITEM_ID = "PVTI_NEW"
+ITEM_ID_PREFIX = sync.ghproject.PLANNED_ITEM_ID_PREFIX
+
 
 @dataclass(frozen=True)
 class HttpWrite:
@@ -114,6 +123,12 @@ class FixtureWorld:
 
     def run_process(self, argv, **_kwargs):
         args = tuple(argv[1:])
+        if args[:2] == ("project", "item-add"):
+            # The Intake vetting latch's item-add write (issue #63): a real item id, echoed back
+            # just like AgilePlace's own card create -- so the apply run's downstream item-edit
+            # write can reference it.
+            self.process_writes.append(args)
+            return self._completed(argv, {"id": LATCH_ITEM_ID})
         if args[:2] in {("issue", "edit"), ("project", "item-edit")}:
             self.process_writes.append(args)
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
@@ -226,8 +241,8 @@ def _configure(monkeypatch, tmp_path):
         monkeypatch.setenv(name, value)
 
 
-def _run(monkeypatch, tmp_path, *, apply: bool) -> RunResult:
-    world = FixtureWorld()
+def _run(monkeypatch, tmp_path, *, apply: bool, world_factory=FixtureWorld) -> RunResult:
+    world = world_factory()
     state_file = tmp_path / ("apply-state.json" if apply else "dry-state.json")
     monkeypatch.setattr(subprocess, "run", world.run_process)
     monkeypatch.setattr("urllib.request.urlopen", world.open_url)
@@ -273,6 +288,15 @@ def _normalize_http(method: str, path: str, body: object):
     raise AssertionError(f"unexpected mutation in action set: {method} {path}")
 
 
+def _normalize_gh(parts: tuple) -> tuple:
+    """Collapse the Intake vetting latch's Project item id (real on apply, a deterministic
+    placeholder on dry) to one canonical token -- same idea as _card_role, for GitHub Project item
+    ids instead of AgilePlace card ids. A no-op for every other gh action (labels/milestone edits
+    never contain either shape)."""
+    return tuple("<item-id>" if part == LATCH_ITEM_ID or part.startswith(ITEM_ID_PREFIX) else part
+                 for part in parts)
+
+
 def _planned_actions(output: str) -> tuple:
     actions = []
     pattern = re.compile(r"^DRY   (?P<method>\w+) /io/(?P<path>\S+).* body=(?P<body>.+)$")
@@ -282,14 +306,14 @@ def _planned_actions(output: str) -> tuple:
             actions.append(_normalize_http(
                 match["method"], match["path"], json.loads(match["body"])))
         elif line.startswith("DRY   gh "):
-            actions.append(("gh", *shlex.split(line.removeprefix("DRY   gh "))))
+            actions.append(_normalize_gh(("gh", *shlex.split(line.removeprefix("DRY   gh ")))))
     return tuple(actions)
 
 
 def _executed_actions(run: RunResult) -> tuple:
     http = tuple(_normalize_http(write.method, write.path, write.body)
                  for write in run.http_writes)
-    process = tuple(("gh", *write) for write in run.process_writes)
+    process = tuple(_normalize_gh(("gh", *write)) for write in run.process_writes)
     return http + process
 
 
@@ -340,3 +364,96 @@ def test_whole_run_batches_one_versioned_patch_per_card(paired_runs):
     assert all(count == 1 for count in patch_counts.values())
     assert all(write.headers.get("x-lk-resource-version", "").strip() for write in patches)
     assert len(json.dumps(patches[0].body)) > 200
+
+
+# --- Intake vetting latch: dry/apply parity for its two new gh writes (issue #63, task 7/8) ------
+
+_VETTED_URL = "https://g.test/acme/widgets/issues/9"
+
+
+class _IntakeFixtureWorld(FixtureWorld):
+    """One off-board, no-work-signal issue with an existing card already sitting in a lane a human
+    mapped to "Ready" -- not the Intake lane itself. resolve_issue_stage() resolves "Intake" (bare
+    "Backlog" fallback + declared Intake lane + off-board); the card's current lane resolves back to
+    "Ready" via stage_for_lane, so apply_latch() takes the promote path: ghproject.add_item then
+    ghproject.set_item_status. Reuses FixtureWorld's gh/AgilePlace dispatch, adding only the
+    Projects v2 reads (item-list, view, field-list) that path needs -- item-add and item-edit are
+    already dispatched by the shared base (see run_process)."""
+
+    lanes = (
+        {"id": "L_INTAKE", "title": "Intake Lane", "cardStatus": "notStarted"},
+        {"id": "L_VETTED", "title": "Vetted Lane", "cardStatus": "notStarted"},
+    )
+    issues = (
+        {
+            "number": 1,
+            "title": "[TASK] Needs triage",
+            "state": "OPEN",
+            "stateReason": None,
+            "labels": [],
+            "milestone": None,
+            "assignees": [],
+            "url": _VETTED_URL,
+        },
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.epic_card = {
+            "id": "C1",
+            "version": "v1",
+            "title": "Needs triage",
+            "customId": "TASK",
+            "externalLink": {"url": _VETTED_URL},
+            "tags": [],
+            "laneId": "L_VETTED",
+            "plannedStart": None,
+            "plannedFinish": None,
+            "blockedStatus": {"isBlocked": False, "reason": ""},
+            "childCards": [],
+        }
+
+    def run_process(self, argv, **kwargs):
+        args = tuple(argv[1:])
+        if args[:2] == ("project", "item-list"):
+            return self._completed(argv, {"items": []})  # off-board: no items at all
+        if args[:2] == ("project", "view"):
+            return self._completed(argv, {"id": "PVT_1"})
+        if args[:2] == ("project", "field-list"):
+            return self._completed(argv, {"fields": [{
+                "name": "Status", "id": "F_STATUS",
+                "options": [{"name": "Intake", "id": "OPT_INTAKE"},
+                            {"name": "Ready", "id": "OPT_READY"}],
+            }]})  # Status-only board -- no Start/Target fields (mirrors ghproject.set_item_status's
+                  # own "must not reuse main()'s nulled field_meta" contract)
+        return super().run_process(argv, **kwargs)
+
+
+def _configure_intake(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("GH_PROJECT_OWNER", "acme")
+    monkeypatch.setenv("GH_PROJECT_NUMBER", "7")
+    monkeypatch.setenv("STAGE_LANE_MAP", "Intake=Intake Lane;Ready=Vetted Lane")
+
+
+def test_latch_writes_dry_run_plans_exactly_what_apply_executes(monkeypatch, tmp_path):
+    """Task 7/8: the latch's two new gh writes (project item-add, then project item-edit
+    --single-select-option-id) must plan/execute 1:1 like every other write this harness already
+    pins. No AgilePlace HTTP write is expected at all -- the latch skips the ordinary lane-move for
+    a latched card, and this card/issue pair carries no other metadata drift to sync."""
+    _configure_intake(monkeypatch, tmp_path)
+    dry = _run(monkeypatch, tmp_path, apply=False, world_factory=_IntakeFixtureWorld)
+    apply = _run(monkeypatch, tmp_path, apply=True, world_factory=_IntakeFixtureWorld)
+
+    assert dry.http_writes == ()
+    assert dry.process_writes == ()
+    assert apply.http_writes == ()
+
+    planned = _planned_actions(dry.output)
+    executed = _executed_actions(apply)
+    assert planned  # the latch actually planned something this run
+    assert [action[:3] for action in planned] == [
+        ("gh", "project", "item-add"),
+        ("gh", "project", "item-edit"),
+    ]
+    assert Counter(planned) == Counter(executed)
