@@ -239,11 +239,23 @@ returned:
   (card, direction, other-card, timing) tuple, which implies deletion is addressed by card pair,
   not by id -- the delete capture below must confirm how.
 
+**Delete shape: confirmed live 2026-07-21** (devtools capture of the UI removing the EP-3A ->
+JPOWER1 dependency):
+
+```
+DELETE /io/card/dependency
+{"cardIds": ["2490186236"], "dependsOnCardIds": ["2490185684"]}
+```
+
+Pair-addressed, as the id-less read entries implied: `cardIds` is the dependent (blocked) side,
+`dependsOnCardIds` the blocker side, both plural batch arrays in the same style as
+`card/connections`. No card id in the path; the UI's own session auth rode a cookie, but the
+endpoint lives under the same `/io/` surface as everything the token-authenticated client uses.
+
 Still `[live-check]` pending for Phase 0b (write probe) / Phase 1:
 
-1. **Write endpoint and body.** Plausibly `POST card/{cardId}/dependency`, but nothing is built on
-   that guess. Capture the UI's create request via browser devtools (method, URL, JSON body) and
-   record it here.
-2. **Delete endpoint and addressing.** With no id in read entries, removal is presumably
-   pair-addressed. Capture the UI's delete request (create + delete a scratch dependency with
-   devtools open) and record it here.
+1. **Create endpoint and body.** Almost certainly `POST /io/card/dependency` with the same
+   `cardIds`/`dependsOnCardIds` body (possibly plus a `timing` member -- the delete body carries
+   none, and reads show `finishToStart`). Not built on that guess: confirm via the UI's captured
+   POST, or by the Phase 0b write probe on throwaway cards validated through the confirmed read
+   endpoint.
