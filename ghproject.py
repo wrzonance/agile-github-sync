@@ -291,9 +291,12 @@ def add_item(cfg: dict, apply: bool, issue_url: str) -> str | None:
     try:
         out = ghkit.run(cfg, ["project", "item-add", str(p["number"]), "--owner", p["owner"],
                               "--url", issue_url, "--format", "json"], host=ctx.host)
-        item_id = json.loads(out.stdout)["id"]
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, SystemExit):
+        payload = json.loads(out.stdout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, SystemExit):
         return None
+    # Valid-but-non-object JSON (null, an array) must also become a structured failure -- never
+    # a TypeError mid-flow (never-raises contract, PR #71 review).
+    item_id = payload.get("id") if isinstance(payload, dict) else None
     # A malformed id must become a structured failure here, never a TypeError later in argv
     # (issue #69) -- the never-raises contract covers gh misbehaving too.
     return item_id if isinstance(item_id, str) and item_id else None
@@ -304,9 +307,10 @@ def _status_write_meta(cfg: dict, stage: str) -> tuple[str, str, str, str | None
     missing or malformed. Every id must be a non-empty string BEFORE it can reach subprocess argv
     (issue #69): malformed gh output becomes a structured failure, never a mid-write TypeError."""
     meta = field_meta(cfg)
-    if meta is None:
+    if not isinstance(meta, dict):
         return None
-    option_id = (meta.get("status_options") or {}).get((stage or "").strip().lower())
+    options = meta.get("status_options")
+    option_id = options.get((stage or "").strip().lower()) if isinstance(options, dict) else None
     ids = (meta.get("project_id"), meta.get("status_field_id"), option_id)
     if not all(isinstance(value, str) and value for value in ids):
         return None
