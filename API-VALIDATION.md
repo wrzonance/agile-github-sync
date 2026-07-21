@@ -106,8 +106,8 @@ the code still fails closed (refetch, validate, or abort) rather than assuming e
   The GraphQL date-read shape was exercised live on 2026-07-20 (see below). The card PATCH was
   live-run on 2026-07-21: setting both dates as strings is confirmed, but clearing them with a null
   `replace` was rejected (HTTP 422 "Invalid value: must be string"), so clears now use an RFC-6902
-  `remove` op (issue #52). The remove-based clear and the blocked-state clear await the next smoke
-  pass -- see "Validated live on 2026-07-21" below.
+  `remove` op (issue #52). A second run the same day, after the fix merged, confirmed the
+  remove-based clear and the blocked-state clear live -- see "Validated live on 2026-07-21" below.
 
 ## GitHub side (standard and stable, noted for completeness)
 
@@ -182,10 +182,11 @@ an external link both accepted; `card/connections` connect/disconnect round-trip
 children read reflects it immediately (including the authoritative empty read after disconnect).
 `DELETE /io/card/{id}` (smoke cleanup only) deletes for real -- a follow-up GET returns 404.
 
-## Validated live on 2026-07-21 (smoke.py run, production tenant board)
+## Validated live on 2026-07-21 (smoke.py runs, production tenant board)
 
-A post-merge run exercised steps 5-6 (blocked state + planned dates), which were added after the
-2026-07-20 run:
+Two runs: the first exercised steps 5-6 (blocked state + planned dates, added after the 2026-07-20
+run) and surfaced the date-clear rejection; the second, after the issue #52 fix merged, passed the
+full sequence:
 
 1. **Blocked-state set: confirmed.** `/isBlocked` true + `/blockReason` string round-trips
    (`isBlocked=True`, reason read back).
@@ -197,8 +198,13 @@ A post-merge run exercised steps 5-6 (blocked state + planned dates), which were
    atomic: the 422 listed only the two date ops as invalid, yet no op in the batch (including the
    valid blocked-clear ops) was applied. `op_planned_date` now emits `{op:"remove", path:"/{field}"}`
    for a clear, and the offline smoke double mirrors the 422 (issue #52).
-4. **Still pending for the next run:** the remove-based date clear and the blocked-state clear
-   round-trip (its ops passed validation, but the atomic 422 kept the whole batch from applying).
+4. **Remove-based date clear + blocked-state clear: confirmed.** The second (post-fix) run's step 6
+   read back `isBlocked=False`, `plannedStart=None`, `plannedFinish=None`: the RFC-6902 `remove`
+   clears both dates, and the blocked-clear ops apply once no invalid op poisons the batch.
 
-The run also re-confirmed create (`customId`+`externalLink`), the version-less create response,
-flat single-card GET, both tag round-trips, and `DELETE` + 404 cleanup.
+Both runs also re-confirmed create (`customId`+`externalLink`), the version-less create response,
+flat single-card GET, both tag round-trips, the connections round-trip, the stale-version HTTP 428
+rejection, and `DELETE` + 404 cleanup.
+
+With that, every AgilePlace `[live-check]` item in this file is retired -- each one now has a
+recorded live outcome.
