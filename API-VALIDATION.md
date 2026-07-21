@@ -4,8 +4,8 @@ This file records how the API calls this tool makes were checked before running 
 account. On 2026-07-17 each call was compared with the public Planview LeanKit io v2 docs and, where
 it documents the same operation, the official LeanKit Node client. Most calls are confirmed. A few,
 marked `[live-check]`, are not fully pinned down by public docs and should be smoke-tested once
-against a disposable card. The last section records what was verified against the live GitHub APIs
-on 2026-07-18.
+against a disposable card. The last two sections record what was verified live: GitHub shapes on
+2026-07-18, and AgilePlace write paths on 2026-07-20 (a `smoke.py` run).
 
 ## Confirmed against the cited sources
 
@@ -32,6 +32,14 @@ respectively.
 
 ## [live-check]: verify once with real keys, on a disposable card
 
+> `python smoke.py` automates these checks (plus the Connections round-trip below): it previews the
+> configured board, asks for confirmation, then exercises every write shape on two throwaway cards
+> and reports PASS/FAIL per item with the server's full response body on any rejection.
+>
+> **2026-07-20: a smoke.py run against the production tenant confirmed every numbered item below**
+> -- see "Validated live on 2026-07-20 (smoke.py run)" at the end of this file for the outcomes.
+> Each entry keeps its original rationale and carries its confirmed outcome inline.
+
 1. Tag removal. The code now sends standard RFC-6902 index-based removal --
    `{op:"remove", path:"/tags/{i}"}`, no `value` member -- with indices computed from the card's
    current tags and removals applied in descending index order within one patch (`agileplace.py`'s
@@ -41,21 +49,21 @@ respectively.
    while `/tags` plus `value` removes by value. This implementation intentionally uses the
    deterministic index form: it follows RFC 6902's standard `remove` shape and ties each removal to
    the versioned tag snapshot used to build the batch. The Node client README documents tag *add*
-   only and is not evidence for either removal form. Still needs a human-run live check: confirm an
-   add-then-remove round-trip on a disposable card actually clears the tag (not attempted here -- no
-   live AgilePlace credentials available/authorized for this task).
+   only and is not evidence for either removal form. Confirmed live 2026-07-20: an add-then-remove
+   round-trip on a disposable card cleared the tag (outcome 1 below).
 2. External link add (init `04`). `{op:"add", path:"/externalLink", value:{label,url}}` on a card
-   that has no link yet. Confirm `add` succeeds on the absent property (the code uses `add`, not
-   `replace`).
-3. Version conflict. Edit a card out-of-band, then run `--apply`. Confirm the
-   `x-lk-resource-version` header produces a clean conflict (HTTP 409 or 428) rather than a silent
-   stale overwrite. The current code sends the version but does not retry on conflict, so a
-   conflict surfaces as a failed run; add refetch-and-recompute if that proves noisy.
+   that has no link yet. Confirmed live 2026-07-20: `add` succeeds on the absent property (outcome 2
+   below; the code uses `add`, not `replace`).
+3. Version conflict. Edit a card out-of-band, then run `--apply`. Confirmed live 2026-07-20: a
+   stale `x-lk-resource-version` header produces a clean HTTP 428 rejection, not a silent stale
+   overwrite (outcome 3 below). The current code sends the version but does not retry on conflict,
+   so a conflict surfaces as a failed run; add refetch-and-recompute if that proves noisy.
 4. Single-card GET response shape (`agileplace.get_card`, `GET /io/card/{id}`, issue #8). Docs
    don't confirm whether this wraps the payload as `{"card": {...}}` (like `list_cards`' `cards`
    array) or returns the card fields flat. `get_card` defensively unwraps either shape
    (`data.get("card", data)`), so both possibilities are handled without a human needing to pick
-   one first. Confirm on a live card and, if it's always one shape, the unwrap can be simplified.
+   one first. Confirmed live 2026-07-20: the response is flat (outcome 4 below); the defensive
+   unwrap stays as harmless cover for both shapes.
 5. Card create response `version` field presence (`agileplace.create_card`, `POST /io/card`, issue
    #8). Docs don't confirm whether the create response includes a resource `version` for the new
    card. If it does, a card created earlier in the same run could skip `_card_with_version`'s
@@ -63,38 +71,42 @@ respectively.
    `patch_card` treats every version-less card the same way regardless of origin: refetch via
    `get_card`, then PATCH only when the refetch has a usable version and every queued field still
    matches the original snapshot. A failed validation warns and aborts before sync state is saved
-   (see `[live-check]` item 4 and `_card_with_version` in `agileplace.py`). Confirming this field
-   would let a follow-up pass the create response's version straight through instead of paying for
-   an extra refetch.
+   (see `[live-check]` item 4 and `_card_with_version` in `agileplace.py`). Confirmed live
+   2026-07-20: the create response carries no version (outcome 5 below), so the refetch is required
+   behavior and the contemplated pass-through follow-up is moot.
 
 Together, items 4 and 5 are what closes the fail-open optimistic-concurrency gap from issue #8
-(`patch_card` no longer ever sends an unversioned PATCH) pending those two live confirmations --
-today the code fails closed (refetch, validate, or abort) rather than assuming either shape.
+(`patch_card` no longer ever sends an unversioned PATCH). Both were confirmed live on 2026-07-20;
+the code still fails closed (refetch, validate, or abort) rather than assuming either shape.
 
 ## Model 2 additions, also [live-check]
 
 - `gh project` CLI shapes (`ghproject.py`, init `05`): `item-list --format json` (Status comes back
   as a top-level key; the parser is defensive about casing), `project view` (project id),
   `field-list` (Status field id and option ids), `item-add --url`, and
-  `item-edit --single-select-option-id`. These need the `project` token scope. Confirm the
-  item-list JSON shape on your board.
+  `item-edit --single-select-option-id`. These need the `project` token scope. Confirmed live
+  2026-07-18 on board #158 (see "Validated live on 2026-07-18" below).
 - Card create (`POST /io/card`, `agileplace.create_card`): the same shape the init used
-  successfully. Confirm `customId` and `externalLink` are accepted on a fresh card.
+  successfully. Confirmed live 2026-07-20: `customId` and `externalLink` were accepted on a fresh
+  card, both with and without an external link.
 - Parent/child connections: `card_child_ids` reads each epic through the documented singular
   `GET card/{cardId}/connection/children` endpoint and paginates only while `pageMeta` remains
   complete and internally consistent. A failed or malformed read returns a distinct unavailable
   result, warns, and makes that epic's reconciliation add-only; a successful empty `cards` array is
   still authoritative. `connect_children`/`disconnect_children` write `card/connections` with
-  `{cardIds:[parent], connections:{children:[...]}}`. No AgilePlace credentials were available for
-  this change, so a disposable-card read/connect/disconnect round-trip remains pending: confirm the
-  documented read response in the target tenant and validate the exact write endpoint/body against
-  the Connections API
+  `{cardIds:[parent], connections:{children:[...]}}`. Confirmed live 2026-07-20: a disposable-card
+  read/connect/disconnect round-trip matched the documented read response and the Connections API
+  write shape
   ([create](https://success.planview.com/Planview_AgilePlace/AgilePlace_API/01_v2/connections/create) /
-  connect-many).
+  connect-many) in the production tenant.
 - Planned dates (Phase 4): `plannedStart`/`plannedFinish` via the card PATCH; Project Start and
   Target values read from paginated GraphQL `ProjectV2Item.fieldValues` by field id; writes via
   `item-edit --date`. A successful GraphQL snapshot with no matching values means the field is
   cleared project-wide; a failed, malformed, or incomplete snapshot skips every date write that run.
+  The GraphQL date-read shape was exercised live on 2026-07-20 (see below). The
+  `plannedStart`/`plannedFinish` card PATCH is covered by `smoke.py` steps 5-6 but those steps were
+  added after the 2026-07-20 run -- it is the one AgilePlace `[live-check]` still awaiting a live
+  pass.
 
 ## GitHub side (standard and stable, noted for completeness)
 
@@ -139,3 +151,32 @@ Two gh behaviors learned the same day, recorded so this repo never has to redisc
 2. `gh issue edit --add-blocked-by` is not idempotent. Re-adding an existing edge fails with
    "Target issue has already been taken", which for the caller's intent means the edge is already
    there.
+
+## Validated live on 2026-07-20 (smoke.py run, production tenant board)
+
+A confirmed `python smoke.py` run (create -> mutate -> connect -> stale-probe -> delete on two
+throwaway cards) retired every AgilePlace `[live-check]` item above except the planned-date card
+PATCH -- smoke steps 5-6 (blocked state + planned dates) were added after this run and await the
+next live pass:
+
+1. **Tag removal (item 1): confirmed.** Index-based `{op:"remove", path:"/tags/{i}"}` cleared the
+   tag in an add-then-remove round-trip (`tags` ended empty).
+2. **External link add (item 2): confirmed.** `{op:"add", path:"/externalLink", value:{label,url}}`
+   succeeded on a card created with no link.
+3. **Version conflict (item 3): confirmed.** A PATCH with a stale `x-lk-resource-version` was
+   rejected with **HTTP 428 Precondition Required**; the body shows the server running a JSON-Patch
+   `test` op on `/version` built from the header (`error: "Test operation failed"`, with
+   `actualValue` reporting the current version). Optimistic concurrency is real; no silent stale
+   overwrite. A conflict surfaces as a failed run, as coded.
+4. **Single-card GET shape (item 4): confirmed FLAT.** `GET /io/card/{id}` returns the card fields
+   at the top level, not wrapped in `{"card": ...}`. `get_card`'s defensive unwrap stays (it is
+   harmless and covers both shapes), but the wrapped branch is now known to be unused live.
+5. **Card create response `version` (item 5): confirmed ABSENT.** The create response carries no
+   resource version, so `patch_card`'s refetch-before-PATCH path for version-less cards is
+   *required* behavior, not an optimization opportunity -- the contemplated follow-up (reusing the
+   create response's version to skip the refetch) is moot.
+
+Model 2 additions confirmed by the same run: card create with `customId`+`externalLink` and without
+an external link both accepted; `card/connections` connect/disconnect round-trip works and the
+children read reflects it immediately (including the authoritative empty read after disconnect).
+`DELETE /io/card/{id}` (smoke cleanup only) deletes for real -- a follow-up GET returns 404.

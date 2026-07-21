@@ -52,6 +52,21 @@ writes nothing.
 > records, cross-repo sub-issues, run locking) is tracked in `HARDENING.md`. Start with a
 > disposable board and repo.
 
+## Smoke-test the write path
+
+Dry run already exercises every read live; `python smoke.py` is the matching one-shot check for the
+AgilePlace *write* shapes. It previews the configured board first -- title, lanes, and the cards
+currently on it -- and asks for typed confirmation before writing anything. It then creates two
+clearly-marked throwaway cards (custom ids carry a fresh per-run suffix so they can never collide
+with, or be adopted by, a real sync run), round-trips a tag add/remove, sets and clears blocked
+state and planned dates, adds an external link to a bare card and reads it back, connects and
+disconnects them as parent/child, sends a deliberately stale-version PATCH (which the server must
+reject), and deletes both cards again, confirming each is gone. Every step is printed,
+and a rejected write shows the server's full, untruncated response body so a wrong shape is
+diagnosable from the console. The final summary maps one-to-one onto the `[live-check]` items in
+`API-VALIDATION.md`. `--yes` skips the prompt. GitHub is never touched and `.sync-state.json` is
+never read or written.
+
 ## Point it at a repo
 
 ```
