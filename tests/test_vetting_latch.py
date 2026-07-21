@@ -123,3 +123,71 @@ def test_apply_latch_full_success_promotes_and_prints_summary(tmp_path, capsys):
     add_item_mock.assert_called_once()
     set_item_status_mock.assert_called_once()
     patch_card_mock.assert_not_called()
+
+
+def test_intake_card_creation_targets_the_intake_lane(tmp_path, capsys):
+    # Loop 1 (ensure a card per active issue), not loop 2's lane-move: a brand-new issue with no
+    # matching card, off-board, no work signal -- resolve_issue_stage() resolves "Intake" and the
+    # new card must be created straight into the lane the board maps to "Intake", proving loop 1's
+    # existing resolve_lane_for_stage plumbing needs no issue-#63-specific change to do so. The
+    # latch's write surface belongs only to loop 2's existing-card path, so neither mock fires here.
+    parsed: dict = {}
+    cfg = {**_cfg(tmp_path), "stage_lane_map": _INTAKE_STAGE_MAP}
+    stack, _, _, create_card_mock = _mock_io(
+        _card(), (parsed, []), field_meta_return=None, lanes_return=_INTAKE_LANES,
+        issue_return=_intake_issue(), existing_cards=[])
+    state_file = tmp_path / ".sync-state.json"
+    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+         patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    out = capsys.readouterr().out
+    assert "stage=Intake lane=New Requests" in out
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.args[-1] == "L_INTAKE"
+    stack.add_item_mock.assert_not_called()
+    stack.set_item_status_mock.assert_not_called()
+
+
+def test_apply_latch_never_runs_when_project_read_failed(tmp_path, capsys):
+    # An outright Projects v2 read failure leaves project_items == {} -- the same shape as
+    # "genuinely never vetted" -- which unguarded would satisfy resolve_issue_stage's own
+    # "not in project_items" clause and resolve "Intake". But move_lanes (`not project_read_failed`)
+    # gates the entire loop-2 lane-move block, the latch call included, so apply_latch must never
+    # even be reached: a transiently miscomputed "Intake" during a read outage can't drive a write.
+    card = {**_card(), "laneId": "L_READY"}
+    cfg = {**_cfg(tmp_path), "stage_lane_map": _INTAKE_STAGE_MAP}
+    stack, _, patch_card_mock, _ = _mock_io(
+        card, (None, None), field_meta_return=None, lanes_return=_INTAKE_LANES,
+        issue_return=_intake_issue())
+    state_file = tmp_path / ".sync-state.json"
+    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+         patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    out = capsys.readouterr().out
+    assert "Projects v2 read FAILED" in out
+    stack.add_item_mock.assert_not_called()
+    stack.set_item_status_mock.assert_not_called()
+    patch_card_mock.assert_not_called()
+
+
+def test_flag_off_sync_main_never_touches_latch_write_surface(tmp_path, capsys):
+    # Baseline pin at the sync.main() level (task 3/8 already pins resolve_issue_stage() directly
+    # in test_sync_intake.py): with no "Intake" key in stage_map -- the default/legacy config -- an
+    # off-board, no-work-signal issue's existing card must never reach the latch's write surface,
+    # byte-identical to the sync's pre-issue-63 behavior.
+    card = {**_card(), "laneId": "L_READY"}
+    cfg = _cfg(tmp_path)  # stage_lane_map: {} -- no "Intake" key
+    stack, _, patch_card_mock, _ = _mock_io(
+        card, ({}, []), field_meta_return=None, lanes_return=_INTAKE_LANES,
+        issue_return=_intake_issue())
+    state_file = tmp_path / ".sync-state.json"
+    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+         patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    out = capsys.readouterr().out
+    assert "Intake" not in out
+    stack.add_item_mock.assert_not_called()
+    stack.set_item_status_mock.assert_not_called()
