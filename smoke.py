@@ -241,8 +241,8 @@ def _check_connections(cfg: dict, parent_id: str, child_id: str, results: list) 
 
 def _check_dependencies(cfg: dict, parent_id: str, child_id: str, results: list) -> None:
     """Steps 11-12: dependency create/read/delete round-trip through the shapes captured live
-    2026-07-21 (undocumented API -- see API-VALIDATION.md "Dependencies API discovery"). Also
-    fact-finds duplicate-create behavior, which no capture has observed."""
+    2026-07-21 (undocumented API -- see API-VALIDATION.md "Dependencies API discovery"), plus a
+    pin on the confirmed duplicate-create contract (HTTP 409 Conflict, nothing else passes)."""
     _step(11, "create dependency child dependsOn parent, then read it back")
     agileplace.create_dependencies(cfg, True, child_id, [parent_id])
     entries = agileplace.card_dependencies(cfg, child_id)
@@ -254,16 +254,22 @@ def _check_dependencies(cfg: dict, parent_id: str, child_id: str, results: list)
                     incoming == {parent_id} and timing_ok,
                     f"incoming read back: {sorted(incoming) if incoming is not None else 'unavailable'}"))
 
+    # The duplicate-create contract was confirmed live 2026-07-21: HTTP 409 Conflict. Only that
+    # exact rejection passes -- acceptance contradicts the recorded contract, and a 401/5xx/
+    # transport failure must fail the run, never hide behind an informational line.
     try:
         agileplace.create_dependencies(cfg, True, child_id, [parent_id])
-        dup_detail = "duplicate create ACCEPTED (idempotent or duplicating -- see read below)"
+        dup_ok = False
+        dup_detail = "duplicate create ACCEPTED -- contradicts the confirmed HTTP 409 contract"
     except SystemExit as exc:
-        dup_detail = f"duplicate create rejected: {exc}"
+        dup_ok = getattr(exc, "http_status", None) == 409
+        dup_detail = (f"duplicate create rejected: {exc}" if dup_ok
+                      else f"unexpected failure (not the confirmed 409): {exc}")
     entries = agileplace.card_dependencies(cfg, child_id)
     incoming = agileplace.incoming_dependency_ids(entries) if entries is not None else None
     dup_count = (sum(1 for e in entries if e.get("direction") == "incoming"
                      and str(e.get("cardId")) == parent_id) if entries is not None else None)
-    results.append(("duplicate dependency create behavior", None,
+    results.append(("duplicate dependency create rejected (HTTP 409)", dup_ok,
                     f"{dup_detail}; incoming entries for parent now: {dup_count}"))
 
     _step(12, "delete the dependency, then confirm the empty read")

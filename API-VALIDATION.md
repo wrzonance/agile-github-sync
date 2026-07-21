@@ -247,7 +247,7 @@ returned:
 **Delete shape: confirmed live 2026-07-21** (devtools capture of the UI removing the EP-3A ->
 JPOWER1 dependency):
 
-```
+```http
 DELETE /io/card/dependency
 {"cardIds": ["2490186236"], "dependsOnCardIds": ["2490185684"]}
 ```
@@ -260,7 +260,7 @@ endpoint lives under the same `/io/` surface as everything the token-authenticat
 **Create shape: confirmed live 2026-07-21** (devtools capture of the UI recreating the same
 dependency):
 
-```
+```http
 POST /io/card/dependency
 {"cardIds": ["2490186236"], "dependsOnCardIds": ["2490185684"], "timing": "finishToStart"}
 ```

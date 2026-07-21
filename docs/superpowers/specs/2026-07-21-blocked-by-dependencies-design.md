@@ -1,9 +1,10 @@
 # Sync GitHub blocked-by edges as native AgilePlace Dependencies
 
 Design agreed 2026-07-21 (issue #57). Decisions made with the maintainer:
-discovery via read-only probe script; the Blocked flag stays until the native
-dependency visuals are judged on the live board (phased); GitHub is authoritative
-for dependencies between sync-managed cards.
+discovery via read-only probe script; the Blocked flag was retained through
+Phase 1 and, after the native dependency visuals were judged on the live board,
+retired in Phase 2 -- the flag is human-owned now, never written by the sync;
+GitHub is authoritative for dependencies between sync-managed cards.
 
 ## Problem
 

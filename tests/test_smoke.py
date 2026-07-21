@@ -43,11 +43,13 @@ class FakeTenant:
     """Minimal stateful AgilePlace io v2 double for the whole smoke sequence."""
 
     def __init__(self, *, accept_stale: bool = False, fail_child_create_body: str | None = None,
-                 ignore_external_link: bool = False, ignore_tag_add: bool = False):
+                 ignore_external_link: bool = False, ignore_tag_add: bool = False,
+                 duplicate_status: int = 409):
         self.accept_stale = accept_stale
         self.fail_child_create_body = fail_child_create_body
         self.ignore_external_link = ignore_external_link
         self.ignore_tag_add = ignore_tag_add
+        self.duplicate_status = duplicate_status  # live contract is 409; override to model outages
         self.created_custom_ids: list[str] = []
         self.writes: list[tuple[str, str]] = []
         self.cards: dict[str, dict] = {
@@ -168,6 +170,9 @@ class FakeTenant:
                     existing = self.dependencies.get(dependent, [])
                     if any(e["direction"] == "incoming" and e["cardId"] == blocker
                            for e in existing):
+                        if self.duplicate_status != 409:
+                            raise _http_error(req.full_url, self.duplicate_status,
+                                              json.dumps({"message": "boom"}))
                         raise _http_error(req.full_url, 409, json.dumps(
                             {"statusCode": 409, "error": "Conflict",
                              "message": "Dependency already exists",
@@ -258,6 +263,18 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
     assert "planned" in out            # planned-date round-trip reported
     assert "duplicate create rejected" in out   # the live 409 contract, mirrored by the double
     assert "Dependency already exists" in out
+
+
+def test_unexpected_duplicate_create_failure_fails_the_run(tenant_env, capsys):
+    """PR #61 review finding: only the confirmed HTTP 409 passes the duplicate probe. An auth/5xx/
+    transport failure during the duplicate POST must FAIL the smoke run, never hide as an
+    informational line that leaves the summary green."""
+    tenant = FakeTenant(duplicate_status=503)
+    tenant_env(tenant)
+    assert smoke.main([]) == 1
+    out = capsys.readouterr().out
+    assert "FAIL  duplicate dependency create rejected (HTTP 409)" in out
+    assert "unexpected failure (not the confirmed 409)" in out
 
 
 def test_custom_ids_are_unique_per_run(tenant_env, monkeypatch):
