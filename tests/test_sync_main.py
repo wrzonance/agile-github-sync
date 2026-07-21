@@ -61,7 +61,8 @@ _UNSET = object()
 
 
 def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSET, lanes_return=(),
-             existing_cards=_UNSET, issue_return=_UNSET, hydrated_items_return=_UNSET):
+             existing_cards=_UNSET, issue_return=_UNSET, hydrated_items_return=_UNSET,
+             add_item_return=_UNSET, set_item_status_return=True):
     """ExitStack of patches covering every I/O boundary main() touches for one run. Returns the stack
     plus the ghkit.run, agileplace.patch_card, and agileplace.create_card mocks (for call-site
     assertions).
@@ -71,7 +72,13 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     lane-move step is then always a no-op); pass real lane dicts to exercise lane-move decisions.
     existing_cards defaults to [card] (the issue already has a matching card); pass [] to force the
     "ensure a card per issue" creation path instead of the lane-move path. issue_return defaults to
-    _issue(); pass a complete issue dict to exercise different live metadata."""
+    _issue(); pass a complete issue dict to exercise different live metadata.
+
+    add_item_return/set_item_status_return (issue #63) patch the vetting latch's two ghproject write
+    calls; both default to a generic success so any test whose stage_map lacks "Intake" never even
+    reaches them (additive -- no existing test's behavior depends on either). The resulting mocks are
+    stashed as stack.add_item_mock / stack.set_item_status_mock for latch-specific call assertions,
+    since the primary 4-tuple return stays unchanged for every other caller."""
     stack = ExitStack()
     stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
     issue = _issue() if issue_return is _UNSET else issue_return
@@ -87,6 +94,11 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     stack.enter_context(patch("ghproject.field_meta", return_value=field_meta_return))
     hydrated = parsed_items if hydrated_items_return is _UNSET else hydrated_items_return
     stack.enter_context(patch("ghproject.hydrate_item_dates", return_value=hydrated))
+    add_item_default = "planned-item:test" if add_item_return is _UNSET else add_item_return
+    stack.add_item_mock = stack.enter_context(
+        patch("ghproject.add_item", return_value=add_item_default))
+    stack.set_item_status_mock = stack.enter_context(
+        patch("ghproject.set_item_status", return_value=set_item_status_return))
     stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes_return)))
     cards = [card] if existing_cards is _UNSET else list(existing_cards)
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))

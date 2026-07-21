@@ -23,6 +23,7 @@ from collections.abc import Mapping
 import agileplace
 import ghkit
 import ghproject
+import vetting_latch
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
 from stages import (epic_key_for_task, is_retired_issue, issue_stage,
@@ -282,6 +283,25 @@ def _protect_open_pr_stage(stage: str, current_lane_id: str, lanes: list, milest
     if str(current_lane_id) in {str(i) for i in acceptable}:
         return "In review"
     return stage
+
+
+def _apply_lane_move(cfg: dict, apply: bool, issue: dict, card: dict, key: str, stage: str,
+                     current: str, lanes: list, stage_map: dict | None, project_status: dict,
+                     queue, *, open_pr_read_failed: bool) -> None:
+    """Pure lift of the ordinary lane-move body for one active issue's existing card -- unchanged
+    behavior, just named and callable so the loop-2 wiring can gate it behind the Intake vetting
+    latch (issue #63). `cfg` is accepted for call-site symmetry with vetting_latch.apply_latch even
+    though the move itself needs nothing beyond what its own helpers already take."""
+    has_explicit_status = explicit_stage_status(issue, project_status) is not None
+    lane_stage = _protect_open_pr_stage(stage, current, lanes, issue.get("milestone") or "", stage_map,
+                                        open_pr_read_failed=open_pr_read_failed,
+                                        has_explicit_status=has_explicit_status,
+                                        issue_closed=str(issue.get("state", "")).upper() == "CLOSED")
+    target_lane, acceptable = agileplace.resolve_lane_for_stage(
+        lanes, lane_stage, issue.get("milestone") or "", stage_map)
+    if target_lane and current not in {str(i) for i in acceptable}:
+        queue(card, [agileplace.op_lane(target_lane["id"])], f"lane->{agileplace.lane_title(target_lane)}")
+        print(f"{'move ' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {lane_stage})")
 
 
 def _retire_card(issue: dict, card: dict, lanes: list, stage_map: dict | None,
@@ -688,16 +708,17 @@ def main() -> None:
         stage = resolve_issue_stage(issue, project_status, project_items, smap)
         if move_lanes:
             current = str(card.get("laneId") or (card.get("lane") or {}).get("id") or "")
-            has_explicit_status = explicit_stage_status(issue, project_status) is not None
-            lane_stage = _protect_open_pr_stage(stage, current, lanes, issue.get("milestone") or "", smap,
-                                                 open_pr_read_failed=open_pr_read_failed,
-                                                 has_explicit_status=has_explicit_status,
-                                                 issue_closed=str(issue.get("state", "")).upper() == "CLOSED")
-            target_lane, acceptable = agileplace.resolve_lane_for_stage(lanes, lane_stage, issue.get("milestone") or "", smap)
-            if target_lane:
-                if current not in {str(i) for i in acceptable}:
-                    queue(card, [agileplace.op_lane(target_lane["id"])], f"lane->{agileplace.lane_title(target_lane)}")
-                    print(f"{'move ' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {lane_stage})")
+            # A card whose stage resolves to "Intake" this run may already be sitting somewhere a
+            # human deliberately moved it (out of the intake lane, mid-vetting) or nowhere mappable
+            # at all -- either way the ordinary lane-move must not run blind. apply_latch() decides:
+            # True means it already handled (or safely deferred) this card, so the ordinary move is
+            # skipped; False means the card is already parked in the Intake lane itself, where the
+            # ordinary move is harmless (it will simply find nothing to change).
+            latched = stage == "Intake" and vetting_latch.apply_latch(
+                cfg, apply, issue, key, current, lanes, smap)
+            if not latched:
+                _apply_lane_move(cfg, apply, issue, card, key, stage, current, lanes, smap,
+                                 project_status, queue, open_pr_read_failed=open_pr_read_failed)
         sync_metadata(cfg, apply, issue, card, cfg["label_sync_ignore"], issues_state, queue)
         if field_meta:
             sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue)
