@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 
 import agileplace
 import ghkit
@@ -449,6 +450,29 @@ def sync_dates(cfg, apply, issue, card, pitem, field_meta, issues_state, queue) 
             prev[kind] = new
 
 
+def _created_card_snapshot(cfg: dict, created: Mapping) -> Mapping:
+    """Refetch a just-created card once so its authoritative server state becomes the snapshot.
+
+    The live create response is sparse -- the new id, but no version and no customId/laneId echo
+    (validated live 2026-07-21, issue #55). Indexed as-is it queues redundant /customId and /laneId
+    ops that the issue-#8 stale-ops guard then reads as a concurrent edit, aborting every fresh
+    create+sync apply. The refetched card carries a usable version, so the later PATCH skips its own
+    refetch: net API calls are unchanged. A failed or mismatched refetch falls back to the sparse
+    response (the pre-fix behavior) rather than failing a run whose create already succeeded.
+    """
+    try:
+        fresh = agileplace.get_card(cfg, created["id"])
+    except SystemExit as err:
+        print(f"WARN  refetch of created card {created['id']} failed ({err}) -- "
+              "keeping the sparse create response as its snapshot")
+        return created
+    if str(fresh.get("id") or "") != str(created["id"]):
+        print(f"WARN  refetch of created card {created['id']} returned card {fresh.get('id')!r} -- "
+              "keeping the sparse create response as its snapshot")
+        return created
+    return fresh
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync GitHub -> AgilePlace (per-issue cards, lanes, connections, metadata)")
     parser.add_argument("--apply", action="store_true", help="actually write (default: verbose dry run)")
@@ -619,6 +643,8 @@ def main() -> None:
             lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
         created = agileplace.create_card(cfg, apply, issue_card_title(issue), key, issue["url"],
                                          lane["id"] if lane else None)
+        if apply and created.get("id"):
+            created = _created_card_snapshot(cfg, created)
         # Real creates carry a server id; dry creates carry an obvious plan-only id. Index either
         # snapshot so metadata, hierarchy, dependency, and batched patch planning stay in parity.
         # Dry-run state is never saved, so the plan-only identity cannot escape this run.

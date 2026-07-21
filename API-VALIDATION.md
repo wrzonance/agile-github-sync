@@ -206,6 +206,11 @@ Both runs also re-confirmed create (`customId`+`externalLink`), the version-less
 flat single-card GET, both tag round-trips, the connections round-trip, the stale-version HTTP 428
 rejection, and `DELETE` + 404 cleanup.
 
+The same day's first live migration (53 cards, issue #55) established one more create-response
+fact: it echoes neither `customId` nor `laneId` -- for sync purposes the response is the new card
+id and nothing else. `sync.py` therefore refetches each just-created card once and indexes the
+fresh card as its snapshot, and the offline sync-run double mirrors the id-only response.
+
 With that, every AgilePlace `[live-check]` item in this file is retired -- each one now has a
 recorded live outcome.
 

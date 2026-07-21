@@ -97,7 +97,7 @@ class FixtureWorld:
     def __init__(self):
         self.http_writes: list[HttpWrite] = []
         self.process_writes: list[tuple[str, ...]] = []
-        self.created_card: dict | None = None
+        self.created_card_body: dict | None = None
         self.epic_card = {
             "id": "C1",
             "version": "v1",
@@ -166,13 +166,20 @@ class FixtureWorld:
                 "pageMeta": {"offset": 0, "limit": 200, "totalRecords": 0},
             })
         if method == "POST" and path == "card":
-            self.created_card = {"id": "C2", **body}
-            return _Response(self.created_card)
+            # Live create responses are SPARSE: the new card id only -- no version and no
+            # customId/laneId echo (validated live 2026-07-21, issue #55). The server still
+            # persists the full body, which the single-card GET below serves back.
+            self.created_card_body = body
+            return _Response({"id": "C2"})
         if method == "GET" and path == "card/C2":
-            assert self.created_card is not None
+            assert self.created_card_body is not None
             return _Response({
                 "card": {
-                    **self.created_card,
+                    "id": "C2",
+                    "title": self.created_card_body["title"],
+                    "customId": self.created_card_body["customId"],
+                    "laneId": self.created_card_body.get("laneId"),
+                    "externalLink": self.created_card_body.get("externalLink"),
                     "version": "v2",
                     "tags": [],
                     "plannedStart": None,
@@ -306,6 +313,22 @@ def test_new_card_dry_run_plans_every_action_apply_executes(paired_runs):
         {"path": write.path, "body": write.body} for write in apply.http_writes
     ])
     assert PLAN_ID_PREFIX not in apply.state_file.read_text(encoding="utf-8")
+
+
+def test_created_card_snapshot_is_refetched_not_the_sparse_create_echo(paired_runs):
+    """Issue #55: the sparse create response indexed as the snapshot queued redundant /customId
+    and /laneId ops, which then tripped the issue-#8 stale-ops guard and aborted every fresh
+    create+sync apply before metadata landed. The apply must refetch the created card, queue no
+    redundant identity ops, and drive the batched PATCH to completion."""
+    _dry, apply = paired_runs
+    task_patch_ops = [op
+                      for write in apply.http_writes
+                      if write.method == "PATCH" and write.path == "card/C2"
+                      for op in write.body]
+
+    assert task_patch_ops  # metadata landed -- the run did not abort
+    assert {op["path"] for op in task_patch_ops}.isdisjoint({"/customId", "/laneId"})
+    assert apply.state_file.exists()
 
 
 def test_whole_run_batches_one_versioned_patch_per_card(paired_runs):
