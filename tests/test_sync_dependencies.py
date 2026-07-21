@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sync import _dependency_changes, sync_dependencies  # noqa: E402
+from sync import _dependency_changes, _removal_authority_card_ids, sync_dependencies  # noqa: E402
 
 
 # --- _dependency_changes (pure) -------------------------------------------
@@ -137,6 +137,31 @@ def test_sync_blocker_cards_helper_includes_retired_url_owned_cards():
     resolved = _blocker_cards(by_number, lambda i: {"id": f"C{i['number']}"},
                               retired, {"u9": {"id": "R9"}})
     assert resolved == {1: {"id": "C1"}, 9: {"id": "R9"}}  # 8 has no card -> excluded
+
+
+# --- _removal_authority_card_ids (pure) -----------------------------------
+
+def test_removal_authority_includes_url_matched_active_and_retired_cards():
+    """Control: a card an active issue reached through its OWN external-link URL, and a
+    URL-matched retired card, both carry strong identity -- both belong in the result."""
+    issues = [_issue(1, "A")]
+    card_by_url = {issues[0]["url"]: {"id": "C1"}}
+    retired_card_by_url = {"https://github.com/o/r/issues/9": {"id": "R9"}}
+    result = _removal_authority_card_ids(issues, card_by_url, retired_card_by_url)
+    assert result == {"C1", "R9"}
+
+
+def test_removal_authority_excludes_card_reached_only_by_customid_fallback():
+    """Exclusion (issue #60): card_by_url holds an entry, but not under THIS issue's own
+    URL -- modeling a card that some other issue's _matching_card call resolved only via
+    the customId fallback (or a retired card whose link was manually removed and got
+    silently adopted through a customId collision). That card must contribute nothing to
+    issue 1's removal authority, even though a naive builder that pooled every value in
+    card_by_url (rather than looking up each issue's own URL) would include it."""
+    issues = [_issue(1, "A")]
+    card_by_url = {"https://github.com/o/r/issues/999": {"id": "OTHER"}}  # not issue 1's url
+    result = _removal_authority_card_ids(issues, card_by_url, retired_card_by_url={})
+    assert result == set()
 
 
 def test_every_edge_is_mirrored_not_only_incomplete_blockers():
