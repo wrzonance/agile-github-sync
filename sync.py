@@ -132,6 +132,20 @@ def _blocker_cards(by_number: dict, card_for, retired_issues: list,
     return cards
 
 
+def _managed_card_ids(syncable_issues: list[dict], card_for, retired_card_by_url: dict[str, dict]) -> set[str]:
+    """Every card id this sync manages: active-issue cards resolved by card_for (URL match OR
+    customId fallback), plus every URL-matched retired card. Broader than
+    _removal_authority_card_ids -- a customId-only match still confers full authority here, so
+    this set drives additions and the child-connection removal path. Pure, read-only, never
+    raises. This is the single source of truth for 'managed'; main() calls it directly so tests
+    and production never drift onto separate copies of the formula."""
+    return (
+        {str(card["id"]) for issue in syncable_issues
+         if (card := card_for(issue)) and card.get("id")}
+        | {str(card["id"]) for card in retired_card_by_url.values() if card.get("id")}
+    )
+
+
 def _removal_authority_card_ids(syncable_issues: list[dict], card_by_url: dict[str, dict],
                                 retired_card_by_url: dict[str, dict]) -> set[str]:
     """Strong-identity card ids only: cards an active issue matched via its own external-link
@@ -140,7 +154,7 @@ def _removal_authority_card_ids(syncable_issues: list[dict], card_by_url: dict[s
     manually removed and got silently adopted through a customId collision (issue #60) --
     confers no removal authority over that card's dependencies. Additions are unaffected;
     only REMOVAL decisions (sync_dependencies -> _dependency_changes) consume this. Pure,
-    read-only, never raises. Always a subset of managed_card_ids (sync.py:692-698)."""
+    read-only, never raises. Always a subset of _managed_card_ids's result."""
     return (
         {str(card["id"]) for issue in syncable_issues
          if (card := card_by_url.get(issue["url"])) and card.get("id")}
@@ -709,13 +723,7 @@ def main() -> None:
 
     # 3) parent/child connections: authoritative native reads reconcile exactly; title-key fallback
     # is add-only because a heuristic must never authorize destructive reconciliation.
-    managed_card_ids = (
-        {str(card["id"])
-         for issue in syncable_issues
-         if (card := card_for(issue)) and card.get("id")}
-        | {str(card["id"])
-           for card in retired_card_by_url.values() if card.get("id")}
-    )
+    managed_card_ids = _managed_card_ids(syncable_issues, card_for, retired_card_by_url)
     for epic in epics:
         parent = card_for(epic)
         if not parent or not parent.get("id"):

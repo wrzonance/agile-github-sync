@@ -16,7 +16,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sync import _removal_authority_card_ids, issue_custom_id, sync_dependencies  # noqa: E402
+from sync import (  # noqa: E402
+    _managed_card_ids,
+    _removal_authority_card_ids,
+    issue_custom_id,
+    sync_dependencies,
+)
 
 
 def _issue(number, key, url=None):
@@ -83,9 +88,12 @@ def test_card_without_id_is_excluded():
 # --- strictly subtractive: always a subset of managed_card_ids -------------
 
 def test_result_is_always_a_subset_of_managed_card_ids():
-    """Mirrors managed_card_ids' own formula (sync.py:692-698) with a card_for that
-    resolves issue 2 ONLY via customId (simulating _matching_card's fallback) -- exactly
-    the shape managed_card_ids itself does not distinguish, but removal authority must."""
+    """Checks the invariant against the REAL managed_card_ids formula (sync._managed_card_ids,
+    the same function main() calls) rather than a copy pasted into the test -- a formula drift
+    in sync.py (e.g. dropping the `.get('id')` guard, or forgetting to union in
+    retired_card_by_url) shows up here instead of being silently missed. card_for resolves
+    issue 2 ONLY via customId (simulating _matching_card's fallback) -- exactly the shape
+    managed_card_ids itself does not distinguish, but removal authority must."""
     issues = [_issue(1, "A", "u1"), _issue(2, "B", "u2")]
     card_by_url = {"u1": {"id": "C1"}}          # issue 2 has no URL match
     card_by_cid = {"B": {"id": "C2"}}           # issue 2 only resolves via customId
@@ -94,10 +102,7 @@ def test_result_is_always_a_subset_of_managed_card_ids():
     def card_for(issue):
         return card_by_url.get(issue["url"]) or card_by_cid.get(issue_custom_id(issue))
 
-    managed_card_ids = (
-        {str(card["id"]) for issue in issues if (card := card_for(issue)) and card.get("id")}
-        | {str(card["id"]) for card in retired_card_by_url.values() if card.get("id")}
-    )
+    managed_card_ids = _managed_card_ids(issues, card_for, retired_card_by_url)
     removal_authority = _removal_authority_card_ids(issues, card_by_url, retired_card_by_url)
 
     assert removal_authority <= managed_card_ids
