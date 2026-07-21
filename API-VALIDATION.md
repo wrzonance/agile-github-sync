@@ -252,10 +252,21 @@ Pair-addressed, as the id-less read entries implied: `cardIds` is the dependent 
 `card/connections`. No card id in the path; the UI's own session auth rode a cookie, but the
 endpoint lives under the same `/io/` surface as everything the token-authenticated client uses.
 
-Still `[live-check]` pending for Phase 0b (write probe) / Phase 1:
+**Create shape: confirmed live 2026-07-21** (devtools capture of the UI recreating the same
+dependency):
 
-1. **Create endpoint and body.** Almost certainly `POST /io/card/dependency` with the same
-   `cardIds`/`dependsOnCardIds` body (possibly plus a `timing` member -- the delete body carries
-   none, and reads show `finishToStart`). Not built on that guess: confirm via the UI's captured
-   POST, or by the Phase 0b write probe on throwaway cards validated through the confirmed read
-   endpoint.
+```
+POST /io/card/dependency
+{"cardIds": ["2490186236"], "dependsOnCardIds": ["2490185684"], "timing": "finishToStart"}
+```
+
+Same pair body as delete plus an explicit `timing` member (camelCase enum, `finishToStart`
+observed). The POST *response* returns the card's updated `dependencies` list where each entry
+additionally carries a `face` projection of the other card -- including a `dependencyStats` object
+(`incoming/outgoing/total` x `Count/ResolvedCount/ExceptionCount/UnresolvedBlockedCount`), which is
+the native health tracking. Plain reads (`GET card/{cardId}/dependency`) omit `face`; the sync needs
+only `direction`/`cardId`/`timing`.
+
+Remaining `[live-check]` for the smoke dependency round-trip (Phase 1): duplicate-create behavior
+(idempotent vs. error) is unobserved -- the sync's diff-before-write never intentionally re-creates
+an existing pair, so this is fact-finding, not a blocker.
