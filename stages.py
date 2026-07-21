@@ -7,10 +7,14 @@ lane comes from the epic issue's own Status or fallback signals, not from task r
 """
 from __future__ import annotations
 
-STAGES = ("Backlog", "Ready", "In progress", "In review", "Done")
+STAGES = ("Intake", "Backlog", "Ready", "In progress", "In review", "Done")
 RETIRED_STATE_REASONS = frozenset({"NOT_PLANNED", "DUPLICATE"})
 
-_STAGE_BY_LOWER = {s.lower(): s for s in STAGES}
+# "Intake" is deliberately absent from the Project-Status vocabulary: board membership itself means
+# vetted, so no explicit Status -- even one literally named "Intake" -- may ever resolve to the
+# pre-board holding stage, flag on or off. Such a Status normalizes to None and the caller falls
+# back to signal derivation, exactly the classic behavior (PR #68 review).
+_STAGE_BY_LOWER = {s.lower(): s for s in STAGES if s != "Intake"}
 
 
 def normalize_status(name: str) -> str | None:
@@ -20,7 +24,13 @@ def normalize_status(name: str) -> str | None:
 
 # LeanKit lane.cardStatus has only three values; In progress and In review both live under "started",
 # so lanes are disambiguated by title (see lane_matches_stage).
+#
+# "Intake" has no board lane of its own -- it is a pre-board holding stage (see resolve_issue_stage in
+# sync.py), never a lane-move target. Its entries here are deliberate no-ops (falsy status, empty hint
+# tuple) so resolve_lane_for_stage's STAGES-wide ambiguity walk, which indexes both dicts for every
+# stage in STAGES, stays byte-identical for every OTHER stage now that STAGES includes "Intake".
 STAGE_CARD_STATUS = {
+    "Intake": "notStarted",
     "Backlog": "notStarted",
     "Ready": "notStarted",
     "In progress": "started",
@@ -29,6 +39,7 @@ STAGE_CARD_STATUS = {
 }
 
 STAGE_TITLE_HINTS = {
+    "Intake": (),
     "Backlog": ("backlog", "not started", "todo"),
     "Ready": ("ready", "planned"),
     "In progress": ("in progress", "doing", "in flight"),
@@ -50,6 +61,10 @@ def issue_stage(issue: dict) -> str:
     """One issue's stage from its GitHub facts.
 
     issue = {"state": "OPEN"|"CLOSED", "labels": [str], "has_open_pr": bool, "assignees": [str]}
+
+    sync.resolve_issue_stage's "Intake" branch fires only on this function's bare-else fallback, so
+    that fallback must keep returning exactly "Backlog" -- never a different sentinel -- or that
+    branch silently stops matching.
     """
     if str(issue.get("state", "")).upper() == "CLOSED":
         return "Done"

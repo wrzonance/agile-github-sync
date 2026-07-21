@@ -11,10 +11,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agileplace import resolve_lane_for_stage  # noqa: E402
+from agileplace import resolve_lane_for_stage, stage_for_lane  # noqa: E402
 from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
-from stages import (epic_key_for_task, issue_stage,  # noqa: E402
+from stages import (STAGES, epic_key_for_task, issue_stage,  # noqa: E402
                     lane_matches_stage, normalize_status, title_key)
 from sync import (MS_PREFIX, _card_milestones, _child_connection_changes,  # noqa: E402
                   _epic_task_resolution, _protect_open_pr_stage, _reconciled_custom_id_index,
@@ -519,6 +519,109 @@ def test_stage_lane_map_unknown_lane_warns_by_default_but_not_when_quiet(capsys)
     assert "WARN" not in capsys.readouterr().out                  # quiet: internal checks stay silent
 
 
+# --- "Intake" stage-model addition is inert for unrelated stages ---------
+#
+# resolve_lane_for_stage's inference fallback walks *every* member of STAGES to veto
+# lane-title collisions (`for other in STAGES: lane_matches_stage(lane_title(lane), other)`).
+# The moment "Intake" becomes a STAGES member, that walk indexes STAGE_TITLE_HINTS["Intake"]
+# and (indirectly, via STAGE_CARD_STATUS) STAGE_CARD_STATUS["Intake"] for every unrelated-stage
+# resolution too -- so both dicts must carry inert no-op entries for "Intake" from the moment
+# it joins STAGES, or any other stage's inference KeyErrors. These tests pin resolve_lane_for_
+# stage's output as byte-identical with vs. without "Intake" present in STAGES, on both the
+# unmapped/inferred path (which walks STAGES) and the STAGE_LANE_MAP-mapped path (which doesn't).
+
+_STAGES_WITHOUT_INTAKE = tuple(s for s in STAGES if s != "Intake")
+_STAGES_WITH_INTAKE = ("Intake", *_STAGES_WITHOUT_INTAKE)
+
+
+def test_intake_membership_is_inert_for_unmapped_stage_resolution():
+    veto_lanes = [{"id": "review", "title": "Under Review", "cardStatus": "started"}]
+
+    with patch("agileplace.STAGES", _STAGES_WITHOUT_INTAKE):
+        veto_without_intake = resolve_lane_for_stage(veto_lanes, "In progress", "")
+    with patch("agileplace.STAGES", _STAGES_WITH_INTAKE):
+        veto_with_intake = resolve_lane_for_stage(veto_lanes, "In progress", "")
+    assert veto_with_intake == veto_without_intake
+
+    with patch("agileplace.STAGES", _STAGES_WITHOUT_INTAKE):
+        backlog_without_intake = resolve_lane_for_stage(_board_lanes(), "Backlog", "")
+    with patch("agileplace.STAGES", _STAGES_WITH_INTAKE):
+        backlog_with_intake = resolve_lane_for_stage(_board_lanes(), "Backlog", "")
+    assert backlog_with_intake == backlog_without_intake
+
+
+def test_intake_membership_is_inert_for_mapped_stage_resolution():
+    smap = {"Ready": ["New Requests", "Approved"]}
+
+    with patch("agileplace.STAGES", _STAGES_WITHOUT_INTAKE):
+        without_intake = resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
+    with patch("agileplace.STAGES", _STAGES_WITH_INTAKE):
+        with_intake = resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
+    assert with_intake == without_intake
+
+
+# --- stage_for_lane: reverse lane -> stage lookup (Task 2/8, issue #63) --
+#
+# stage_for_lane is the inverse of resolve_lane_for_stage's STAGE_LANE_MAP branch: given a card's
+# current lane, which stage (if any) claims that lane's title. Used by the Intake vetting latch to
+# tell "card already sitting in the Intake lane" apart from "card sitting somewhere else" without
+# ever guessing on ambiguity.
+
+def test_stage_for_lane_resolves_int_typed_lane_id():
+    # AgilePlace lane ids can arrive int-typed from the API while every call site passes lane_id as
+    # str (existing sync.py convention: str(card.get("laneId") or ...)). A naive {l["id"]: l}
+    # lookup would miss an int-typed lane id and mis-report a genuinely mapped lane as "unmapped" --
+    # this pins the str-coercion fix on both sides of the comparison.
+    lanes = [{"id": 42, "title": "New Requests"}]
+    smap = {"Intake": ["New Requests"]}
+    assert stage_for_lane("42", smap, lanes) == "Intake"
+
+
+def test_stage_for_lane_unknown_lane_id_is_none():
+    lanes = [{"id": "nr", "title": "New Requests"}]
+    smap = {"Intake": ["New Requests"]}
+    assert stage_for_lane("nonexistent", smap, lanes) is None
+
+
+def test_stage_for_lane_falsy_stage_map_is_none():
+    lanes = [{"id": "nr", "title": "New Requests"}]
+    assert stage_for_lane("nr", None, lanes) is None
+    assert stage_for_lane("nr", {}, lanes) is None
+
+
+def test_stage_for_lane_zero_matches_is_none():
+    lanes = [{"id": "nr", "title": "New Requests"}]
+    smap = {"Backlog": ["Some Other Lane"]}
+    assert stage_for_lane("nr", smap, lanes) is None
+
+
+def test_stage_for_lane_two_or_more_matches_is_none():
+    # The same lane title configured under two different stages is ambiguous -- spec collapses this
+    # to the same WARN+skip outcome as a zero-match miss, not a reopened/raised error.
+    lanes = [{"id": "nr", "title": "New Requests"}]
+    smap = {"Intake": ["New Requests"], "Backlog": ["New Requests"]}
+    assert stage_for_lane("nr", smap, lanes) is None
+
+
+def test_stage_for_lane_case_insensitive_exact_title_match():
+    lanes = [{"id": "nr", "title": "NEW REQUESTS"}]
+    smap = {"Intake": ["new requests"]}
+    assert stage_for_lane("nr", smap, lanes) == "Intake"
+
+
+def test_stage_for_lane_does_not_substring_match():
+    # Matches _mapped_lanes's exact-title semantics, not lane_matches_stage's substring semantics.
+    lanes = [{"id": "nr", "title": "New Requests For Review"}]
+    smap = {"Intake": ["New Requests"]}
+    assert stage_for_lane("nr", smap, lanes) is None
+
+
+def test_stage_for_lane_never_raises_on_malformed_lane():
+    lanes = [{"title": "No Id Lane"}, "not-a-dict", {"id": "nr", "title": "New Requests"}]
+    smap = {"Intake": ["New Requests"]}
+    assert stage_for_lane("nr", smap, lanes) == "Intake"
+
+
 # --- Projects v2 (Phase 1: Status source) --------------------------------
 
 def test_normalize_status():
@@ -578,15 +681,16 @@ def test_issue_card_title_strips_key_prefix():
 
 def test_resolve_issue_stage_prefers_project_status_then_labels():
     issue = {"url": "u1", "state": "OPEN", "labels": ["agent:in-progress"]}
-    assert resolve_issue_stage(issue, {"u1": "In review"}) == "In review"   # Project Status wins
-    assert resolve_issue_stage(issue, {}) == "In progress"                   # fallback: label
-    assert resolve_issue_stage({"url": "u2", "state": "OPEN", "labels": []}, {}) == "Backlog"
+    assert resolve_issue_stage(issue, {"u1": "In review"}, {}, None) == "In review"  # Status wins
+    assert resolve_issue_stage(issue, {}, {}, None) == "In progress"                 # fallback: label
+    assert resolve_issue_stage(
+        {"url": "u2", "state": "OPEN", "labels": []}, {}, {}, None) == "Backlog"
 
 
 def test_resolve_issue_stage_closed_beats_stale_project_status():
     issue = {"url": "u1", "state": "CLOSED", "labels": ["agent:in-progress"]}
 
-    assert resolve_issue_stage(issue, {"u1": "In progress"}) == "Done"
+    assert resolve_issue_stage(issue, {"u1": "In progress"}, {}, None) == "Done"
 
 
 def test_resolve_issue_stage_falls_back_to_labels_on_unrecognized_custom_status_option():
@@ -594,7 +698,7 @@ def test_resolve_issue_stage_falls_back_to_labels_on_unrecognized_custom_status_
     # stages must fall back to label/PR derivation exactly like having no Status at all -- it must
     # never be silently treated as an explicit "Backlog"/etc call.
     issue = {"url": "u1", "state": "OPEN", "labels": ["agent:in-progress"]}
-    assert resolve_issue_stage(issue, {"u1": "Triage"}) == "In progress"
+    assert resolve_issue_stage(issue, {"u1": "Triage"}, {}, None) == "In progress"
 
 
 def test_explicit_stage_status_none_when_missing_or_unrecognized():

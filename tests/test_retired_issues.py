@@ -105,7 +105,7 @@ def test_retired_issues_resolve_to_done_stage(monkeypatch):
     issues = ghkit.list_issues({})
     project_status = {issue["url"]: "Backlog" for issue in issues}
     stage_by_number = {
-        issue["number"]: sync.resolve_issue_stage(issue, project_status)
+        issue["number"]: sync.resolve_issue_stage(issue, project_status, {}, None)
         for issue in issues
     }
 

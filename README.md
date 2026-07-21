@@ -26,6 +26,15 @@ With `--apply`, each run:
    mass-move the board. Authoritative `NOT_PLANNED`/`DUPLICATE` retirement still moves an existing
    card to Done. New cards created during such a run are left laneless rather than fallback-laned; a
    later run lanes them normally once the read succeeds.
+   Optional two-state backlog: when `STAGE_LANE_MAP` maps the extra stage `Intake`, an open issue
+   that is off the Project board with no work signals holds in the Intake lane as an unvetted
+   request instead of falling back to Backlog. Vetting is a latch that fires from either side:
+   putting the issue on the board moves the card out of Intake as usual, and moving the card to any
+   other managed lane makes the sync add the issue to the Project with that lane's matching Status.
+   The latch only ever promotes -- it never removes board membership and never drags a card back to
+   the Intake lane. For this model to mean anything, the Project's "auto-add new issues" workflow
+   must stay OFF (auto-add would instantly vet everything). Without an `Intake` mapping, none of
+   this exists and Backlog behaves classically.
 3. Mirrors sub-issues as parent/child card connections. Existing children are read per epic through
    the paginated AgilePlace connections endpoint. Links are removed only when both the native GitHub
    sub-issue snapshot and the AgilePlace child snapshot are authoritative; either read failing makes
