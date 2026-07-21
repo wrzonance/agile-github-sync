@@ -78,9 +78,13 @@ def test_every_retired_card_remains_included():
 
 
 def test_card_without_id_is_excluded():
+    """Fixtures use a truthy-but-id-less card ({"title": ...}, not {}) on both sides: an
+    empty dict is itself falsy, so it would short-circuit the `card and card.get("id")`
+    guard before ever reaching the `.get("id")` check it's meant to pin, letting a mutant
+    that drops that check pass unnoticed."""
     issue = _issue(1, "A", "u1")
-    card_by_url = {"u1": {}}  # matched but no id yet (plan-only shape without id key)
-    retired_card_by_url = {"u9": {}}
+    card_by_url = {"u1": {"title": "x"}}  # matched but no id yet (plan-only shape without id key)
+    retired_card_by_url = {"u9": {"title": "y"}}
     result = _removal_authority_card_ids([issue], card_by_url, retired_card_by_url)
     assert result == set()
 
