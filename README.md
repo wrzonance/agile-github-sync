@@ -13,7 +13,7 @@ With `--apply`, each run:
 1. Creates a card for every active issue, epics and tasks alike. Cards are matched to issues by the
    card's external-link URL, with the card's customId as a fallback. Issues closed as
    `NOT_PLANNED`/`DUPLICATE` never get new cards; if one already has a URL-matched card, the run
-   retires it to Done and clears its stale blocked state without syncing its metadata back to GitHub.
+   retires it to Done without syncing its metadata back to GitHub.
 2. Moves each card to the lane for its stage. For open issues, the stage is the issue's Status on
    the GitHub Projects v2 board (Backlog / Ready / In progress / In review / Done), which is the
    source of truth. A closed issue always resolves to Done, even when its Project item retains a
@@ -30,21 +30,23 @@ With `--apply`, each run:
    the paginated AgilePlace connections endpoint. Links are removed only when both the native GitHub
    sub-issue snapshot and the AgilePlace child snapshot are authoritative; either read failing makes
    that epic add-only for the run. LeanKit then rolls child progress up to the parent on its own.
-4. Marks a card blocked while any issue blocking it is not Done, and clears the blocked state
-   otherwise. A `NOT_PLANNED`/`DUPLICATE` blocker is known Done, so it cannot block dependents
-   forever; a blocker missing from the complete issue snapshot remains incomplete (fail-closed).
+4. Mirrors GitHub blocked-by relationships as native AgilePlace card dependencies (blocker ->
+   blocked, Finish-to-Start), every edge included -- a Done or retired blocker's edge is structural,
+   and AgilePlace's own dependency health display shows satisfaction. Reconciliation is authoritative
+   only between two sync-managed cards, and a failed dependency read skips that card for the run.
+   The card's Blocked flag belongs to humans: the sync never writes `/isBlocked` or `/blockReason`.
 5. Reconciles metadata and dates in both directions using a three-way merge against
    `.sync-state.json`. GitHub labels and milestone sync with card tags, and removals carry over in
    both directions. The Project's Start and Target date fields sync with the card's `plannedStart`
    and `plannedFinish`; if both sides changed the same date, the AgilePlace value wins.
 
-Field updates queued for an existing card -- lane, tags, dates, and blocked state -- are combined
+Field updates queued for an existing card -- lane, tags, and dates -- are combined
 into at most one versioned PATCH per run, so a stale write fails instead of silently overwriting
 someone else's edit. A version-less card is refetched once; the PATCH proceeds only if every queued
 field still matches that fresh snapshot, and otherwise the run aborts before saving merge state.
-Card creation and hierarchy connections use separate POST/DELETE requests, and GitHub-side writes
-are issued separately. Dry run is the default: `python sync.py` prints every planned action and
-writes nothing.
+Card creation, hierarchy connections, and dependencies use separate POST/DELETE requests, and
+GitHub-side writes are issued separately. Dry run is the default: `python sync.py` prints every
+planned action and writes nothing.
 
 > Before the first live run: `API-VALIDATION.md` records which API shapes are confirmed and which
 > still need a one-time check against the live APIs (the AgilePlace connection, blocked-state, tag,
@@ -59,9 +61,11 @@ AgilePlace *write* shapes. It previews the configured board first -- title, lane
 currently on it -- and asks for typed confirmation before writing anything. It then creates two
 clearly-marked throwaway cards (custom ids carry a fresh per-run suffix so they can never collide
 with, or be adopted by, a real sync run), round-trips a tag add/remove, sets and clears blocked
-state and planned dates, adds an external link to a bare card and reads it back, connects and
-disconnects them as parent/child, sends a deliberately stale-version PATCH (which the server must
-reject), and deletes both cards again, confirming each is gone. Every step is printed,
+state and planned dates (the blocked round-trip validates API surface only -- the sync itself never
+writes the flag), adds an external link to a bare card and reads it back, connects and disconnects
+them as parent/child, round-trips a dependency create/read/delete, sends a deliberately
+stale-version PATCH (which the server must reject), and deletes both cards again, confirming each
+is gone. Every step is printed,
 and a rejected write shows the server's full, untruncated response body so a wrong shape is
 diagnosable from the console. The final summary maps one-to-one onto the `[live-check]` items in
 `API-VALIDATION.md`. `--yes` skips the prompt. GitHub is never touched and `.sync-state.json` is
@@ -115,7 +119,7 @@ The account running the schedule needs `python` and `gh` on PATH, `gh auth login
 
 - `sync.py`: orchestration. Creates, moves, connects, and blocks cards; reconciles tags and dates;
   sends at most one field-update PATCH per existing card.
-- `stages.py`: pure stage derivation, blocked-reason text, and lane/title matching (unit-tested).
+- `stages.py`: pure stage derivation and lane/title matching (unit-tested).
 - `reconcile.py`: pure three-way set and single-value merges (unit-tested).
 - `ghkit.py`: GitHub via the `gh` CLI (issues, sub-issues, open-PR and blocked-by reads,
   label/milestone writes).

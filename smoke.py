@@ -160,7 +160,9 @@ def _date_matches(value, expected: str | None) -> bool:
 
 
 def _check_blocked_and_dates(cfg: dict, parent_id: str, results: list) -> None:
-    """Steps 5-6: blocked-state and planned-date writes -- the sync's remaining PATCH shapes."""
+    """Steps 5-6: blocked-state and planned-date write round-trips. Planned dates are a sync
+    write shape; the blocked-state ops validate API surface only -- the sync never writes the
+    flag (issue #57 Phase 2)."""
     _step(5, "set blocked state + planned dates in one versioned PATCH")
     fresh = agileplace.get_card(cfg, parent_id)
     ops = [*agileplace.ops_blocked(True, "smoke block"),

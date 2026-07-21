@@ -5,8 +5,8 @@ board + the GitHub Projects v2 Status, with no manifest/issue-map.
 Per run: ensure a card per active issue (matched by URL, then customId); retire existing cards for
 NOT_PLANNED/DUPLICATE issues; move each active card to the lane for its stage (Projects v2 Status =
 source of truth, label/PR fallback); mirror sub-issues as parent/child connections; mirror blocked-by
-as the card Blocked state; bidirectionally reconcile labels/milestone <-> tags and planned dates <->
-Project date fields. Every mutation to one card is batched into a single versioned PATCH (optimistic
+as native card dependencies (the Blocked flag is human-owned -- never written by the sync);
+bidirectionally reconcile labels/milestone <-> tags and planned dates <-> Project date fields. Every mutation to one card is batched into a single versioned PATCH (optimistic
 concurrency).
 
 DRY RUN by default. State is target-scoped, issue-URL-keyed, records each issue's card id (so a
@@ -271,7 +271,7 @@ def _protect_open_pr_stage(stage: str, current_lane_id: str, lanes: list, milest
 
 def _retire_card(issue: dict, card: dict, lanes: list, stage_map: dict | None,
                  apply: bool, queue) -> None:
-    """Move one URL-matched retired issue card to Done and clear its stale blocked state."""
+    """Move one URL-matched retired issue card to Done (lane only -- flags are human-owned)."""
     key = issue_custom_id(issue)
     reason = issue["state_reason"]
     if not card.get("id"):
