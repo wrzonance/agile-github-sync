@@ -208,3 +208,27 @@ rejection, and `DELETE` + 404 cleanup.
 
 With that, every AgilePlace `[live-check]` item in this file is retired -- each one now has a
 recorded live outcome.
+
+## Dependencies API discovery (2026-07-21, issue #57)
+
+The io v2 public docs do not document the Dependencies feature's endpoints, so
+`probe_dependencies.py` (strictly read-only; the GET-only invariant is test-pinned) probed the
+production tenant:
+
+- **Read endpoint confirmed: `GET /io/card/{cardId}/dependency` -> HTTP 200 `{"dependencies":[]}`.**
+  Singular path, matching the documented `connection/children` singular pattern.
+- All other candidates returned a clean 404: `card/{cardId}/dependencies`,
+  `dependencies?cardId=`, `dependency?cardId=`, `board/{boardId}/dependencies`,
+  `card/{cardId}/connection/dependencies`. The documented `connection/children` control endpoint
+  answered 200 in the same run, so those 404s are real misses, not plumbing failures.
+- The single-card GET embeds no dependency data: none of its 49 top-level keys is dependency-ish
+  (it does embed `parentCards` and `connectedCardStats` for the connections feature).
+
+Still `[live-check]` pending for Phase 0b (write probe) / Phase 1:
+
+1. **Populated entry shape.** Every board's `dependencies` array was empty at probe time. Create one
+   dependency in the UI, then re-run `probe_dependencies.py --card-id <that card>` to record what a
+   dependency object carries (field names, type enum values, ids).
+2. **Write endpoint and body.** Unknown -- plausibly `POST card/{cardId}/dependency`, but nothing is
+   built on that guess. Capture the UI's create request via browser devtools (method, URL, JSON
+   body) while creating the dependency above, and record it here.
