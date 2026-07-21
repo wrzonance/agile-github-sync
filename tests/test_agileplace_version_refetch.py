@@ -113,3 +113,98 @@ def test_patch_card_aborts_after_double_miss_without_sending_patch(capsys):
     warn_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
     assert len(warn_lines) == 1
     assert "42" in warn_lines[0]
+
+
+# --- issue #72: one refetch-validate-retry on optimistic-concurrency conflict -----
+
+import email.message  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
+
+
+class _Response:
+    def __init__(self, payload: object):
+        self._payload = json.dumps(payload).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+def _http_error(url: str, code: int, body: str) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(url, code, "error", email.message.Message(),
+                                  io.BytesIO(body.encode()))
+
+
+class _SequencedTenant:
+    """Scripted urlopen: each PATCH consumes the next entry of `patch_results`
+    (an int = raise that HTTP error; a dict = respond with it); GETs serve `fresh`."""
+
+    def __init__(self, fresh: dict, patch_results: list):
+        self.fresh = fresh
+        self.patch_results = list(patch_results)
+        self.patch_headers: list = []
+
+    def urlopen(self, req, timeout=None):
+        if req.get_method() == "GET":
+            return _Response(self.fresh)
+        self.patch_headers.append({k.lower(): v for k, v in req.header_items()})
+        result = self.patch_results.pop(0)
+        if isinstance(result, int):
+            raise _http_error(req.full_url, result, '{"message": "conflict"}')
+        return _Response(result)
+
+
+def _snapshot_card():
+    return {"id": "C1", "version": "12", "laneId": "L_OLD",
+            "plannedStart": None, "plannedFinish": None}
+
+
+_LANE_OPS = [{"op": "replace", "path": "/laneId", "value": "L_NEW"}]
+
+
+def test_unrelated_version_bump_retries_once_with_fresh_version(monkeypatch, capsys):
+    """The live 2026-07-21 failure mode: the card's version ticked mid-run but the targeted
+    field (/laneId) is untouched on the server -- ONE retry with the fresh version succeeds."""
+    fresh = {**_snapshot_card(), "version": "13"}          # laneId unchanged -> unrelated bump
+    tenant = _SequencedTenant(fresh, [428, {"id": "C1", "version": "14"}])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    result = patch_card(CFG, True, _snapshot_card(), _LANE_OPS)
+    assert result == {"id": "C1", "version": "14"}
+    assert [h.get("x-lk-resource-version") for h in tenant.patch_headers] == ["12", "13"]
+    assert "retrying the PATCH once" in capsys.readouterr().out
+
+
+def test_targeted_field_changed_on_refetch_aborts_without_retry(monkeypatch):
+    """A human really moved the card meanwhile: /laneId differs from the run's snapshot, so the
+    conflict re-raises and NO second PATCH is attempted -- the #8 guard's authority is intact."""
+    fresh = {**_snapshot_card(), "version": "13", "laneId": "L_HUMAN"}
+    tenant = _SequencedTenant(fresh, [428])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    with pytest.raises(SystemExit):
+        patch_card(CFG, True, _snapshot_card(), _LANE_OPS)
+    assert len(tenant.patch_headers) == 1                  # no retry PATCH went out
+
+
+def test_second_conflict_propagates_never_a_retry_loop(monkeypatch):
+    fresh = {**_snapshot_card(), "version": "13"}
+    tenant = _SequencedTenant(fresh, [428, 428])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    with pytest.raises(SystemExit):
+        patch_card(CFG, True, _snapshot_card(), _LANE_OPS)
+    assert len(tenant.patch_headers) == 2                  # exactly two attempts, then done
+
+
+def test_non_conflict_failures_never_trigger_the_retry_path(monkeypatch):
+    tenant = _SequencedTenant(_snapshot_card(), [422])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    with pytest.raises(SystemExit):
+        patch_card(CFG, True, _snapshot_card(), _LANE_OPS)
+    assert len(tenant.patch_headers) == 1                  # 422 = shape bug: fail loud, no retry

@@ -555,8 +555,40 @@ def patch_card(cfg: dict, apply: bool, card: dict, ops: list[dict], note: str = 
             f"AgilePlace card {card.get('id', '<unknown>')} PATCH aborted after version refetch "
             "validation failed -- refusing to save sync state"
         )
-    return mutate(cfg, apply, "PATCH", _card_path(versioned["id"]), body=ops,
-                  headers=_version_headers(versioned), note=note or f"patch card {versioned['id']} ({len(ops)} ops)")
+    note = note or f"patch card {versioned['id']} ({len(ops)} ops)"
+    try:
+        return mutate(cfg, apply, "PATCH", _card_path(versioned["id"]), body=ops,
+                      headers=_version_headers(versioned), note=note)
+    except SystemExit as exc:
+        if getattr(exc, "http_status", None) not in (409, 428):
+            raise
+        retried = _conflict_retry(cfg, apply, card, str(versioned["id"]), ops, note)
+        if retried is None:
+            raise
+        return retried
+
+
+def _conflict_retry(cfg: dict, apply: bool, original: dict, card_id: str, ops: list[dict],
+                    note: str) -> dict | None:
+    """ONE refetch-validate-retry after an optimistic-concurrency rejection (issue #72 -- the
+    refetch-and-recompute clause API-VALIDATION's live-check 3 reserved for when conflicts proved
+    noisy; long runs made unrelated version bumps routine). Returns the retried PATCH's result, or
+    None when the retry must not happen -- refetch failed, identity mismatched, or a field targeted
+    by `ops` genuinely changed since the run's snapshot -- in which case the caller re-raises the
+    original conflict: the #8 guard keeps full authority over real concurrent edits. The retried
+    mutate may itself conflict again; that second SystemExit propagates (never a retry loop)."""
+    try:
+        fresh = get_card(cfg, card_id)
+    except SystemExit:
+        return None
+    if (not _has_usable_version(fresh.get("version"))
+            or fresh.get("id") is None or str(fresh["id"]) != card_id
+            or _changed_patch_paths(original, fresh, ops)):
+        return None
+    print(f"note  card {card_id} version bumped by an unrelated change -- retrying the PATCH once "
+          "with the fresh version")
+    return mutate(cfg, apply, "PATCH", _card_path(card_id), body=ops,
+                  headers=_version_headers(fresh), note=note)
 
 
 def _has_usable_version(version) -> bool:
