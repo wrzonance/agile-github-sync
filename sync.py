@@ -115,8 +115,24 @@ def _dependency_changes(desired: set[str], current: set[str],
     return sorted(desired - current), sorted((current & managed) - desired)
 
 
+def _blocker_cards(by_number: dict, card_for, retired_issues: list,
+                   retired_card_by_url: dict) -> dict:
+    """Issue number -> card for every issue that can act as a blocker -- retired
+    (NOT_PLANNED/DUPLICATE) issues included, via their URL-owned cards. A retired Done
+    blocker's edge is structural: resolving blockers through active issues only would drop
+    it from the desired set while its card stayed in the managed set, deleting the valid
+    native dependency as stale on every run."""
+    cards = {number: card for number, issue in by_number.items()
+             if (card := card_for(issue)) and card.get("id")}
+    for issue in retired_issues:
+        card = retired_card_by_url.get(issue["url"])
+        if card and card.get("id"):
+            cards.setdefault(issue["number"], card)
+    return cards
+
+
 def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by: dict,
-                      by_number: dict, card_for, managed_card_ids: set[str]) -> None:
+                      blocker_card_by_number: dict, card_for, managed_card_ids: set[str]) -> None:
     """Mirror GitHub blocked-by edges as native AgilePlace dependencies (issue #57).
 
     EVERY edge is mirrored, including edges whose blocker is Done -- the edge is structural, and
@@ -128,10 +144,9 @@ def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by:
         card = card_for(issue)
         if not card or not card.get("id"):
             continue
-        desired = {str(blocker_card["id"])
+        desired = {str(blocker_card_by_number[number]["id"])
                    for number in blocked_by.get(issue["number"], [])
-                   if (blocker := by_number.get(number))
-                   and (blocker_card := card_for(blocker)) and blocker_card.get("id")}
+                   if number in blocker_card_by_number}
         cid = str(card["id"])
         key = issue_custom_id(issue)
         if card.get("_planOnly"):
@@ -704,9 +719,11 @@ def main() -> None:
                 queue(card, agileplace.ops_blocked(want, reason), f"{'block' if want else 'unblock'}")
                 key = issue_custom_id(issue)
                 print(f"{'block  ' if want else 'unblock'} [{key}]{': ' + reason if reason else ''}")
-        # 4b) the same edges as native dependencies (issue #57) -- all edges, managed pairs only
-        sync_dependencies(cfg, apply, syncable_issues, blocked_by, by_number, card_for,
-                          managed_card_ids)
+        # 4b) the same edges as native dependencies (issue #57) -- all edges, managed pairs only,
+        # with retired Done blockers resolving through their URL-owned cards
+        sync_dependencies(cfg, apply, syncable_issues, blocked_by,
+                          _blocker_cards(by_number, card_for, retired_issues, retired_card_by_url),
+                          card_for, managed_card_ids)
 
     # 5) flush: ONE versioned PATCH per card (optimistic concurrency)
     for entry in card_ops.values():

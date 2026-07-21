@@ -78,6 +78,7 @@ def _run_hierarchy(tmp_path: Path, monkeypatch, issues: list[dict], cards: list[
     monkeypatch.setattr(agileplace, "board_layout", lambda _cfg: [])
     monkeypatch.setattr(agileplace, "list_cards", lambda _cfg: cards)
     monkeypatch.setattr(agileplace, "card_child_ids", child_reads)
+    monkeypatch.setattr(agileplace, "card_dependencies", lambda *_args: [])
     monkeypatch.setattr(
         agileplace,
         "create_card",

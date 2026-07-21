@@ -47,15 +47,19 @@ def _harness(cards):
     return lambda issue: cards.get(issue["number"])
 
 
-def _run(issues, blocked_by, cards, managed, reads):
-    """Run sync_dependencies with agileplace fully faked; return recorded write calls."""
+def _run(issues, blocked_by, cards, managed, reads, blocker_cards=None):
+    """Run sync_dependencies with agileplace fully faked; return recorded write calls.
+    blocker_cards defaults to every issue's card (the _blocker_cards contract); pass it
+    explicitly to model retired blockers that resolve outside the active-issue set."""
     calls = {"create": [], "delete": [], "reads": []}
 
     def fake_read(cfg, cid):
         calls["reads"].append(cid)
         return reads.get(cid)
 
-    by_number = {i["number"]: i for i in issues}
+    if blocker_cards is None:
+        blocker_cards = {i["number"]: cards[i["number"]]
+                         for i in issues if cards.get(i["number"])}
     with patch("sync.agileplace.card_dependencies", side_effect=fake_read), \
          patch("sync.agileplace.incoming_dependency_ids",
                side_effect=lambda entries: {e["cardId"] for e in entries
@@ -64,7 +68,7 @@ def _run(issues, blocked_by, cards, managed, reads):
                side_effect=lambda cfg, apply, cid, ids: calls["create"].append((cid, sorted(ids)))), \
          patch("sync.agileplace.delete_dependencies",
                side_effect=lambda cfg, apply, cid, ids: calls["delete"].append((cid, sorted(ids)))):
-        sync_dependencies({}, True, issues, blocked_by, by_number, _harness(cards), managed)
+        sync_dependencies({}, True, issues, blocked_by, blocker_cards, _harness(cards), managed)
     return calls
 
 
@@ -109,6 +113,30 @@ def test_blocker_without_a_card_is_excluded_from_desired():
     calls = _run(issues, {1: [2]}, cards, {"C1"}, reads={"C1": []})
     assert calls["create"] == []
     assert calls["delete"] == []
+
+
+def test_edge_to_retired_done_blocker_is_preserved_not_deleted():
+    """P1 from the gpt-5.6-sol adversarial review: an active issue blocked by a RETIRED
+    (NOT_PLANNED/DUPLICATE) issue whose URL-owned card survives must keep its native
+    dependency. Blockers resolving through active issues only dropped the edge from
+    `desired` while the retired card stayed managed -- deleting the valid dependency as
+    stale on every run."""
+    issues = [_issue(1, "A")]                      # only the active issue is syncable
+    cards = {1: {"id": "C1"}}
+    blocker_cards = {1: {"id": "C1"}, 9: {"id": "R9"}}   # 9 = retired blocker, card R9
+    reads = {"C1": [{"direction": "incoming", "cardId": "R9"}]}  # edge already on the board
+    calls = _run(issues, {1: [9]}, cards, {"C1", "R9"}, reads, blocker_cards=blocker_cards)
+    assert calls["delete"] == []   # the edge is desired -- NOT stale
+    assert calls["create"] == []   # and already present -- nothing to add
+
+
+def test_sync_blocker_cards_helper_includes_retired_url_owned_cards():
+    from sync import _blocker_cards
+    by_number = {1: {"number": 1, "url": "u1"}}
+    retired = [{"number": 9, "url": "u9"}, {"number": 8, "url": "u8-no-card"}]
+    resolved = _blocker_cards(by_number, lambda i: {"id": f"C{i['number']}"},
+                              retired, {"u9": {"id": "R9"}})
+    assert resolved == {1: {"id": "C1"}, 9: {"id": "R9"}}  # 8 has no card -> excluded
 
 
 def test_every_edge_is_mirrored_not_only_incomplete_blockers():

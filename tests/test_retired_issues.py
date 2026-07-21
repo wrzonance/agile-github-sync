@@ -66,6 +66,7 @@ def _run_main(tmp_path, monkeypatch, raw_issues, cards, blocked_by=None, lanes=(
     stack.enter_context(patch("ghproject.hydrate_item_dates", return_value=project_snapshot))
     stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes)))
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))
+    stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
     create_card = stack.enter_context(patch("agileplace.create_card", return_value={}))
     patch_card = stack.enter_context(patch("agileplace.patch_card"))
     with stack, patch("sync.env_config", return_value=_config(tmp_path)), \

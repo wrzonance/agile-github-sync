@@ -702,11 +702,21 @@ def card_dependencies(cfg: dict, card_id: str) -> list[dict] | None:
         print(f"WARN  card {card_id} dependency read FAILED: {err} -- skipping dependency reconciliation")
         return None
     entries = data.get("dependencies") if isinstance(data, dict) else None
-    if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+    # Reject anything short of a complete, well-formed snapshot: a pageMeta member would mean
+    # the server started paginating (entries could be missing -> re-create -> 409 abort), and an
+    # entry without a usable direction/cardId hides state the diff would then act against.
+    if (not isinstance(data, dict) or "pageMeta" in data or not isinstance(entries, list)
+            or any(not _valid_dependency_entry(e) for e in entries)):
         print(f"WARN  card {card_id} dependency read returned an unrecognized shape -- "
               "skipping dependency reconciliation")
         return None
     return entries
+
+
+def _valid_dependency_entry(entry) -> bool:
+    return (isinstance(entry, dict)
+            and entry.get("direction") in {"incoming", "outgoing"}
+            and bool(entry.get("cardId")))
 
 
 def incoming_dependency_ids(entries: list[dict]) -> set[str]:

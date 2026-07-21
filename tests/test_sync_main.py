@@ -90,6 +90,7 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes_return)))
     cards = [card] if existing_cards is _UNSET else list(existing_cards)
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))
+    stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
     patch_card_mock = stack.enter_context(patch("agileplace.patch_card"))
     create_card_mock = stack.enter_context(patch("agileplace.create_card", return_value={}))
     return stack, run_mock, patch_card_mock, create_card_mock

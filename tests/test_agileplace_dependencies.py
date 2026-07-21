@@ -82,6 +82,13 @@ def test_card_dependencies_http_failure_returns_none_with_warn(monkeypatch, caps
     {"dependencies": [{"ok": 1}, 7]},  # non-dict entry
     {"unexpected": []},                # missing key
     [],                                # not even an object
+    # gpt-5.6-sol review P2: an incomplete snapshot acted on authoritatively re-creates an
+    # existing pair -> the live 409 aborts the run. Entries must carry a usable
+    # direction/cardId, and a paginating response can no longer be assumed complete.
+    {"dependencies": [{"cardId": "B1"}]},                          # no direction
+    {"dependencies": [{"direction": "incoming"}]},                 # no cardId
+    {"dependencies": [{"direction": "sideways", "cardId": "B1"}]}, # unknown direction
+    {"dependencies": [], "pageMeta": {"totalRecords": 7}},         # server began paginating
 ])
 def test_card_dependencies_malformed_shapes_return_none(monkeypatch, capsys, payload):
     _serve(monkeypatch, payload)
