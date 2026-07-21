@@ -210,6 +210,33 @@ def resolve_lane_for_stage(lanes: list, stage: str, release: str, stage_map: dic
     return None, set()  # none, or still ambiguous -> don't move
 
 
+def stage_for_lane(lane_id: str, stage_map: dict[str, list[str]] | None, lanes: list) -> str | None:
+    """Reverse of the STAGE_LANE_MAP lookup above: which single stage claims a card's *current*
+    lane, or None. Pure, no I/O; never raises.
+
+    Coerces both `lane_id` and every lane's `id` to str before comparison -- lane ids fetched from
+    AgilePlace can be int or str depending on source, while call sites always pass lane_id as
+    str(card.get("laneId") or ...) (existing sync.py convention). A naive dict-keyed lookup would
+    silently return None for an int-typed lane id and get mistaken for a genuinely unmapped lane,
+    same idiom as resolve_lane_for_stage/_protect_open_pr_stage's str(...) coercion.
+
+    Resolves lane_id -> lane dict (fail closed -> None if unknown after str-coercion), then the
+    single stage in stage_map whose title list contains that lane's title (case-insensitive exact
+    match, matching _mapped_lanes's semantics -- not lane_matches_stage's substring semantics).
+    Returns None on: unknown lane_id, falsy stage_map, zero matches, or 2+ matches -- spec collapses
+    both ambiguous cases to the same WARN+skip outcome the caller applies, not a reopened error."""
+    if not stage_map:
+        return None
+    by_id = {str(lane["id"]): lane for lane in _lanes_with_ids(lanes)}
+    lane = by_id.get(str(lane_id))
+    if lane is None:
+        return None
+    title = lane_title(lane).lower()
+    matches = [stage for stage, titles in stage_map.items()
+               if any((t or "").strip().lower() == title for t in titles)]
+    return matches[0] if len(matches) == 1 else None
+
+
 # --- cards (reads) --------------------------------------------------------
 
 def _raise_if_before_total(offset: int, expected_total: int | None) -> None:

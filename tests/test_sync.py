@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agileplace import resolve_lane_for_stage  # noqa: E402
+from agileplace import resolve_lane_for_stage, stage_for_lane  # noqa: E402
 from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
 from stages import (STAGES, epic_key_for_task, issue_stage,  # noqa: E402
@@ -558,6 +558,68 @@ def test_intake_membership_is_inert_for_mapped_stage_resolution():
     with patch("agileplace.STAGES", _STAGES_WITH_INTAKE):
         with_intake = resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
     assert with_intake == without_intake
+
+
+# --- stage_for_lane: reverse lane -> stage lookup (Task 2/8, issue #63) --
+#
+# stage_for_lane is the inverse of resolve_lane_for_stage's STAGE_LANE_MAP branch: given a card's
+# current lane, which stage (if any) claims that lane's title. Used by the Intake vetting latch to
+# tell "card already sitting in the Intake lane" apart from "card sitting somewhere else" without
+# ever guessing on ambiguity.
+
+def test_stage_for_lane_resolves_int_typed_lane_id():
+    # AgilePlace lane ids can arrive int-typed from the API while every call site passes lane_id as
+    # str (existing sync.py convention: str(card.get("laneId") or ...)). A naive {l["id"]: l}
+    # lookup would miss an int-typed lane id and mis-report a genuinely mapped lane as "unmapped" --
+    # this pins the str-coercion fix on both sides of the comparison.
+    lanes = [{"id": 42, "title": "New Requests"}]
+    smap = {"Intake": ["New Requests"]}
+    assert stage_for_lane("42", smap, lanes) == "Intake"
+
+
+def test_stage_for_lane_unknown_lane_id_is_none():
+    lanes = [{"id": "nr", "title": "New Requests"}]
+    smap = {"Intake": ["New Requests"]}
+    assert stage_for_lane("nonexistent", smap, lanes) is None
+
+
+def test_stage_for_lane_falsy_stage_map_is_none():
+    lanes = [{"id": "nr", "title": "New Requests"}]
+    assert stage_for_lane("nr", None, lanes) is None
+    assert stage_for_lane("nr", {}, lanes) is None
+
+
+def test_stage_for_lane_zero_matches_is_none():
+    lanes = [{"id": "nr", "title": "New Requests"}]
+    smap = {"Backlog": ["Some Other Lane"]}
+    assert stage_for_lane("nr", smap, lanes) is None
+
+
+def test_stage_for_lane_two_or_more_matches_is_none():
+    # The same lane title configured under two different stages is ambiguous -- spec collapses this
+    # to the same WARN+skip outcome as a zero-match miss, not a reopened/raised error.
+    lanes = [{"id": "nr", "title": "New Requests"}]
+    smap = {"Intake": ["New Requests"], "Backlog": ["New Requests"]}
+    assert stage_for_lane("nr", smap, lanes) is None
+
+
+def test_stage_for_lane_case_insensitive_exact_title_match():
+    lanes = [{"id": "nr", "title": "NEW REQUESTS"}]
+    smap = {"Intake": ["new requests"]}
+    assert stage_for_lane("nr", smap, lanes) == "Intake"
+
+
+def test_stage_for_lane_does_not_substring_match():
+    # Matches _mapped_lanes's exact-title semantics, not lane_matches_stage's substring semantics.
+    lanes = [{"id": "nr", "title": "New Requests For Review"}]
+    smap = {"Intake": ["New Requests"]}
+    assert stage_for_lane("nr", smap, lanes) is None
+
+
+def test_stage_for_lane_never_raises_on_malformed_lane():
+    lanes = [{"title": "No Id Lane"}, "not-a-dict", {"id": "nr", "title": "New Requests"}]
+    smap = {"Intake": ["New Requests"]}
+    assert stage_for_lane("nr", smap, lanes) == "Intake"
 
 
 # --- Projects v2 (Phase 1: Status source) --------------------------------
