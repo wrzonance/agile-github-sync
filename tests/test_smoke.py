@@ -43,11 +43,9 @@ class FakeTenant:
     """Minimal stateful AgilePlace io v2 double for the whole smoke sequence."""
 
     def __init__(self, *, accept_stale: bool = False, fail_child_create_body: str | None = None,
-                 create_returns_version: bool = True, ignore_external_link: bool = False,
-                 ignore_tag_add: bool = False):
+                 ignore_external_link: bool = False, ignore_tag_add: bool = False):
         self.accept_stale = accept_stale
         self.fail_child_create_body = fail_child_create_body
-        self.create_returns_version = create_returns_version
         self.ignore_external_link = ignore_external_link
         self.ignore_tag_add = ignore_tag_add
         self.created_custom_ids: list[str] = []
@@ -119,10 +117,10 @@ class FakeTenant:
         if "externalLink" in body:
             card["externalLink"] = body["externalLink"]
         self.cards[card_id] = card
-        response = {"id": card_id, **body}
-        if self.create_returns_version:
-            response["version"] = "1"
-        return _Response(response)
+        # Live create responses are SPARSE: the new card id only -- no version and no
+        # customId/laneId echo (validated live 2026-07-21, issue #55). The tenant still
+        # persists the full card, which the single-card GET serves back.
+        return _Response({"id": card_id})
 
     def _patch(self, req, card_id: str, ops: list):
         card = self.cards[card_id]
@@ -307,8 +305,9 @@ def test_tag_add_never_visible_still_summarizes_and_cleans_up(tenant_env, capsys
 
 def test_versionless_create_response_is_informational_not_a_failure(tenant_env, capsys):
     """Live tenants return no version on create (confirmed 2026-07-20); the sync's
-    refetch-before-PATCH path handles that, so smoke must report the fact without failing."""
-    tenant_env(FakeTenant(create_returns_version=False))
+    refetch-before-PATCH path handles that, so smoke must report the fact without failing.
+    The default double is sparse for the same reason -- this pins what it reports."""
+    tenant_env(FakeTenant())
 
     assert smoke.main([]) == 0
 
