@@ -286,3 +286,19 @@ delete -> empty read all behaved as coded. Duplicate create is REJECTED -- **HTT
 idempotent. The sync's diff-before-write never re-creates an existing pair, and its fail-closed
 skip on unknown reads is what keeps a blind re-create (and its 409 SystemExit) impossible. The
 offline doubles mirror the 409. No dependency `[live-check]` remains open.
+
+## Vetting-latch gh writes (issue #63) -- `[live-check]` pending
+
+The Intake latch introduces the sync's first Project writes: `gh project item-add --url` and
+`item-edit --single-select-option-id` (both shapes used successfully by init `05` on 2026-07-18;
+`set_item_status` resolves field/option ids through the same `field-list` reads the date sync
+already trusts). Two behaviors remain `[live-check]` pending:
+
+1. **`item-add` idempotency on an already-present issue.** The code treats "already present" as
+   success either way, so this is fact-finding. A live probe was deliberately NOT run during
+   implementation -- it would have written to the production Project board without explicit
+   authorization (the implementation agent's attempt was correctly refused on exactly those
+   grounds). The latch's first real promotion confirms the behavior; record the outcome here.
+2. **Status write on a just-added item** (add -> immediate `item-edit` in one run). The failure
+   path (item boarded Status-less) is handled and test-pinned; the happy path awaits the same
+   first real promotion.
