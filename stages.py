@@ -85,15 +85,6 @@ def title_key(title: str) -> str | None:
     return None
 
 
-def blocked_reason(blockers: list[int], stage_by_number: dict) -> str | None:
-    """A card is Blocked while any of its GitHub blocked-by issues isn't Done. Returns the reason string
-    (naming the incomplete blockers) or None when nothing incomplete blocks it. Pure -- unit-tested."""
-    incomplete = sorted(b for b in blockers if stage_by_number.get(b) != "Done")
-    if not incomplete:
-        return None
-    return "Blocked by " + ", ".join(f"#{b}" for b in incomplete)
-
-
 def epic_key_for_task(task_key: str) -> str | None:
     """Convention fallback used only when native sub-issues are unavailable: task key '0C2' -> epic
     key 'EP-0C' (strip the trailing task number)."""

@@ -91,12 +91,21 @@ cards) confirms read and write shapes.
   the offline fake tenant grows dependency endpoints mirroring the CONFIRMED
   shapes only.
 
-## Phase 2 -- Blocked-flag retirement (separate, later decision)
+## Phase 2 -- Blocked-flag retirement (decided 2026-07-21)
 
-After Phase 1 has run on the live board, the maintainer judges whether the
-native dependency visuals give sufficient on-board blocked context. Only then
-may `isBlocked`/`blockReason` writes be dropped, as its own change. Until that
-decision, the sync writes both representations.
+The maintainer judged the native depends-on card icon sufficient. Mechanism
+(deliberately cruft-free -- no transitional clearing logic ships in sync.py):
+
+- sync.py loses ALL Blocked-flag code: the flag-text mirror in step 4, the
+  flag-clear during card retirement, and `stages.blocked_reason` (now dead).
+  The sync never writes `/isBlocked` or `/blockReason`; the flag belongs to
+  humans. `ops_blocked`/`card_is_blocked`/`card_block_reason` stay in
+  agileplace.py as validated API surface (smoke still exercises the shape).
+- A one-shot, throwaway `clear_legacy_blocked_flags.py` batch-clears the flags
+  the old behavior left behind -- ONLY flags whose reason matches the old
+  sync's exact signature ("Blocked by #N[, #M...]"); human-authored flags are
+  never touched. Dry-run by default; idempotent; the script (and its
+  signature-match tests) are DELETED from the repo once the board is clean.
 
 ## Process
 

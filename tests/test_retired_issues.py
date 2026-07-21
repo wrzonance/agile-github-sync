@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import ghkit  # noqa: E402
 import sync  # noqa: E402
-from stages import blocked_reason  # noqa: E402
 
 
 _PROJECT_DISABLED = object()
@@ -90,7 +89,9 @@ def _card(number: int, lane_id: str, *, blocked: bool) -> dict:
     }
 
 
-def test_retired_issues_remain_known_done_blockers(monkeypatch):
+def test_retired_issues_resolve_to_done_stage(monkeypatch):
+    """Retired (NOT_PLANNED/DUPLICATE) issues normalize to stage Done -- this drives lane
+    retirement, and (via _blocker_cards) keeps their dependency edges resolvable."""
     raw_issues = [
         _github_issue(10, "not_planned"),
         _github_issue(11, "DUPLICATE"),
@@ -110,7 +111,6 @@ def test_retired_issues_remain_known_done_blockers(monkeypatch):
 
     assert [issue["state_reason"] for issue in issues] == ["NOT_PLANNED", "DUPLICATE"]
     assert stage_by_number == {10: "Done", 11: "Done"}
-    assert blocked_reason([10, 11], stage_by_number) is None
 
 
 def test_retired_issue_without_card_is_not_created(tmp_path, monkeypatch):
@@ -126,8 +126,11 @@ def test_retired_issue_without_card_is_not_created(tmp_path, monkeypatch):
     blocked_by_read.assert_not_called()
 
 
-def test_existing_retired_card_is_retired_and_unblocks_dependent(
+def test_existing_retired_card_is_retired_and_flags_stay_human_owned(
         tmp_path, monkeypatch, capsys):
+    """Since issue #57 Phase 2 the sync never writes /isBlocked or /blockReason: retirement
+    moves the lane and nothing else, and a dependent card's flag is not 'unblocked' by the
+    sync -- the native dependency (and its health display) carries that signal now."""
     dependent = {
         **_github_issue(20, ""),
         "state": "OPEN",
@@ -150,7 +153,7 @@ def test_existing_retired_card_is_retired_and_unblocks_dependent(
     )
 
     out = capsys.readouterr().out
-    assert "DRY   retire [10] -> 'Done'; clear blocked (NOT_PLANNED)" in out
+    assert "DRY   retire [10] -> 'Done' (NOT_PLANNED)" in out
     create_card.assert_not_called()
     edit_label.assert_not_called()
     blocked_by_read.assert_called_once_with(_config(tmp_path), [20])
@@ -158,14 +161,10 @@ def test_existing_retired_card_is_retired_and_unblocks_dependent(
     assert ops_by_card == {
         "C10": [
             {"op": "replace", "path": "/laneId", "value": "L5"},
-            {"op": "replace", "path": "/isBlocked", "value": False},
-            {"op": "add", "path": "/blockReason", "value": ""},
-        ],
-        "C20": [
-            {"op": "replace", "path": "/isBlocked", "value": False},
-            {"op": "add", "path": "/blockReason", "value": ""},
         ],
     }
+    assert not any("/isBlocked" in json.dumps(ops) or "/blockReason" in json.dumps(ops)
+                   for ops in ops_by_card.values())
 
 
 def test_retirement_uses_authoritative_closure_when_other_reads_fail(
@@ -240,7 +239,9 @@ def test_active_issue_cannot_claim_url_owned_retired_card_by_custom_id(
     ]
 
 
-def test_retirement_clears_reason_from_already_unblocked_card(tmp_path, monkeypatch):
+def test_retirement_leaves_blocked_flag_and_reason_to_humans(tmp_path, monkeypatch):
+    """Pre-Phase-2 the sync scrubbed stale reason text during retirement; now the flag and
+    its reason belong to humans, so a card already in its Done lane gets NO patch at all."""
     card = {
         **_card(10, "L5", blocked=False),
         "blockedStatus": {"isBlocked": False, "reason": "stale reason"},
@@ -254,10 +255,7 @@ def test_retirement_clears_reason_from_already_unblocked_card(tmp_path, monkeypa
         lanes=[{"id": "L5", "title": "Done", "cardStatus": "finished"}],
     )
 
-    assert patch_card.call_args.args[3] == [
-        {"op": "replace", "path": "/isBlocked", "value": False},
-        {"op": "add", "path": "/blockReason", "value": ""},
-    ]
+    patch_card.assert_not_called()
 
 
 def test_active_card_is_not_renamed_to_retired_card_custom_id(

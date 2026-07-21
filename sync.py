@@ -24,7 +24,7 @@ import ghkit
 import ghproject
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
-from stages import (blocked_reason, epic_key_for_task, is_retired_issue, issue_stage,
+from stages import (epic_key_for_task, is_retired_issue, issue_stage,
                     normalize_status, title_key)
 
 MS_PREFIX = "milestone:"
@@ -289,9 +289,6 @@ def _retire_card(issue: dict, card: dict, lanes: list, stage_map: dict | None,
         actions.append(f"already '{agileplace.lane_title(target)}'")
     else:
         print(f"WARN  [{key}] cannot retire to Done: no unambiguous Done lane ({reason})")
-    if agileplace.card_is_blocked(card) or agileplace.card_block_reason(card):
-        ops.extend(agileplace.ops_blocked(False, None))
-        actions.append("clear blocked")
     if ops:
         queue(card, ops, f"retire:{reason}")
     action = "; ".join(actions) or "no card changes available"
@@ -701,26 +698,16 @@ def main() -> None:
             agileplace.disconnect_children(cfg, apply, str(parent["id"]), removes)
             print(f"{'unlink' if apply else 'DRY  '} [{key}] -{len(removes)} child card(s)")
 
-    # 4) dependencies -> card Blocked state (skip entirely unless the whole blocked-by snapshot is complete)
+    # 4) GitHub blocked-by edges -> native card dependencies (issue #57) -- all edges, managed
+    # pairs only, retired Done blockers resolving through their URL-owned cards. Skip entirely
+    # unless the whole blocked-by snapshot is complete. The card Blocked flag belongs to humans:
+    # the sync never writes /isBlocked or /blockReason (the old flag-text mirror was retired in
+    # issue #57 Phase 2; clear_legacy_blocked_flags.py cleaned up what it left behind).
     blocked_by = (ghkit.blocked_by_map(cfg, [i["number"] for i in syncable_issues])
                   if online and syncable_issues else {} if online else None)
     if online and blocked_by is None:
-        print("WARN  blocked-by snapshot incomplete -- leaving ALL card Blocked states AND "
-              "dependencies untouched this run")
+        print("WARN  blocked-by snapshot incomplete -- leaving ALL card dependencies untouched this run")
     if blocked_by is not None:
-        stage_by_number = {i["number"]: resolve_issue_stage(i, project_status) for i in issues}
-        for issue in syncable_issues:
-            card = card_for(issue)
-            if not card or not card.get("id"):
-                continue
-            reason = blocked_reason(blocked_by.get(issue["number"], []), stage_by_number)
-            want = reason is not None
-            if want != agileplace.card_is_blocked(card) or (want and reason != agileplace.card_block_reason(card)):
-                queue(card, agileplace.ops_blocked(want, reason), f"{'block' if want else 'unblock'}")
-                key = issue_custom_id(issue)
-                print(f"{'block  ' if want else 'unblock'} [{key}]{': ' + reason if reason else ''}")
-        # 4b) the same edges as native dependencies (issue #57) -- all edges, managed pairs only,
-        # with retired Done blockers resolving through their URL-owned cards
         sync_dependencies(cfg, apply, syncable_issues, blocked_by,
                           _blocker_cards(by_number, card_for, retired_issues, retired_card_by_url),
                           card_for, managed_card_ids)

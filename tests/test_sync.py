@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agileplace import resolve_lane_for_stage  # noqa: E402
 from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
-from stages import (blocked_reason, epic_key_for_task, issue_stage,  # noqa: E402
+from stages import (epic_key_for_task, issue_stage,  # noqa: E402
                     lane_matches_stage, normalize_status, title_key)
 from sync import (MS_PREFIX, _card_milestones, _child_connection_changes,  # noqa: E402
                   _epic_task_resolution, _protect_open_pr_stage, _reconciled_custom_id_index,
@@ -672,9 +672,3 @@ def test_protect_open_pr_stage_prints_no_warn_on_misconfigured_stage_lane_map(ca
     assert "WARN" not in out
 
 
-def test_blocked_reason():
-    stages = {10: "Done", 11: "In progress", 12: "Backlog"}
-    assert blocked_reason([], stages) is None
-    assert blocked_reason([10], stages) is None                       # blocker Done -> unblocked
-    assert blocked_reason([10, 11], stages) == "Blocked by #11"
-    assert blocked_reason([12, 11], stages) == "Blocked by #11, #12"  # incomplete, sorted
