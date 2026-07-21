@@ -17,6 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import config  # noqa: E402
 import sync  # noqa: E402
 
 
@@ -196,6 +197,10 @@ class FixtureWorld:
 
 
 def _configure(monkeypatch, tmp_path):
+    # env_config() re-reads .env on every call and repopulates deleted variables, so a configured
+    # checkout would leak its real GH_PROJECT_* into this offline world (seen live 2026-07-21 as
+    # 'unexpected gh command: project item-list <real project>'). Point the loader at nothing.
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / "no-such.env")
     values = {
         "TARGET_REPO_PATH": str(tmp_path),
         "AGILEPLACE_TOKEN": "test-token",
