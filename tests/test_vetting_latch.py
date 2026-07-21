@@ -36,7 +36,8 @@ def _intake_issue():
     return {**_issue(), "labels": [], "assignees": []}
 
 
-def _run_intake_case(tmp_path, card, *, add_item_return=_UNSET, set_item_status_return=True):
+def _run_intake_case(tmp_path, card, *, add_item_return=_UNSET, set_item_status_return=True,
+                     can_set_status_return=True):
     """Runs main() once with a stage_map that declares "Intake" and the issue off-board
     (project_items == {}, no explicit Status) -- so resolve_issue_stage() resolves "Intake" and the
     latch fires for `card`. Returns (add_item_mock, set_item_status_mock, patch_card_mock)."""
@@ -45,7 +46,8 @@ def _run_intake_case(tmp_path, card, *, add_item_return=_UNSET, set_item_status_
     stack, _, patch_card_mock, _ = _mock_io(
         card, (parsed, []), field_meta_return=None, lanes_return=_INTAKE_LANES,
         issue_return=_intake_issue(), add_item_return=add_item_return,
-        set_item_status_return=set_item_status_return)
+        set_item_status_return=set_item_status_return,
+        can_set_status_return=can_set_status_return)
     state_file = tmp_path / ".sync-state.json"
     with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
@@ -191,3 +193,89 @@ def test_flag_off_sync_main_never_touches_latch_write_surface(tmp_path, capsys):
     assert "Intake" not in out
     stack.add_item_mock.assert_not_called()
     stack.set_item_status_mock.assert_not_called()
+
+
+# --- issue #69: preflight + status-less-member repair -------------------------
+
+import vetting_latch  # noqa: E402
+
+
+def test_promote_preflight_blocks_add_when_status_is_unwritable(tmp_path, capsys):
+    """issue #69: a doomed Status write must be detected BEFORE add_item -- otherwise the add
+    strands a status-less member whose fallback stage lets the mover demote the card next run."""
+    card = {**_card(), "laneId": "L_READY"}
+    add_item_mock, set_item_status_mock, patch_card_mock = _run_intake_case(
+        tmp_path, card, can_set_status_return=False)
+    out = capsys.readouterr().out
+    assert "not adding the issue to the board" in out
+    add_item_mock.assert_not_called()
+    set_item_status_mock.assert_not_called()
+    assert not any("/laneId" in str(call) for call in patch_card_mock.call_args_list)
+
+
+def test_repair_retries_status_from_a_mapped_lane():
+    with patch("ghproject.set_item_status", return_value=True) as set_mock:
+        held = vetting_latch.repair_statusless_member(
+            {}, True, {"url": ISSUE_URL}, "1", "L_READY", _INTAKE_LANES, _INTAKE_STAGE_MAP,
+            {"item_id": "PVTI_1"})
+    assert held is True
+    set_mock.assert_called_once_with({}, True, "PVTI_1", "Ready")
+
+
+def test_repair_holds_without_writing_when_unmappable_intake_or_malformed(capsys):
+    cases = [
+        ("L_UNKNOWN", {"item_id": "PVTI_1"}),   # lane maps back to no known stage
+        ("L_INTAKE", {"item_id": "PVTI_1"}),    # card still parked in the Intake lane itself
+        ("L_READY", {"item_id": None}),         # malformed item id
+        ("L_READY", None),                      # missing item record entirely
+    ]
+    for lane, item in cases:
+        with patch("ghproject.set_item_status") as set_mock:
+            held = vetting_latch.repair_statusless_member(
+                {}, True, {"url": ISSUE_URL}, "1", lane, _INTAKE_LANES, _INTAKE_STAGE_MAP, item)
+        assert held is True
+        set_mock.assert_not_called()
+    assert "holding its card in place" in capsys.readouterr().out
+
+
+def test_statusless_member_is_never_lane_moved_and_gets_status_repaired(tmp_path, capsys):
+    """issue #69 delayed-demotion regression (the two-run scenario's second run, modeled
+    directly): a prior run's add_item succeeded but its Status write failed, so the issue is a
+    Project member with NO recognized Status. Membership vetoes Intake, the issue falls back to
+    Backlog, and PRE-FIX the ordinary mover queued a /laneId demotion for the human-placed card.
+    A second member with a VALID Status keeps the global zero-recognized-statuses guard disarmed
+    so it cannot mask the bug (per the review's regression recipe)."""
+    other_url = ISSUE_URL.replace("/1", "/2")
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1"},                      # status-less member (u1)
+              other_url: {"item_id": "PVTI_2", "status": "Ready"}}   # valid member disarms guard
+    issues = [_intake_issue(),
+              {**_issue(), "number": 2, "title": "other", "url": other_url}]
+    card = {**_card(), "laneId": "L_READY"}                          # human-placed, NOT intake
+    cfg = {**_cfg(tmp_path), "stage_lane_map": _INTAKE_STAGE_MAP}
+    stack, _, patch_card_mock, _ = _mock_io(
+        card, (parsed, []), field_meta_return=None, lanes_return=_INTAKE_LANES,
+        issue_return=issues)
+    with stack, patch("sync.env_config", return_value=cfg), \
+         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+         patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+    assert not any("/laneId" in str(call) for call in patch_card_mock.call_args_list)
+    stack.set_item_status_mock.assert_called_once_with(cfg, True, "PVTI_1", "Ready")
+    assert "repaired status-less member" in capsys.readouterr().out
+
+
+def test_statusless_member_repair_needs_the_intake_flag(tmp_path):
+    """Flag-off classic pin: without an Intake mapping the repair path must not exist -- the
+    member resolves through the classic fallback and the ordinary mover behaves exactly as
+    before this feature."""
+    parsed = {ISSUE_URL: {"item_id": "PVTI_1"}}
+    card = {**_card(), "laneId": "L_READY"}
+    stack, _, _patch_card_mock, _ = _mock_io(
+        card, (parsed, []), field_meta_return=None, lanes_return=_INTAKE_LANES,
+        issue_return=_intake_issue())
+    cfg = {**_cfg(tmp_path), "stage_lane_map": {"Ready": ["Ready Lane"]}}  # no Intake entry
+    with stack, patch("sync.env_config", return_value=cfg), \
+         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+         patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+    stack.set_item_status_mock.assert_not_called()   # no repair write without the flag

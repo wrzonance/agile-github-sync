@@ -300,5 +300,8 @@ already trusts). Two behaviors remain `[live-check]` pending:
    authorization (the implementation agent's attempt was correctly refused on exactly those
    grounds). The latch's first real promotion confirms the behavior; record the outcome here.
 2. **Status write on a just-added item** (add -> immediate `item-edit` in one run). The failure
-   path (item boarded Status-less) is handled and test-pinned; the happy path awaits the same
-   first real promotion.
+   path was hardened by issue #69 after adversarial review disproved the original "boarded
+   Status-less is harmless" assumption: the write is now preflighted before the add
+   (`can_set_status`), and a member left Status-less anyway becomes a pending latch (card held,
+   Status retried from its lane) -- all test-pinned. The happy path awaits the same first real
+   promotion.

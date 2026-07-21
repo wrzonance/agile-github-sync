@@ -748,8 +748,16 @@ def main() -> None:
             # True means it already handled (or safely deferred) this card, so the ordinary move is
             # skipped; False means the card is already parked in the Intake lane itself, where the
             # ordinary move is harmless (it will simply find nothing to change).
-            latched = stage == "Intake" and vetting_latch.apply_latch(
-                cfg, apply, issue, key, current, lanes, smap)
+            # A Project MEMBER with no recognized Status is the flip side (issue #69): membership
+            # vetoes Intake, so it resolves to a signal-derived stage the mover would act on --
+            # repair_statusless_member retries the Status write and holds the card instead.
+            member_item = project_items.get(issue["url"])
+            statusless_member = ("Intake" in (smap or {}) and member_item is not None
+                                 and explicit_stage_status(issue, project_status) is None)
+            latched = (stage == "Intake" and vetting_latch.apply_latch(
+                cfg, apply, issue, key, current, lanes, smap)) or (
+                statusless_member and vetting_latch.repair_statusless_member(
+                    cfg, apply, issue, key, current, lanes, smap, member_item))
             if not latched:
                 _apply_lane_move(cfg, apply, issue, card, key, stage, current, lanes, smap,
                                  project_status, queue, open_pr_read_failed=open_pr_read_failed)

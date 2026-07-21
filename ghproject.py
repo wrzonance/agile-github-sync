@@ -291,37 +291,64 @@ def add_item(cfg: dict, apply: bool, issue_url: str) -> str | None:
     try:
         out = ghkit.run(cfg, ["project", "item-add", str(p["number"]), "--owner", p["owner"],
                               "--url", issue_url, "--format", "json"], host=ctx.host)
-        return json.loads(out.stdout)["id"]
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, SystemExit):
+        payload = json.loads(out.stdout)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, SystemExit):
         return None
+    # Valid-but-non-object JSON (null, an array) must also become a structured failure -- never
+    # a TypeError mid-flow (never-raises contract, PR #71 review).
+    item_id = payload.get("id") if isinstance(payload, dict) else None
+    # A malformed id must become a structured failure here, never a TypeError later in argv
+    # (issue #69) -- the never-raises contract covers gh misbehaving too.
+    return item_id if isinstance(item_id, str) and item_id else None
+
+
+def _status_write_meta(cfg: dict, stage: str) -> tuple[str, str, str, str | None] | None:
+    """(project_id, field_id, option_id, host) for a Status write, or None when any part is
+    missing or malformed. Every id must be a non-empty string BEFORE it can reach subprocess argv
+    (issue #69): malformed gh output becomes a structured failure, never a mid-write TypeError."""
+    meta = field_meta(cfg)
+    if not isinstance(meta, dict):
+        return None
+    options = meta.get("status_options")
+    option_id = options.get((stage or "").strip().lower()) if isinstance(options, dict) else None
+    ids = (meta.get("project_id"), meta.get("status_field_id"), option_id)
+    if not all(isinstance(value, str) and value for value in ids):
+        return None
+    return (*ids, meta.get("host"))
+
+
+def can_set_status(cfg: dict, stage: str) -> bool:
+    """Preflight for the vetting latch: True iff a Status write for `stage` is fully resolvable
+    (field metadata present, every id well-formed, the option exists). Checked BEFORE add_item so
+    a doomed Status write can never strand a status-less member on the board -- the half-state
+    behind issue #69's delayed-demotion path. Never raises."""
+    return _status_write_meta(cfg, stage) is not None
 
 
 def set_item_status(cfg: dict, apply: bool, item_id: str, stage: str) -> bool:
     """Set a Project item's Status field to `stage` (matched case-insensitively against the
     configured Status field's options), through the dry-run gate. Returns True iff a write was
     actually issued (live PATCH or dry-run print); False when field_meta is unavailable, the Status
-    field itself isn't configured on the board, or `stage` matches none of its options -- never raises.
+    field itself isn't configured on the board, `stage` matches none of its options, or any id is
+    malformed -- never raises.
 
     Resolves field_meta(cfg) fresh on every call rather than accepting it as a parameter: main()'s own
     local is unconditionally nulled on boards with no Start/Target date fields configured, and reusing
     that would silently disable this write on a Status-only board.
     """
-    meta = field_meta(cfg)
-    if meta is None:
+    if not (isinstance(item_id, str) and item_id):
         return False
-    status_field_id = meta.get("status_field_id")
-    if not status_field_id:
+    resolved = _status_write_meta(cfg, stage)
+    if resolved is None:
         return False
-    option_id = meta.get("status_options", {}).get((stage or "").strip().lower())
-    if not option_id:
-        return False
-    args = ["project", "item-edit", "--id", item_id, "--project-id", meta["project_id"],
+    project_id, status_field_id, option_id, host = resolved
+    args = ["project", "item-edit", "--id", item_id, "--project-id", project_id,
             "--field-id", status_field_id, "--single-select-option-id", option_id]
     if not apply:
         print(f"DRY   gh {' '.join(args)}")
         return True
     try:
-        ghkit.run(cfg, args, host=meta.get("host"))
+        ghkit.run(cfg, args, host=host)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, SystemExit):
         return False
     print(f"gh    project item {item_id} status -> {stage}")
