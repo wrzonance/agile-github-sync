@@ -26,7 +26,9 @@ BODY_EXCERPT = 500
 
 def probe_get(cfg: dict, path: str, params: dict | None = None) -> tuple[int, str]:
     """(status, body_text) for one GET. Unlike agileplace.api, every HTTP status is
-    data here, never an error -- a probe's 404 is its answer, not a failure."""
+    data here, never an error -- a probe's 404 is its answer, not a failure.
+    Transport failures (DNS, TLS, connection, timeout) return status 0 so the
+    caller can report them as inconclusive instead of dying in a traceback."""
     url = f"https://{cfg['host']}/io/{path.lstrip('/')}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -37,6 +39,8 @@ def probe_get(cfg: dict, path: str, params: dict | None = None) -> tuple[int, st
             return resp.status, resp.read().decode(errors="replace")
     except urllib.error.HTTPError as err:
         return err.code, err.read().decode(errors="replace")
+    except (urllib.error.URLError, TimeoutError) as err:
+        return 0, f"transport failure: {getattr(err, 'reason', None) or err}"
 
 
 def candidate_probes(card_id: str, board_id: str) -> list[tuple[str, dict | None]]:
@@ -81,24 +85,29 @@ def _check_control(cfg: dict, card_id: str) -> None:
     print(f"control {path} -> HTTP 200 (plumbing OK)")
 
 
-def _probe_candidates(cfg: dict, card_id: str) -> list[str]:
-    found = []
+def _probe_candidates(cfg: dict, card_id: str) -> tuple[list[str], list[str]]:
+    """(found, inconclusive). Only 2xx counts as found (204 = route exists, empty
+    collection) and only 404 counts as a miss; anything else -- 429, 5xx, auth
+    errors, transport failures -- is inconclusive and must block the all-missing
+    conclusion."""
+    found, inconclusive = [], []
     for path, params in candidate_probes(card_id, str(cfg["board_id"])):
         shown = path + ("?" + urllib.parse.urlencode(params) if params else "")
         status, body = probe_get(cfg, path, params)
-        if status == 200:
+        if 200 <= status < 300:
             found.append(shown)
-            print(f"FOUND {shown} -> HTTP 200")
-            print(f"      {body[:BODY_EXCERPT]}")
+            print(f"FOUND {shown} -> HTTP {status}")
+            print(f"      {body[:BODY_EXCERPT] if body else '(empty body)'}")
         elif status == 404:
             print(f"MISS  {shown} -> HTTP 404")
         else:
-            print(f"      {shown} -> HTTP {status}")
+            inconclusive.append(shown)
+            print(f"?     {shown} -> {f'HTTP {status}' if status else 'no HTTP response'}")
             print(f"      {body[:BODY_EXCERPT]}")
-    return found
+    return found, inconclusive
 
 
-def _summarize(found: list[str]) -> None:
+def _summarize(found: list[str], inconclusive: list[str]) -> None:
     print("\n--- probe summary ---")
     if found:
         print("readable dependency endpoint(s) found:")
@@ -106,11 +115,18 @@ def _summarize(found: list[str]) -> None:
             print(f"  {endpoint}")
         print("record the response shapes in API-VALIDATION.md; next step is the write probe "
               "(issue #57, Phase 0b)")
-    else:
-        print("no readable dependency endpoint found among the candidates.")
-        print("fallback: open browser devtools (Network tab), create ONE dependency between two")
-        print("cards in the AgilePlace UI, and capture the request(s) -- method, URL, JSON body")
-        print("('Copy as cURL' is ideal). Record them in API-VALIDATION.md (issue #57).")
+        return
+    if inconclusive:
+        print("no candidate answered 200, but these were INCONCLUSIVE (not a clean 404):")
+        for endpoint in inconclusive:
+            print(f"  {endpoint}")
+        print("re-run the probe before drawing conclusions -- rate limits and transport hiccups")
+        print("look like this; only a clean 404 on every candidate rules the read surface out.")
+        return
+    print("no readable dependency endpoint found among the candidates (every one returned 404).")
+    print("fallback: open browser devtools (Network tab), create ONE dependency between two")
+    print("cards in the AgilePlace UI, and capture the request(s) -- method, URL, JSON body")
+    print("('Copy as cURL' is ideal). Record them in API-VALIDATION.md (issue #57).")
 
 
 def _first_card_id(cfg: dict) -> str:
@@ -131,7 +147,7 @@ def main() -> None:
     print(f"Probing dependencies read surface with card {card_id} on board {cfg['board_id']}")
     _dump_card_keys(cfg, card_id)
     _check_control(cfg, card_id)
-    _summarize(_probe_candidates(cfg, card_id))
+    _summarize(*_probe_candidates(cfg, card_id))
 
 
 if __name__ == "__main__":
