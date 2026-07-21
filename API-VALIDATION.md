@@ -224,11 +224,26 @@ production tenant:
 - The single-card GET embeds no dependency data: none of its 49 top-level keys is dependency-ish
   (it does embed `parentCards` and `connectedCardStats` for the connections feature).
 
+**Populated entry shape: confirmed live 2026-07-21.** After a UI-created dependency
+(EP-3A -> JPOWER1, mirroring the real GitHub blocked-by edge #31 -> #68), the blocked card's read
+returned:
+
+```json
+{"dependencies": [{"direction": "incoming", "cardId": "2490185684",
+                   "timing": "finishToStart", "createdOn": "2026-07-21T16:19:24.147Z"}]}
+```
+
+- `direction` is relative to the card being read (`incoming` = the other card must progress first);
+  `cardId` is the OTHER end; `timing` uses camelCase enum values (`finishToStart` observed).
+- **Entries carry no dependency id.** A dependency is evidently identified by its
+  (card, direction, other-card, timing) tuple, which implies deletion is addressed by card pair,
+  not by id -- the delete capture below must confirm how.
+
 Still `[live-check]` pending for Phase 0b (write probe) / Phase 1:
 
-1. **Populated entry shape.** Every board's `dependencies` array was empty at probe time. Create one
-   dependency in the UI, then re-run `probe_dependencies.py --card-id <that card>` to record what a
-   dependency object carries (field names, type enum values, ids).
-2. **Write endpoint and body.** Unknown -- plausibly `POST card/{cardId}/dependency`, but nothing is
-   built on that guess. Capture the UI's create request via browser devtools (method, URL, JSON
-   body) while creating the dependency above, and record it here.
+1. **Write endpoint and body.** Plausibly `POST card/{cardId}/dependency`, but nothing is built on
+   that guess. Capture the UI's create request via browser devtools (method, URL, JSON body) and
+   record it here.
+2. **Delete endpoint and addressing.** With no id in read entries, removal is presumably
+   pair-addressed. Capture the UI's delete request (create + delete a scratch dependency with
+   devtools open) and record it here.
