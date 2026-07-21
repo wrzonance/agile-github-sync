@@ -76,7 +76,7 @@ class FakeTenant:
         if path == "card/connections":
             return self._connections(method, body)
         if path == "card/dependency":
-            return self._dependency(method, body)
+            return self._dependency(req, method, body)
         if method == "DELETE" and path.startswith("card/"):
             del self.cards[path.removeprefix("card/")]
             return _Response(None)
@@ -161,20 +161,25 @@ class FakeTenant:
         card["version"] += 1
         return _Response({"id": card_id, "version": str(card["version"])})
 
-    def _dependency(self, method: str, body: dict):
-        # Set semantics (no duplicate entries) -- live duplicate-create behavior is unconfirmed
-        # (smoke fact-finds it as INFO); the double must not invent duplicates the server may
-        # never create. Deletion is pair-addressed and ignores timing, like the captured shape.
+    def _dependency(self, req, method: str, body: dict):
+        # Mirrors the live contract (confirmed 2026-07-21): duplicate create is HTTP 409
+        # "Dependency already exists", deletion is pair-addressed and ignores timing.
         for dependent in body["cardIds"]:
             for blocker in body["dependsOnCardIds"]:
+                if method == "POST":
+                    existing = self.dependencies.get(dependent, [])
+                    if any(e["direction"] == "incoming" and e["cardId"] == blocker
+                           for e in existing):
+                        raise _http_error(req.full_url, 409, json.dumps(
+                            {"statusCode": 409, "error": "Conflict",
+                             "message": "Dependency already exists",
+                             "data": {"dependsOnCardId": blocker, "cardId": dependent}}))
                 pairs = (("incoming", dependent, blocker), ("outgoing", blocker, dependent))
                 for direction, holder, other in pairs:
                     entries = self.dependencies.setdefault(holder, [])
                     if method == "POST":
-                        entry = {"direction": direction, "cardId": other,
-                                 "timing": body.get("timing")}
-                        if entry not in entries:
-                            entries.append(entry)
+                        entries.append({"direction": direction, "cardId": other,
+                                        "timing": body.get("timing")})
                     else:
                         self.dependencies[holder] = [
                             e for e in entries
@@ -253,6 +258,8 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
     assert "404" in out                # post-delete GET confirms the cards are gone
     assert "blocked" in out            # blocked-state round-trip reported
     assert "planned" in out            # planned-date round-trip reported
+    assert "duplicate create rejected" in out   # the live 409 contract, mirrored by the double
+    assert "Dependency already exists" in out
 
 
 def test_custom_ids_are_unique_per_run(tenant_env, monkeypatch):

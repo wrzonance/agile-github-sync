@@ -274,7 +274,10 @@ has exactly one semantic ("the blocker must finish first"), which is FS. The syn
 dependencies by card PAIR and never inspects or rewrites `timing` after creation: a human refining
 a synced dependency's timing in the UI keeps their refinement.
 
-Remaining `[live-check]` for the smoke dependency round-trip (`smoke.py` steps 11-12, Phase 1):
-the create/read/delete round-trip itself, and duplicate-create behavior (idempotent vs. error --
-recorded as INFO fact-finding; the sync's diff-before-write never intentionally re-creates an
-existing pair, so either outcome is safe).
+**Round-trip and duplicate-create: confirmed live 2026-07-21** (`smoke.py` steps 11-12, run
+suffix 10a01e, production tenant): create -> incoming read (right card, `finishToStart`) ->
+delete -> empty read all behaved as coded. Duplicate create is REJECTED -- **HTTP 409 Conflict
+`{"message": "Dependency already exists", "data": {"dependsOnCardId", "cardId"}}`** -- not
+idempotent. The sync's diff-before-write never re-creates an existing pair, and its fail-closed
+skip on unknown reads is what keeps a blind re-create (and its 409 SystemExit) impossible. The
+offline doubles mirror the 409. No dependency `[live-check]` remains open.
