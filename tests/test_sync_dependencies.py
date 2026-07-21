@@ -130,6 +130,23 @@ def test_edge_to_retired_done_blocker_is_preserved_not_deleted():
     assert calls["create"] == []   # and already present -- nothing to add
 
 
+def test_regression_issue_60_dependency_onto_non_authority_card_is_preserved():
+    """Regression (issue #60 exact scenario): a card adopted only via customId fallback,
+    with a live dependency onto it from an active blocked issue, must never be deleted.
+    Chains the real removal-authority computation into sync_dependencies -- pinning the
+    composed pipeline, not just each half in isolation."""
+    issue_1 = _issue(1, "A")
+    card_by_url = {issue_1["url"]: {"id": "C1"}}
+    retired_card_by_url = {}
+    removal_authority = _removal_authority_card_ids([issue_1], card_by_url, retired_card_by_url)
+    assert removal_authority == {"C1"}
+
+    calls = _run([issue_1], {1: [9]}, {1: {"id": "C1"}}, removal_authority,
+                 reads={"C1": [{"direction": "incoming", "cardId": "R9"}]},
+                 blocker_cards={1: {"id": "C1"}})
+    assert calls["delete"] == []
+
+
 def test_sync_blocker_cards_helper_includes_retired_url_owned_cards():
     from sync import _blocker_cards
     by_number = {1: {"number": 1, "url": "u1"}}
