@@ -87,13 +87,19 @@ carries a Status, the existing lane logic moves the card.
 - Projects read failed -> skip the latch entirely for the run (mirrors the
   existing lanes-untouched guard).
 - `add_item` fails -> WARN, skip Status write, card untouched.
-- Status write fails after a successful add -> WARN; the issue is boarded with
-  no Status; the next run's latch sees it still stage-resolves... (an on-board
-  issue with no Status has no explicit status; `explicit_stage_status` returns
-  None; the issue is ON the board though -- the Intake branch requires NOT on
-  board, so the issue now resolves through the normal fallback). Acceptable:
-  the next run re-attempts nothing destructive; the maintainer sees the WARN.
-  Pin this path in a test.
+- Status write fails after a successful add: the original design called this
+  acceptable ("the next run re-attempts nothing destructive") -- the PR #68
+  adversarial review DISPROVED that (issue #69): membership vetoes Intake, the
+  status-less member falls back to a signal-derived stage, and the ordinary
+  mover would demote the human-placed card. Amended semantics (implemented):
+  (1) the Status write is PREFLIGHTED before `add_item` (`can_set_status`), so
+  a doomed write can never create the half-state; (2) if the half-state exists
+  anyway (a human half-vets, or gh fails between the calls), a Project member
+  with no recognized Status is a *pending latch*: its card is never lane-moved,
+  and the Status write is retried from the card's current lane when it
+  reverse-maps to a non-Intake stage -- otherwise WARN and hold. Both paths are
+  test-pinned, including the two-member regression that keeps the global
+  zero-recognized-statuses guard from masking the demotion.
 
 ## Testing
 

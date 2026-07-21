@@ -63,7 +63,7 @@ _UNSET = object()
 
 def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSET, lanes_return=(),
              existing_cards=_UNSET, issue_return=_UNSET, hydrated_items_return=_UNSET,
-             add_item_return=_UNSET, set_item_status_return=True):
+             add_item_return=_UNSET, set_item_status_return=True, can_set_status_return=True):
     """ExitStack of patches covering every I/O boundary main() touches for one run. Returns the stack
     plus the ghkit.run, agileplace.patch_card, and agileplace.create_card mocks (for call-site
     assertions).
@@ -97,6 +97,8 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     stack.enter_context(patch("ghproject.hydrate_item_dates", return_value=hydrated))
     add_item_default = (ghproject.PLANNED_ITEM_ID_PREFIX + "test"
                         if add_item_return is _UNSET else add_item_return)
+    stack.can_set_status_mock = stack.enter_context(
+        patch("ghproject.can_set_status", return_value=can_set_status_return))
     stack.add_item_mock = stack.enter_context(
         patch("ghproject.add_item", return_value=add_item_default))
     stack.set_item_status_mock = stack.enter_context(
