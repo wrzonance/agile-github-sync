@@ -20,8 +20,8 @@
 param(
   [string]$TaskName = "CableTool-BacklogSync",
   [int]$IntervalMinutes = 30,
-  [string]$StartTime = "07:00",
-  [int]$ActiveHours = 12,
+  [string]$StartTime = "00:00",
+  [int]$ActiveHours = 23,
   [switch]$Unregister
 )
 
