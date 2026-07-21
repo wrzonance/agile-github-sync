@@ -126,6 +126,17 @@ class FakeTenant:
         if not self.accept_stale and sent != str(card["version"]):
             raise _http_error(req.full_url, 409, json.dumps(
                 {"message": f"version conflict: sent {sent}, current {card['version']}"}))
+        # Mirror the live server's atomic validation (observed 2026-07-21, issue #52): a replace on
+        # a planned-date path must carry a string value; the whole batch is rejected before any op
+        # is applied.
+        invalid = [{**op, "error": "Invalid value: must be string"}
+                   for op in ops
+                   if op["path"] in ("/plannedStart", "/plannedFinish")
+                   and op["op"] == "replace" and not isinstance(op.get("value"), str)]
+        if invalid:
+            raise _http_error(req.full_url, 422, json.dumps(
+                {"statusCode": 422, "error": "Unprocessable Entity",
+                 "message": "Invalid patch operations", "data": {"operations": invalid}}))
         for op in ops:
             if op["path"] == "/tags/-":
                 if not self.ignore_tag_add:
@@ -140,7 +151,8 @@ class FakeTenant:
             elif op["path"] == "/blockReason":
                 card["blockedStatus"]["reason"] = op["value"]
             elif op["path"] in ("/plannedStart", "/plannedFinish"):
-                card[op["path"].removeprefix("/")] = op["value"]
+                field = op["path"].removeprefix("/")
+                card[field] = None if op["op"] == "remove" else op["value"]
         card["version"] += 1
         return _Response({"id": card_id, "version": str(card["version"])})
 

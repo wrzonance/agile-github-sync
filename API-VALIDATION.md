@@ -4,8 +4,8 @@ This file records how the API calls this tool makes were checked before running 
 account. On 2026-07-17 each call was compared with the public Planview LeanKit io v2 docs and, where
 it documents the same operation, the official LeanKit Node client. Most calls are confirmed. A few,
 marked `[live-check]`, are not fully pinned down by public docs and should be smoke-tested once
-against a disposable card. The last two sections record what was verified live: GitHub shapes on
-2026-07-18, and AgilePlace write paths on 2026-07-20 (a `smoke.py` run).
+against a disposable card. The last sections record what was verified live: GitHub shapes on
+2026-07-18, and AgilePlace write paths on 2026-07-20 and 2026-07-21 (`smoke.py` runs).
 
 ## Confirmed against the cited sources
 
@@ -103,10 +103,11 @@ the code still fails closed (refetch, validate, or abort) rather than assuming e
   Target values read from paginated GraphQL `ProjectV2Item.fieldValues` by field id; writes via
   `item-edit --date`. A successful GraphQL snapshot with no matching values means the field is
   cleared project-wide; a failed, malformed, or incomplete snapshot skips every date write that run.
-  The GraphQL date-read shape was exercised live on 2026-07-20 (see below). The
-  `plannedStart`/`plannedFinish` card PATCH is covered by `smoke.py` steps 5-6 but those steps were
-  added after the 2026-07-20 run -- it is the one AgilePlace `[live-check]` still awaiting a live
-  pass.
+  The GraphQL date-read shape was exercised live on 2026-07-20 (see below). The card PATCH was
+  live-run on 2026-07-21: setting both dates as strings is confirmed, but clearing them with a null
+  `replace` was rejected (HTTP 422 "Invalid value: must be string"), so clears now use an RFC-6902
+  `remove` op (issue #52). The remove-based clear and the blocked-state clear await the next smoke
+  pass -- see "Validated live on 2026-07-21" below.
 
 ## GitHub side (standard and stable, noted for completeness)
 
@@ -156,8 +157,8 @@ Two gh behaviors learned the same day, recorded so this repo never has to redisc
 
 A confirmed `python smoke.py` run (create -> mutate -> connect -> stale-probe -> delete on two
 throwaway cards) retired every AgilePlace `[live-check]` item above except the planned-date card
-PATCH -- smoke steps 5-6 (blocked state + planned dates) were added after this run and await the
-next live pass:
+PATCH -- smoke steps 5-6 (blocked state + planned dates) were added after this run; their first
+live outcomes are recorded in the 2026-07-21 section below:
 
 1. **Tag removal (item 1): confirmed.** Index-based `{op:"remove", path:"/tags/{i}"}` cleared the
    tag in an add-then-remove round-trip (`tags` ended empty).
@@ -180,3 +181,24 @@ Model 2 additions confirmed by the same run: card create with `customId`+`extern
 an external link both accepted; `card/connections` connect/disconnect round-trip works and the
 children read reflects it immediately (including the authoritative empty read after disconnect).
 `DELETE /io/card/{id}` (smoke cleanup only) deletes for real -- a follow-up GET returns 404.
+
+## Validated live on 2026-07-21 (smoke.py run, production tenant board)
+
+A post-merge run exercised steps 5-6 (blocked state + planned dates), which were added after the
+2026-07-20 run:
+
+1. **Blocked-state set: confirmed.** `/isBlocked` true + `/blockReason` string round-trips
+   (`isBlocked=True`, reason read back).
+2. **Planned-date set: confirmed.** String `replace` on `/plannedStart` and `/plannedFinish`
+   round-trips (`2026-01-01`/`2026-01-02` read back exactly).
+3. **Planned-date clear via null replace: REJECTED -- and the rejection taught two facts.**
+   `{op:"replace", path:"/plannedStart", value:null}` fails HTTP 422 "Invalid value: must be
+   string": the server type-validates `replace` values on these paths. And PATCH validation is
+   atomic: the 422 listed only the two date ops as invalid, yet no op in the batch (including the
+   valid blocked-clear ops) was applied. `op_planned_date` now emits `{op:"remove", path:"/{field}"}`
+   for a clear, and the offline smoke double mirrors the 422 (issue #52).
+4. **Still pending for the next run:** the remove-based date clear and the blocked-state clear
+   round-trip (its ops passed validation, but the atomic 422 kept the whole batch from applying).
+
+The run also re-confirmed create (`customId`+`externalLink`), the version-less create response,
+flat single-card GET, both tag round-trips, and `DELETE` + 404 cleanup.

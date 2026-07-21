@@ -22,6 +22,7 @@ from agileplace import (  # noqa: E402
     get_card,
     list_cards,
     op_custom_id,
+    op_planned_date,
     op_tag,
     ops_blocked,
     ops_tag_remove,
@@ -259,6 +260,22 @@ def test_ops_blocked_unblock_forces_empty_reason():
     write "" to /blockReason -- never the self-contradictory isBlocked=False + non-empty reason."""
     ops = ops_blocked(False, "some reason")
     assert ops[1] == {"op": "add", "path": "/blockReason", "value": ""}
+
+
+# --- op_planned_date ------------------------------------------------------
+
+def test_op_planned_date_set_is_a_string_replace():
+    op = op_planned_date("plannedStart", "2026-01-01")
+    assert op == {"op": "replace", "path": "/plannedStart", "value": "2026-01-01"}
+
+
+def test_op_planned_date_clear_is_a_remove_never_a_null_replace():
+    """The live server type-validates replace values on /plannedStart and /plannedFinish as strings
+    and 422s on null ("Invalid value: must be string", observed live 2026-07-21). Clearing a date
+    must be an RFC-6902 remove, which carries no value member at all (issue #52)."""
+    op = op_planned_date("plannedFinish", None)
+    assert op == {"op": "remove", "path": "/plannedFinish"}
+    assert "value" not in op
 
 
 # --- op_custom_id ---------------------------------------------------------
