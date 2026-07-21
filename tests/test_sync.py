@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agileplace import resolve_lane_for_stage  # noqa: E402
 from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
-from stages import (epic_key_for_task, issue_stage,  # noqa: E402
+from stages import (STAGES, epic_key_for_task, issue_stage,  # noqa: E402
                     lane_matches_stage, normalize_status, title_key)
 from sync import (MS_PREFIX, _card_milestones, _child_connection_changes,  # noqa: E402
                   _epic_task_resolution, _protect_open_pr_stage, _reconciled_custom_id_index,
@@ -517,6 +517,47 @@ def test_stage_lane_map_unknown_lane_warns_by_default_but_not_when_quiet(capsys)
 
     resolve_lane_for_stage(_board_lanes(), "Ready", "", smap, quiet=True)
     assert "WARN" not in capsys.readouterr().out                  # quiet: internal checks stay silent
+
+
+# --- "Intake" stage-model addition is inert for unrelated stages ---------
+#
+# resolve_lane_for_stage's inference fallback walks *every* member of STAGES to veto
+# lane-title collisions (`for other in STAGES: lane_matches_stage(lane_title(lane), other)`).
+# The moment "Intake" becomes a STAGES member, that walk indexes STAGE_TITLE_HINTS["Intake"]
+# and (indirectly, via STAGE_CARD_STATUS) STAGE_CARD_STATUS["Intake"] for every unrelated-stage
+# resolution too -- so both dicts must carry inert no-op entries for "Intake" from the moment
+# it joins STAGES, or any other stage's inference KeyErrors. These tests pin resolve_lane_for_
+# stage's output as byte-identical with vs. without "Intake" present in STAGES, on both the
+# unmapped/inferred path (which walks STAGES) and the STAGE_LANE_MAP-mapped path (which doesn't).
+
+_STAGES_WITHOUT_INTAKE = tuple(s for s in STAGES if s != "Intake")
+_STAGES_WITH_INTAKE = ("Intake",) + _STAGES_WITHOUT_INTAKE
+
+
+def test_intake_membership_is_inert_for_unmapped_stage_resolution():
+    veto_lanes = [{"id": "review", "title": "Under Review", "cardStatus": "started"}]
+
+    with patch("agileplace.STAGES", _STAGES_WITHOUT_INTAKE):
+        veto_without_intake = resolve_lane_for_stage(veto_lanes, "In progress", "")
+    with patch("agileplace.STAGES", _STAGES_WITH_INTAKE):
+        veto_with_intake = resolve_lane_for_stage(veto_lanes, "In progress", "")
+    assert veto_with_intake == veto_without_intake
+
+    with patch("agileplace.STAGES", _STAGES_WITHOUT_INTAKE):
+        backlog_without_intake = resolve_lane_for_stage(_board_lanes(), "Backlog", "")
+    with patch("agileplace.STAGES", _STAGES_WITH_INTAKE):
+        backlog_with_intake = resolve_lane_for_stage(_board_lanes(), "Backlog", "")
+    assert backlog_with_intake == backlog_without_intake
+
+
+def test_intake_membership_is_inert_for_mapped_stage_resolution():
+    smap = {"Ready": ["New Requests", "Approved"]}
+
+    with patch("agileplace.STAGES", _STAGES_WITHOUT_INTAKE):
+        without_intake = resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
+    with patch("agileplace.STAGES", _STAGES_WITH_INTAKE):
+        with_intake = resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
+    assert with_intake == without_intake
 
 
 # --- Projects v2 (Phase 1: Status source) --------------------------------
