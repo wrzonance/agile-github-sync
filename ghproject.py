@@ -2,16 +2,21 @@
 
 Uses the `gh` CLI through ghkit.run. Status/item identity comes from owner-scoped `project item-list`;
 field discovery uses `project view` and `field-list`; date values use a paginated GraphQL snapshot
-matched by field id so a successful all-cleared field is distinguishable from a failed read. Only
-date-field writes exist, and they go through the dry-run gate. Requires the `project` token scope:
-`gh auth refresh -s project`.
+matched by field id so a successful all-cleared field is distinguishable from a failed read. Writes
+(date fields, item add, and Status) all go through the dry-run gate. Requires the `project` token
+scope: `gh auth refresh -s project`.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 
 import ghkit
+
+# Dry-run placeholder prefix for add_item's return value, so a caller can tell a not-yet-real
+# planned item id apart from a genuine GitHub-issued one at a glance (e.g. in logs).
+PLANNED_ITEM_ID_PREFIX = "planned-item:"
 
 
 def configured(cfg: dict) -> bool:
@@ -209,8 +214,8 @@ def issue_status_map(cfg: dict) -> dict[str, str]:
 
 def field_meta(cfg: dict) -> dict | None:
     """{project_id, host, status_field_id, status_options{name_lower:id}, start_field_id, target_field_id}
-    for Project field discovery and date writes. Status metadata is included but currently unused;
-    there is no Project Status write path. None on failure.
+    for Project field discovery and date writes. Status metadata feeds set_item_status's Status write
+    path (Status option id lookup by lower-cased name) as well as the read side. None on failure.
     VALIDATE LIVE: gh project shapes."""
     if not configured(cfg):
         return None
@@ -259,4 +264,64 @@ def set_project_date(cfg: dict, apply: bool, project_id: str, item_id: str, fiel
         print(f"gh    project item {item_id} date -> {date or 'cleared'}")
     else:
         print(f"DRY   gh project item-edit {item_id} {'--date ' + date if date else '--clear'}")
+    return True
+
+
+def add_item(cfg: dict, apply: bool, issue_url: str) -> str | None:
+    """Add an issue to the configured Project (the "vet onto the board" write for the Intake latch),
+    through the dry-run gate. Returns the new item id, or None when not configured or the write
+    failed -- never raises.
+
+    Dry run returns a deterministic placeholder (PLANNED_ITEM_ID_PREFIX + a truncated sha256 of the
+    url) instead of calling gh at all, so a caller exercises the exact same str-shaped contract on
+    both branches. Idempotency of a live re-add against an item already on the board is unverified
+    here (the spike used mocks only) -- flagged for a live probe against a real Project.
+    """
+    if not configured(cfg):
+        return None
+    if not apply:
+        placeholder = PLANNED_ITEM_ID_PREFIX + hashlib.sha256(issue_url.encode()).hexdigest()[:16]
+        print(f"DRY   gh project item-add ... --url {issue_url}")
+        return placeholder
+    ctx = ghkit._repo_context(cfg)
+    if ctx is None:  # can't resolve the target host -> fail closed rather than hit the default host
+        return None
+    p = cfg["gh_project"]
+    try:
+        out = ghkit.run(cfg, ["project", "item-add", str(p["number"]), "--owner", p["owner"],
+                              "--url", issue_url, "--format", "json"], host=ctx.host)
+        return json.loads(out.stdout)["id"]
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, SystemExit):
+        return None
+
+
+def set_item_status(cfg: dict, apply: bool, item_id: str, stage: str) -> bool:
+    """Set a Project item's Status field to `stage` (matched case-insensitively against the
+    configured Status field's options), through the dry-run gate. Returns True iff a write was
+    actually issued (live PATCH or dry-run print); False when field_meta is unavailable, the Status
+    field itself isn't configured on the board, or `stage` matches none of its options -- never raises.
+
+    Resolves field_meta(cfg) fresh on every call rather than accepting it as a parameter: main()'s own
+    local is unconditionally nulled on boards with no Start/Target date fields configured, and reusing
+    that would silently disable this write on a Status-only board.
+    """
+    meta = field_meta(cfg)
+    if meta is None:
+        return False
+    status_field_id = meta.get("status_field_id")
+    if not status_field_id:
+        return False
+    option_id = meta.get("status_options", {}).get((stage or "").strip().lower())
+    if not option_id:
+        return False
+    args = ["project", "item-edit", "--id", item_id, "--project-id", meta["project_id"],
+            "--field-id", status_field_id, "--single-select-option-id", option_id]
+    if not apply:
+        print(f"DRY   gh project item-edit {item_id} --single-select-option-id {option_id}")
+        return True
+    try:
+        ghkit.run(cfg, args, host=meta.get("host"))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, SystemExit):
+        return False
+    print(f"gh    project item {item_id} status -> {stage}")
     return True

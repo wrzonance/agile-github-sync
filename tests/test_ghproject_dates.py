@@ -224,6 +224,154 @@ def test_field_meta_fails_closed_when_host_unresolved():
     run_mock.assert_not_called()
 
 
+# --- add_item: dry-run gate ---------------------------------------------------
+# apply=False must never touch the subprocess boundary, must print a 'DRY ...' line, and must
+# return the exact same-shaped value (str | None) apply=True would -- a deterministic placeholder
+# derived from the issue url, not a dict, so callers can treat both branches identically.
+
+URL9 = "https://github.com/o/r/issues/9"
+
+
+def test_add_item_returns_none_when_not_configured():
+    with patch("ghproject.ghkit.run") as run_mock:
+        assert ghproject.add_item(_cfg(owner=None), False, URL9) is None
+        assert ghproject.add_item(_cfg(owner=None), True, URL9) is None
+    run_mock.assert_not_called()
+
+
+def test_add_item_dry_run_returns_deterministic_placeholder_and_writes_nothing():
+    import hashlib
+    expected = ghproject.PLANNED_ITEM_ID_PREFIX + hashlib.sha256(URL9.encode()).hexdigest()[:16]
+    with patch("ghproject.ghkit.run") as run_mock:
+        result = ghproject.add_item(_cfg(), False, URL9)
+    assert result == expected
+    assert isinstance(result, str)
+    run_mock.assert_not_called()
+
+
+def test_add_item_dry_run_placeholder_is_stable_across_calls_and_varies_by_url():
+    # Deterministic: same url -> same placeholder every call (idempotent across repeated dry runs).
+    first = ghproject.add_item(_cfg(), False, URL9)
+    second = ghproject.add_item(_cfg(), False, URL9)
+    other = ghproject.add_item(_cfg(), False, "https://github.com/o/r/issues/10")
+    assert first == second
+    assert first != other
+
+
+def test_add_item_apply_parses_id_from_json_on_success():
+    run_mock = Mock(return_value=Mock(stdout=json.dumps({"id": "PVTI_9"})))
+    with patch("ghproject.ghkit.run", run_mock), _patch_ctx():
+        result = ghproject.add_item(_cfg(), True, URL9)
+    assert result == "PVTI_9"
+    args = run_mock.call_args.args[1]
+    assert args[:2] == ["project", "item-add"]
+    assert "--url" in args and URL9 in args
+
+
+def test_add_item_apply_pins_call_to_resolved_host():
+    run_mock = Mock(return_value=Mock(stdout=json.dumps({"id": "PVTI_9"})))
+    with patch("ghproject.ghkit.run", run_mock), _patch_ctx(host="ghes.acme.internal"):
+        ghproject.add_item(_cfg(), True, URL9)
+    assert run_mock.call_args.kwargs.get("host") == "ghes.acme.internal"
+
+
+def test_add_item_apply_fails_closed_when_host_unresolved():
+    with patch("ghproject.ghkit._repo_context", return_value=None), \
+         patch("ghproject.ghkit.run") as run_mock:
+        assert ghproject.add_item(_cfg(), True, URL9) is None
+    run_mock.assert_not_called()
+
+
+def test_add_item_apply_returns_none_on_subprocess_failure():
+    err = subprocess.CalledProcessError(1, ["gh"])
+    with patch("ghproject.ghkit.run", side_effect=err), _patch_ctx():
+        assert ghproject.add_item(_cfg(), True, URL9) is None
+
+
+def test_add_item_apply_returns_none_on_malformed_json():
+    with patch("ghproject.ghkit.run", return_value=Mock(stdout="not json")), _patch_ctx():
+        assert ghproject.add_item(_cfg(), True, URL9) is None
+
+
+def test_add_item_apply_returns_none_when_id_key_missing():
+    with patch("ghproject.ghkit.run", return_value=Mock(stdout=json.dumps({}))), _patch_ctx():
+        assert ghproject.add_item(_cfg(), True, URL9) is None
+
+
+# --- set_item_status: resolves field_meta fresh, dry-run gate ----------------
+
+def _status_meta(**overrides):
+    meta = {"project_id": "PVT_1", "host": "github.com", "status_field_id": "SF_STATUS",
+            "status_options": {"in progress": "OPT_INPROG", "intake": "OPT_INTAKE"}}
+    meta.update(overrides)
+    return meta
+
+
+def test_set_item_status_false_when_field_meta_unavailable():
+    with patch("ghproject.field_meta", return_value=None), patch("ghproject.ghkit.run") as run_mock:
+        assert ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake") is False
+    run_mock.assert_not_called()
+
+
+def test_set_item_status_false_when_status_field_id_missing():
+    meta = _status_meta(status_field_id=None)
+    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run") as run_mock:
+        assert ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake") is False
+    run_mock.assert_not_called()
+
+
+def test_set_item_status_false_when_stage_not_in_status_options():
+    meta = _status_meta()
+    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run") as run_mock:
+        assert ghproject.set_item_status(_cfg(), True, "PVTI_1", "Nonexistent Stage") is False
+    run_mock.assert_not_called()
+
+
+def test_set_item_status_matches_stage_case_insensitively():
+    meta = _status_meta()
+    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run") as run_mock:
+        assert ghproject.set_item_status(_cfg(), True, "PVTI_1", "INTAKE") is True
+    run_mock.assert_called_once()
+
+
+def test_set_item_status_dry_run_returns_true_and_writes_nothing():
+    meta = _status_meta()
+    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run") as run_mock:
+        assert ghproject.set_item_status(_cfg(), False, "PVTI_1", "Intake") is True
+    run_mock.assert_not_called()
+
+
+def test_set_item_status_apply_writes_and_returns_true():
+    meta = _status_meta()
+    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run") as run_mock:
+        result = ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake")
+    assert result is True
+    run_mock.assert_called_once()
+    args = run_mock.call_args.args[1]
+    assert args[:2] == ["project", "item-edit"]
+    assert "--single-select-option-id" in args and "OPT_INTAKE" in args
+    assert run_mock.call_args.kwargs.get("host") == "github.com"
+
+
+def test_set_item_status_apply_returns_false_on_subprocess_failure():
+    meta = _status_meta()
+    err = subprocess.CalledProcessError(1, ["gh"])
+    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run", side_effect=err):
+        assert ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake") is False
+
+
+def test_set_item_status_resolves_field_meta_fresh_every_call():
+    # Must call the module-level field_meta() itself (not accept a threaded-in meta param) -- a
+    # caller's own local (e.g. main()'s, unconditionally nulled on boards with no date fields) must
+    # never be substituted in its place.
+    meta = _status_meta()
+    with patch("ghproject.field_meta", return_value=meta) as meta_mock, \
+         patch("ghproject.ghkit.run"):
+        ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake")
+        ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake")
+    assert meta_mock.call_count == 2
+
+
 # --- two-run end-to-end regression: merge-base skip-write --------------------
 # Exercises sync.sync_dates across two SIMULATED CONSECUTIVE RUNS with the real (unmocked)
 # ghproject.set_project_date -- only ghkit.run (the actual subprocess boundary) is patched. This pins
