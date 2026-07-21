@@ -242,10 +242,24 @@ def explicit_stage_status(issue: dict, project_status: dict) -> str | None:
     return normalize_status(project_status.get(issue["url"]))
 
 
-def resolve_issue_stage(issue: dict, project_status: dict) -> str:
+def resolve_issue_stage(issue: dict, project_status: dict, project_items: dict,
+                        stage_map: dict | None) -> str:
+    """CLOSED always wins as "Done". Else an explicit Project Status wins. Else issue_stage()'s
+    fallback -- UNLESS that fallback is the bare-else "Backlog" AND the board declares an "Intake"
+    lane mapping AND this issue isn't already a Project member, in which case it holds at "Intake"
+    instead: a freshly-discovered issue with no work signal waits for a human to vet it onto the
+    board rather than landing straight in Backlog. Board membership (project_items) and any work
+    signal (a fallback other than bare "Backlog") both veto "Intake" unconditionally."""
     if str(issue.get("state", "")).upper() == "CLOSED":
         return "Done"
-    return explicit_stage_status(issue, project_status) or issue_stage(issue)
+    explicit = explicit_stage_status(issue, project_status)
+    if explicit:
+        return explicit
+    fallback = issue_stage(issue)
+    if (fallback == "Backlog" and "Intake" in (stage_map or {})
+            and issue["url"] not in project_items):
+        return "Intake"
+    return fallback
 
 
 def _protect_open_pr_stage(stage: str, current_lane_id: str, lanes: list, milestone: str,
@@ -637,7 +651,8 @@ def main() -> None:
         if key in pending_custom_id_releases:
             print(f"WARN  deferring card [{key}] until the renamed customId is released by a prior run")
             continue
-        stage = resolve_issue_stage(issue, project_status)  # informational only when the read failed
+        # informational only when the read failed
+        stage = resolve_issue_stage(issue, project_status, project_items, smap)
         lane = None
         if not project_read_failed:
             lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
@@ -670,7 +685,7 @@ def main() -> None:
             queue(card, [agileplace.op_custom_id(key)], f"customId->{key}")
             print(f"{'sync ' if apply else 'DRY  '} [{key}] customId")
 
-        stage = resolve_issue_stage(issue, project_status)
+        stage = resolve_issue_stage(issue, project_status, project_items, smap)
         if move_lanes:
             current = str(card.get("laneId") or (card.get("lane") or {}).get("id") or "")
             has_explicit_status = explicit_stage_status(issue, project_status) is not None

@@ -681,15 +681,16 @@ def test_issue_card_title_strips_key_prefix():
 
 def test_resolve_issue_stage_prefers_project_status_then_labels():
     issue = {"url": "u1", "state": "OPEN", "labels": ["agent:in-progress"]}
-    assert resolve_issue_stage(issue, {"u1": "In review"}) == "In review"   # Project Status wins
-    assert resolve_issue_stage(issue, {}) == "In progress"                   # fallback: label
-    assert resolve_issue_stage({"url": "u2", "state": "OPEN", "labels": []}, {}) == "Backlog"
+    assert resolve_issue_stage(issue, {"u1": "In review"}, {}, None) == "In review"  # Status wins
+    assert resolve_issue_stage(issue, {}, {}, None) == "In progress"                 # fallback: label
+    assert resolve_issue_stage(
+        {"url": "u2", "state": "OPEN", "labels": []}, {}, {}, None) == "Backlog"
 
 
 def test_resolve_issue_stage_closed_beats_stale_project_status():
     issue = {"url": "u1", "state": "CLOSED", "labels": ["agent:in-progress"]}
 
-    assert resolve_issue_stage(issue, {"u1": "In progress"}) == "Done"
+    assert resolve_issue_stage(issue, {"u1": "In progress"}, {}, None) == "Done"
 
 
 def test_resolve_issue_stage_falls_back_to_labels_on_unrecognized_custom_status_option():
@@ -697,7 +698,7 @@ def test_resolve_issue_stage_falls_back_to_labels_on_unrecognized_custom_status_
     # stages must fall back to label/PR derivation exactly like having no Status at all -- it must
     # never be silently treated as an explicit "Backlog"/etc call.
     issue = {"url": "u1", "state": "OPEN", "labels": ["agent:in-progress"]}
-    assert resolve_issue_stage(issue, {"u1": "Triage"}) == "In progress"
+    assert resolve_issue_stage(issue, {"u1": "Triage"}, {}, None) == "In progress"
 
 
 def test_explicit_stage_status_none_when_missing_or_unrecognized():
