@@ -107,6 +107,50 @@ def _child_connection_changes(desired: set[str], existing: set[str], managed: se
     return adds, removes
 
 
+def _dependency_changes(desired: set[str], current: set[str],
+                        managed: set[str]) -> tuple[list[str], list[str]]:
+    """Dependency additions and safe removals for one card. Removals stay limited to
+    dependencies on cards managed by this sync -- a human-made dependency involving any
+    other card is invisible to reconciliation, in both directions."""
+    return sorted(desired - current), sorted((current & managed) - desired)
+
+
+def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by: dict,
+                      by_number: dict, card_for, managed_card_ids: set[str]) -> None:
+    """Mirror GitHub blocked-by edges as native AgilePlace dependencies (issue #57).
+
+    EVERY edge is mirrored, including edges whose blocker is Done -- the edge is structural, and
+    AgilePlace's own dependencyStats display satisfaction. (The Blocked flag deliberately differs:
+    it reflects incomplete blockers only.) GitHub is authoritative only between two sync-managed
+    cards. A failed or unrecognized dependency read skips the card entirely: duplicate-create
+    behavior is unconfirmed live, so nothing is ever re-created against unknown state."""
+    for issue in syncable_issues:
+        card = card_for(issue)
+        if not card or not card.get("id"):
+            continue
+        desired = {str(blocker_card["id"])
+                   for number in blocked_by.get(issue["number"], [])
+                   if (blocker := by_number.get(number))
+                   and (blocker_card := card_for(blocker)) and blocker_card.get("id")}
+        cid = str(card["id"])
+        key = issue_custom_id(issue)
+        if card.get("_planOnly"):
+            current = set()  # a fresh card has no server-side dependencies; never read a plan-only id
+        else:
+            entries = agileplace.card_dependencies(cfg, cid)
+            if entries is None:
+                print(f"WARN  [{key}] dependency state unknown -- leaving this card's dependencies untouched")
+                continue
+            current = agileplace.incoming_dependency_ids(entries)
+        adds, removes = _dependency_changes(desired, current, managed_card_ids)
+        if adds:
+            agileplace.create_dependencies(cfg, apply, cid, adds)
+            print(f"{'dep   ' if apply else 'DRY  '} [{key}] +{len(adds)} dependency(ies)")
+        if removes:
+            agileplace.delete_dependencies(cfg, apply, cid, removes)
+            print(f"{'undep ' if apply else 'DRY  '} [{key}] -{len(removes)} dependency(ies)")
+
+
 def issue_card_title(issue: dict) -> str:
     t = issue["title"]
     k = title_key(t)
@@ -646,7 +690,8 @@ def main() -> None:
     blocked_by = (ghkit.blocked_by_map(cfg, [i["number"] for i in syncable_issues])
                   if online and syncable_issues else {} if online else None)
     if online and blocked_by is None:
-        print("WARN  blocked-by snapshot incomplete -- leaving ALL card Blocked states untouched this run")
+        print("WARN  blocked-by snapshot incomplete -- leaving ALL card Blocked states AND "
+              "dependencies untouched this run")
     if blocked_by is not None:
         stage_by_number = {i["number"]: resolve_issue_stage(i, project_status) for i in issues}
         for issue in syncable_issues:
@@ -659,6 +704,9 @@ def main() -> None:
                 queue(card, agileplace.ops_blocked(want, reason), f"{'block' if want else 'unblock'}")
                 key = issue_custom_id(issue)
                 print(f"{'block  ' if want else 'unblock'} [{key}]{': ' + reason if reason else ''}")
+        # 4b) the same edges as native dependencies (issue #57) -- all edges, managed pairs only
+        sync_dependencies(cfg, apply, syncable_issues, blocked_by, by_number, card_for,
+                          managed_card_ids)
 
     # 5) flush: ONE versioned PATCH per card (optimistic concurrency)
     for entry in card_ops.values():

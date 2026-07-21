@@ -267,6 +267,14 @@ additionally carries a `face` projection of the other card -- including a `depen
 the native health tracking. Plain reads (`GET card/{cardId}/dependency`) omit `face`; the sync needs
 only `direction`/`cardId`/`timing`.
 
-Remaining `[live-check]` for the smoke dependency round-trip (Phase 1): duplicate-create behavior
-(idempotent vs. error) is unobserved -- the sync's diff-before-write never intentionally re-creates
-an existing pair, so this is fact-finding, not a blocker.
+**Timing types.** The UI offers four: FS (Finish->Start), SS (Start->Start), FF (Finish->Finish),
+SF (Start->Finish). Only `finishToStart`'s wire value has been observed; the other three
+presumably follow the same camelCase pattern but are unconfirmed and unused -- GitHub blocked-by
+has exactly one semantic ("the blocker must finish first"), which is FS. The sync reconciles
+dependencies by card PAIR and never inspects or rewrites `timing` after creation: a human refining
+a synced dependency's timing in the UI keeps their refinement.
+
+Remaining `[live-check]` for the smoke dependency round-trip (`smoke.py` steps 11-12, Phase 1):
+the create/read/delete round-trip itself, and duplicate-create behavior (idempotent vs. error --
+recorded as INFO fact-finding; the sync's diff-before-write never intentionally re-creates an
+existing pair, so either outcome is safe).

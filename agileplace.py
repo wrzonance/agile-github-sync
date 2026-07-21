@@ -682,3 +682,55 @@ def disconnect_children(cfg: dict, apply: bool, parent_card_id: str, child_card_
     mutate(cfg, apply, "DELETE", "card/connections",
            body={"cardIds": [parent_card_id], "connections": {"children": ids}},
            note=f"disconnect {parent_card_id} -> {len(ids)} child card(s)")
+
+
+# --- dependencies (sequencing) -- shapes confirmed live 2026-07-21, issue #57 ---
+# The endpoints are undocumented in the io v2 public docs; every shape below was captured from the
+# UI and validated against the production tenant (API-VALIDATION.md "Dependencies API discovery").
+
+DEPENDENCY_TIMING = "finishToStart"
+
+
+def card_dependencies(cfg: dict, card_id: str) -> list[dict] | None:
+    """The card's dependency entries ({direction, cardId, timing, ...}), or None when the read
+    fails or is unrecognized. None means UNKNOWN -- callers must skip reconciliation for the card
+    (fail closed), never treat it as an empty set. The confirmed response carries the whole list
+    with no pageMeta; if the server ever paginates this, the shape check below fails closed."""
+    try:
+        data = api(cfg, "GET", f"{_card_path(card_id)}/dependency")
+    except SystemExit as err:
+        print(f"WARN  card {card_id} dependency read FAILED: {err} -- skipping dependency reconciliation")
+        return None
+    entries = data.get("dependencies") if isinstance(data, dict) else None
+    if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+        print(f"WARN  card {card_id} dependency read returned an unrecognized shape -- "
+              "skipping dependency reconciliation")
+        return None
+    return entries
+
+
+def incoming_dependency_ids(entries: list[dict]) -> set[str]:
+    """Ids of the cards this card depends on (its blockers), from a card_dependencies read."""
+    return {str(entry["cardId"]) for entry in entries
+            if entry.get("direction") == "incoming" and entry.get("cardId")}
+
+
+def create_dependencies(cfg: dict, apply: bool, card_id: str, depends_on_ids) -> None:
+    """Make card_id depend on each of depends_on_ids (finish-to-start; they block it)."""
+    ids = sorted(str(i) for i in depends_on_ids if i)
+    if not ids:
+        return
+    mutate(cfg, apply, "POST", "card/dependency",
+           body={"cardIds": [str(card_id)], "dependsOnCardIds": ids, "timing": DEPENDENCY_TIMING},
+           note=f"depend {card_id} on {len(ids)} card(s)")
+
+
+def delete_dependencies(cfg: dict, apply: bool, card_id: str, depends_on_ids) -> None:
+    """Remove card_id's dependency on each of depends_on_ids (pair-addressed; no dependency ids
+    exist -- see API-VALIDATION.md)."""
+    ids = sorted(str(i) for i in depends_on_ids if i)
+    if not ids:
+        return
+    mutate(cfg, apply, "DELETE", "card/dependency",
+           body={"cardIds": [str(card_id)], "dependsOnCardIds": ids},
+           note=f"undepend {card_id} from {len(ids)} card(s)")

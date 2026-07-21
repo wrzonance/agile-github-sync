@@ -181,6 +181,10 @@ class FixtureWorld:
             })
         if method in {"POST", "DELETE"} and path == "card/connections":
             return _Response({})
+        if method == "GET" and path.startswith("card/") and path.endswith("/dependency"):
+            return _Response({"dependencies": []})
+        if method in {"POST", "DELETE"} and path == "card/dependency":
+            return _Response({})
         if method == "PATCH" and path == "card/C2":
             return _Response({"id": "C2", "version": "v3"})
         raise AssertionError(f"unexpected AgilePlace request: {method} {path}")
@@ -248,6 +252,12 @@ def _normalize_http(method: str, path: str, body: object):
         )
     if method == "PATCH" and path.startswith("card/"):
         return "patch", _card_role(path.removeprefix("card/")), json.dumps(body, sort_keys=True)
+    if method in {"POST", "DELETE"} and path == "card/dependency":
+        return (
+            "depend" if method == "POST" else "undepend",
+            tuple(_card_role(card_id) for card_id in body["cardIds"]),
+            tuple(_card_role(card_id) for card_id in body["dependsOnCardIds"]),
+        )
     raise AssertionError(f"unexpected mutation in action set: {method} {path}")
 
 
@@ -285,7 +295,7 @@ def test_new_card_dry_run_plans_every_action_apply_executes(paired_runs):
     assert not dry.state_file.exists()
     assert Counter(_planned_actions(dry.output)) == Counter(_executed_actions(apply))
     assert [action[0] for action in _planned_actions(dry.output)] == [
-        "create", "gh", "connect", "patch",
+        "create", "gh", "connect", "depend", "patch",
     ]
     assert PLAN_ID_PREFIX not in json.dumps([
         {"path": write.path, "body": write.body} for write in apply.http_writes

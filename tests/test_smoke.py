@@ -57,6 +57,7 @@ class FakeTenant:
                    "laneId": "L1", "tags": [], "version": 3},
         }
         self.children: dict[str, list[str]] = {}
+        self.dependencies: dict[str, list[dict]] = {}
         self._next_id = 0
 
     def urlopen(self, req, timeout=None):
@@ -74,6 +75,8 @@ class FakeTenant:
             return self._patch(req, path.removeprefix("card/"), body)
         if path == "card/connections":
             return self._connections(method, body)
+        if path == "card/dependency":
+            return self._dependency(method, body)
         if method == "DELETE" and path.startswith("card/"):
             del self.cards[path.removeprefix("card/")]
             return _Response(None)
@@ -95,6 +98,8 @@ class FakeTenant:
             return _Response({"cards": [{"id": cid} for cid in child_ids],
                               "pageMeta": {"offset": 0, "limit": 200,
                                            "totalRecords": len(child_ids)}})
+        if path.endswith("/dependency"):
+            return _Response({"dependencies": self.dependencies.get(path.split("/")[1], [])})
         card_id = path.removeprefix("card/")
         if card_id not in self.cards:
             raise _http_error(url, 404, json.dumps({"message": "card not found"}))
@@ -156,6 +161,26 @@ class FakeTenant:
         card["version"] += 1
         return _Response({"id": card_id, "version": str(card["version"])})
 
+    def _dependency(self, method: str, body: dict):
+        # Set semantics (no duplicate entries) -- live duplicate-create behavior is unconfirmed
+        # (smoke fact-finds it as INFO); the double must not invent duplicates the server may
+        # never create. Deletion is pair-addressed and ignores timing, like the captured shape.
+        for dependent in body["cardIds"]:
+            for blocker in body["dependsOnCardIds"]:
+                pairs = (("incoming", dependent, blocker), ("outgoing", blocker, dependent))
+                for direction, holder, other in pairs:
+                    entries = self.dependencies.setdefault(holder, [])
+                    if method == "POST":
+                        entry = {"direction": direction, "cardId": other,
+                                 "timing": body.get("timing")}
+                        if entry not in entries:
+                            entries.append(entry)
+                    else:
+                        self.dependencies[holder] = [
+                            e for e in entries
+                            if not (e["direction"] == direction and e["cardId"] == other)]
+        return _Response({})
+
     def _connections(self, method: str, body: dict):
         parent = body["cardIds"][0]
         kids = body["connections"]["children"]
@@ -213,6 +238,9 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
         ("PATCH", "card/S2"),             # externalLink add on bare card
         ("POST", "card/connections"),     # connect child
         ("DELETE", "card/connections"),   # disconnect child
+        ("POST", "card/dependency"),      # dependency create (child dependsOn parent)
+        ("POST", "card/dependency"),      # duplicate-create fact-finding probe
+        ("DELETE", "card/dependency"),    # dependency delete
         ("PATCH", "card/S1"),             # deliberate stale-version probe
         ("DELETE", "card/S2"),            # cleanup child
         ("DELETE", "card/S1"),            # cleanup parent

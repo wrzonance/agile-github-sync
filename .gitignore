@@ -221,3 +221,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Claude Code workflow worktrees (session-local, never repo content)
+.claude/worktrees/

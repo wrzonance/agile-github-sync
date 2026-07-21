@@ -65,9 +65,14 @@ Not built until Phase 0 (plus, if needed, a smoke-style write probe on throwaway
 cards) confirms read and write shapes.
 
 - `agileplace.py`: `card_dependencies(cfg, card_id)` (read),
-  `create_dependency(cfg, apply, blocker_card_id, blocked_card_id)`,
-  `delete_dependency(cfg, apply, dependency_id)`. Direction blocker -> blocked,
-  type Finish-to-Start (or the closest shape the API confirms).
+  `create_dependencies(cfg, apply, card_id, depends_on_ids)`,
+  `delete_dependencies(cfg, apply, card_id, depends_on_ids)` -- batch pair
+  bodies, as confirmed live. Direction blocker -> blocked, timing
+  `finishToStart` (GitHub blocked-by's one semantic is FS; the UI's other
+  timings -- SS, FF, SF -- are never written by the sync).
+- Timing ownership: reconciliation matches dependencies by card PAIR only. A
+  human who refines a synced dependency's timing in the UI keeps that
+  refinement; the sync neither inspects nor rewrites `timing` after creation.
 - `sync.py`, after the connections step: build the desired edge set from GitHub
   blocked-by (already fetched for `blocked_reason`), read current dependencies
   for managed cards, diff, create missing, delete unmatched.

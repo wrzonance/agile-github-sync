@@ -237,9 +237,44 @@ def _check_connections(cfg: dict, parent_id: str, child_id: str, results: list) 
                     f"children read back: {sorted(children) if children is not None else 'unavailable'}"))
 
 
+def _check_dependencies(cfg: dict, parent_id: str, child_id: str, results: list) -> None:
+    """Steps 11-12: dependency create/read/delete round-trip through the shapes captured live
+    2026-07-21 (undocumented API -- see API-VALIDATION.md "Dependencies API discovery"). Also
+    fact-finds duplicate-create behavior, which no capture has observed."""
+    _step(11, "create dependency child dependsOn parent, then read it back")
+    agileplace.create_dependencies(cfg, True, child_id, [parent_id])
+    entries = agileplace.card_dependencies(cfg, child_id)
+    incoming = agileplace.incoming_dependency_ids(entries) if entries is not None else None
+    timing_ok = entries is not None and any(
+        e.get("direction") == "incoming" and str(e.get("cardId")) == parent_id
+        and e.get("timing") == agileplace.DEPENDENCY_TIMING for e in entries)
+    results.append(("dependency create + incoming read round-trip",
+                    incoming == {parent_id} and timing_ok,
+                    f"incoming read back: {sorted(incoming) if incoming is not None else 'unavailable'}"))
+
+    try:
+        agileplace.create_dependencies(cfg, True, child_id, [parent_id])
+        dup_detail = "duplicate create ACCEPTED (idempotent or duplicating -- see read below)"
+    except SystemExit as exc:
+        dup_detail = f"duplicate create rejected: {exc}"
+    entries = agileplace.card_dependencies(cfg, child_id)
+    incoming = agileplace.incoming_dependency_ids(entries) if entries is not None else None
+    dup_count = (sum(1 for e in entries if e.get("direction") == "incoming"
+                     and str(e.get("cardId")) == parent_id) if entries is not None else None)
+    results.append(("duplicate dependency create behavior", None,
+                    f"{dup_detail}; incoming entries for parent now: {dup_count}"))
+
+    _step(12, "delete the dependency, then confirm the empty read")
+    agileplace.delete_dependencies(cfg, True, child_id, [parent_id])
+    entries = agileplace.card_dependencies(cfg, child_id)
+    incoming = agileplace.incoming_dependency_ids(entries) if entries is not None else None
+    results.append(("dependency delete + empty read round-trip", incoming == set(),
+                    f"incoming read back: {sorted(incoming) if incoming is not None else 'unavailable'}"))
+
+
 def _check_stale_patch(cfg: dict, parent_id: str, stale_version: str, results: list) -> None:
-    """Step 9: a stale x-lk-resource-version PATCH must be rejected, not silently applied."""
-    _step(11, "deliberately stale-version PATCH (the server MUST reject this)")
+    """Step 13: a stale x-lk-resource-version PATCH must be rejected, not silently applied."""
+    _step(13, "deliberately stale-version PATCH (the server MUST reject this)")
     body = [agileplace.op_tag("smoke-stale")]
     print(f"      PATCH /io/card/{parent_id} with stale x-lk-resource-version={stale_version} "
           f"body={json.dumps(body)}")
@@ -294,6 +329,7 @@ def _run_checks(cfg: dict, lane_id: str | None, run_id: str, created: list[str],
     _check_blocked_and_dates(cfg, parent_id, results)
     child_id = _check_child_and_link(cfg, lane_id, CHILD_CUSTOM_ID_PREFIX + run_id, created, results)
     _check_connections(cfg, parent_id, child_id, results)
+    _check_dependencies(cfg, parent_id, child_id, results)
     _check_stale_patch(cfg, parent_id, baseline_version, results)
 
 
