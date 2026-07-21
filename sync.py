@@ -132,15 +132,49 @@ def _blocker_cards(by_number: dict, card_for, retired_issues: list,
     return cards
 
 
+def _managed_card_ids(syncable_issues: list[dict], card_for, retired_card_by_url: dict[str, dict]) -> set[str]:
+    """Every card id this sync manages: active-issue cards resolved by card_for (URL match OR
+    customId fallback), plus every URL-matched retired card. Broader than
+    _removal_authority_card_ids -- a customId-only match still confers full authority here, so
+    this set drives additions and the child-connection removal path. Pure, read-only, never
+    raises. This is the single source of truth for 'managed'; main() calls it directly so tests
+    and production never drift onto separate copies of the formula."""
+    return (
+        {str(card["id"]) for issue in syncable_issues
+         if (card := card_for(issue)) and card.get("id")}
+        | {str(card["id"]) for card in retired_card_by_url.values() if card.get("id")}
+    )
+
+
+def _removal_authority_card_ids(syncable_issues: list[dict], card_by_url: dict[str, dict],
+                                retired_card_by_url: dict[str, dict]) -> set[str]:
+    """Strong-identity card ids only: cards an active issue matched via its own external-link
+    URL, plus URL-matched retired cards. A card an active issue reached only through
+    _matching_card's customId fallback -- including a retired card whose external link was
+    manually removed and got silently adopted through a customId collision (issue #60) --
+    confers no removal authority over that card's dependencies. Additions are unaffected;
+    only REMOVAL decisions (sync_dependencies -> _dependency_changes) consume this. Pure,
+    read-only, never raises. Always a subset of _managed_card_ids's result."""
+    return (
+        {str(card["id"]) for issue in syncable_issues
+         if (card := card_by_url.get(issue["url"])) and card.get("id")}
+        | {str(card["id"]) for card in retired_card_by_url.values() if card.get("id")}
+    )
+
+
 def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by: dict,
-                      blocker_card_by_number: dict, card_for, managed_card_ids: set[str]) -> None:
+                      blocker_card_by_number: dict, card_for,
+                      removal_authority_card_ids: set[str]) -> None:
     """Mirror GitHub blocked-by edges as native AgilePlace dependencies (issue #57).
 
     EVERY edge is mirrored, including edges whose blocker is Done -- the edge is structural, and
     AgilePlace's own dependencyStats display satisfaction. (The Blocked flag deliberately differs:
     it reflects incomplete blockers only.) GitHub is authoritative only between two sync-managed
     cards. A failed or unrecognized dependency read skips the card entirely: duplicate-create
-    behavior is unconfirmed live, so nothing is ever re-created against unknown state."""
+    behavior is unconfirmed live, so nothing is ever re-created against unknown state.
+
+    Dependency REMOVALS additionally require the target card to carry strong (URL-matched)
+    identity -- a customId-only match never confers removal authority (issue #60)."""
     for issue in syncable_issues:
         card = card_for(issue)
         if not card or not card.get("id"):
@@ -158,7 +192,7 @@ def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by:
                 print(f"WARN  [{key}] dependency state unknown -- leaving this card's dependencies untouched")
                 continue
             current = agileplace.incoming_dependency_ids(entries)
-        adds, removes = _dependency_changes(desired, current, managed_card_ids)
+        adds, removes = _dependency_changes(desired, current, removal_authority_card_ids)
         if adds:
             agileplace.create_dependencies(cfg, apply, cid, adds)
             print(f"{'dep   ' if apply else 'DRY  '} [{key}] +{len(adds)} dependency(ies)")
@@ -689,13 +723,7 @@ def main() -> None:
 
     # 3) parent/child connections: authoritative native reads reconcile exactly; title-key fallback
     # is add-only because a heuristic must never authorize destructive reconciliation.
-    managed_card_ids = (
-        {str(card["id"])
-         for issue in syncable_issues
-         if (card := card_for(issue)) and card.get("id")}
-        | {str(card["id"])
-           for card in retired_card_by_url.values() if card.get("id")}
-    )
+    managed_card_ids = _managed_card_ids(syncable_issues, card_for, retired_card_by_url)
     for epic in epics:
         parent = card_for(epic)
         if not parent or not parent.get("id"):
@@ -728,7 +756,10 @@ def main() -> None:
     # pairs only, retired Done blockers resolving through their URL-owned cards. Skip entirely
     # unless the whole blocked-by snapshot is complete. The card Blocked flag belongs to humans:
     # the sync never writes /isBlocked or /blockReason (the old flag-text mirror was retired in
-    # issue #57 Phase 2; clear_legacy_blocked_flags.py cleaned up what it left behind).
+    # issue #57 Phase 2; clear_legacy_blocked_flags.py cleaned up what it left behind). Removal
+    # authority is narrower than managed_card_ids here: a card an active issue reached only
+    # through the customId fallback confers no removal authority over its dependencies
+    # (issue #60) -- see _removal_authority_card_ids.
     blocked_by = (ghkit.blocked_by_map(cfg, [i["number"] for i in syncable_issues])
                   if online and syncable_issues else {} if online else None)
     if online and blocked_by is None:
@@ -736,7 +767,8 @@ def main() -> None:
     if blocked_by is not None:
         sync_dependencies(cfg, apply, syncable_issues, blocked_by,
                           _blocker_cards(by_number, card_for, retired_issues, retired_card_by_url),
-                          card_for, managed_card_ids)
+                          card_for,
+                          _removal_authority_card_ids(syncable_issues, card_by_url, retired_card_by_url))
 
     # 5) flush: ONE versioned PATCH per card (optimistic concurrency)
     for entry in card_ops.values():

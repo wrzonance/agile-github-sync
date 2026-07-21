@@ -15,7 +15,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sync import _dependency_changes, sync_dependencies  # noqa: E402
+from sync import (  # noqa: E402
+    _blocker_cards,
+    _dependency_changes,
+    _removal_authority_card_ids,
+    issue_custom_id,
+    sync_dependencies,
+)
 
 
 # --- _dependency_changes (pure) -------------------------------------------
@@ -130,6 +136,54 @@ def test_edge_to_retired_done_blocker_is_preserved_not_deleted():
     assert calls["create"] == []   # and already present -- nothing to add
 
 
+def test_regression_issue_60_dependency_onto_non_authority_card_is_preserved():
+    """Regression, issue #60's exact reported scenario:
+
+    1. Retired issue #9's card R9 lost its external link (a human edited it away), so
+       retired_card_by_url can no longer claim it under #9's URL.
+    2. Active issue #20 happens to share R9's customId, so _matching_card's customId
+       fallback silently adopts R9 for #20 -- a customId collision.
+    3. Active issue #1 is blocked by #9 on GitHub, and its card C1 already carries a live
+       native dependency onto R9 on the board.
+
+    _blocker_cards can then only resolve blocker #20 -> R9, never #9 itself (its card is
+    gone from retired_card_by_url), so `desired` for #1 silently drops the R9 edge. The
+    pre-fix code used the broad managed_card_ids set (which DOES include R9, via #20's
+    customId adoption) as removal authority, so it deleted the still-valid C1 -> R9
+    dependency as stale -- on every run. The fix narrows removal authority to
+    _removal_authority_card_ids, which excludes R9 (issue #20 never reached it through
+    its OWN url). Chains the real _blocker_cards / _removal_authority_card_ids
+    computations into sync_dependencies -- pinning the composed pipeline, not just each
+    half in isolation -- across two independent runs, confirming the edge survives on any
+    run, not just the first."""
+    issue_1 = _issue(1, "A")
+    issue_20 = _issue(20, "T")
+    retired_issue_9 = {"number": 9, "url": "https://github.com/o/r/issues/9"}
+
+    card_by_url = {issue_1["url"]: {"id": "C1"}}   # issue 20's OWN url has no card entry
+    card_by_cid = {"T": {"id": "R9"}}              # R9 only reachable via issue 20's customId
+    retired_card_by_url = {}                       # #9's external link is gone
+
+    def card_for(issue):
+        return card_by_url.get(issue["url"]) or card_by_cid.get(issue_custom_id(issue))
+
+    removal_authority = _removal_authority_card_ids(
+        [issue_1, issue_20], card_by_url, retired_card_by_url)
+    assert removal_authority == {"C1"}  # R9 excluded -- #20 only reached it via customId
+
+    blocker_card_by_number = _blocker_cards(
+        {1: issue_1, 20: issue_20}, card_for, [retired_issue_9], retired_card_by_url)
+    assert 9 not in blocker_card_by_number  # #9's card is unresolvable -- its link is gone
+
+    for _ in range(2):  # the edge must survive every run, not just the first
+        calls = _run([issue_1, issue_20], {1: [9], 20: []},
+                     {1: {"id": "C1"}, 20: {"id": "R9"}}, removal_authority,
+                     reads={"C1": [{"direction": "incoming", "cardId": "R9"}], "R9": []},
+                     blocker_cards=blocker_card_by_number)
+        assert calls["delete"] == []
+        assert calls["create"] == []
+
+
 def test_sync_blocker_cards_helper_includes_retired_url_owned_cards():
     from sync import _blocker_cards
     by_number = {1: {"number": 1, "url": "u1"}}
@@ -137,6 +191,31 @@ def test_sync_blocker_cards_helper_includes_retired_url_owned_cards():
     resolved = _blocker_cards(by_number, lambda i: {"id": f"C{i['number']}"},
                               retired, {"u9": {"id": "R9"}})
     assert resolved == {1: {"id": "C1"}, 9: {"id": "R9"}}  # 8 has no card -> excluded
+
+
+# --- _removal_authority_card_ids (pure) -----------------------------------
+
+def test_removal_authority_includes_url_matched_active_and_retired_cards():
+    """Control: a card an active issue reached through its OWN external-link URL, and a
+    URL-matched retired card, both carry strong identity -- both belong in the result."""
+    issues = [_issue(1, "A")]
+    card_by_url = {issues[0]["url"]: {"id": "C1"}}
+    retired_card_by_url = {"https://github.com/o/r/issues/9": {"id": "R9"}}
+    result = _removal_authority_card_ids(issues, card_by_url, retired_card_by_url)
+    assert result == {"C1", "R9"}
+
+
+def test_removal_authority_excludes_card_reached_only_by_customid_fallback():
+    """Exclusion (issue #60): card_by_url holds an entry, but not under THIS issue's own
+    URL -- modeling a card that some other issue's _matching_card call resolved only via
+    the customId fallback (or a retired card whose link was manually removed and got
+    silently adopted through a customId collision). That card must contribute nothing to
+    issue 1's removal authority, even though a naive builder that pooled every value in
+    card_by_url (rather than looking up each issue's own URL) would include it."""
+    issues = [_issue(1, "A")]
+    card_by_url = {"https://github.com/o/r/issues/999": {"id": "OTHER"}}  # not issue 1's url
+    result = _removal_authority_card_ids(issues, card_by_url, retired_card_by_url={})
+    assert result == set()
 
 
 def test_every_edge_is_mirrored_not_only_incomplete_blockers():
