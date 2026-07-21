@@ -170,11 +170,15 @@ def _snapshot_card():
 _LANE_OPS = [{"op": "replace", "path": "/laneId", "value": "L_NEW"}]
 
 
-def test_unrelated_version_bump_retries_once_with_fresh_version(monkeypatch, capsys):
+@pytest.mark.parametrize("conflict_status", [409, 428])
+def test_unrelated_version_bump_retries_once_with_fresh_version(monkeypatch, capsys,
+                                                                conflict_status):
     """The live 2026-07-21 failure mode: the card's version ticked mid-run but the targeted
-    field (/laneId) is untouched on the server -- ONE retry with the fresh version succeeds."""
+    field (/laneId) is untouched on the server -- ONE retry with the fresh version succeeds.
+    Both conflict statuses the server is known to emit (409 from the fake-tenant era, 428
+    confirmed live) must take the retry branch."""
     fresh = {**_snapshot_card(), "version": "13"}          # laneId unchanged -> unrelated bump
-    tenant = _SequencedTenant(fresh, [428, {"id": "C1", "version": "14"}])
+    tenant = _SequencedTenant(fresh, [conflict_status, {"id": "C1", "version": "14"}])
     monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
     result = patch_card(CFG, True, _snapshot_card(), _LANE_OPS)
     assert result == {"id": "C1", "version": "14"}
