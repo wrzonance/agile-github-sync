@@ -496,7 +496,12 @@ def ops_tag_remove(current_tags: list[str], tags_to_remove: set[str]) -> list[di
 
 
 def op_planned_date(field: str, date: str | None) -> dict:
-    return {"op": "replace", "path": f"/{field}", "value": date}  # field = plannedStart|plannedFinish
+    # field = plannedStart|plannedFinish. The server type-validates replace values on these paths as
+    # strings and 422s on null (observed live 2026-07-21, issue #52), so clearing must be a remove.
+    # Callers only queue a clear when the card currently has the date, so remove-on-absent can't occur.
+    if date is None:
+        return {"op": "remove", "path": f"/{field}"}
+    return {"op": "replace", "path": f"/{field}", "value": date}
 
 
 def ops_blocked(blocked: bool, reason: str | None) -> list[dict]:
