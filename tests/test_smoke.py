@@ -43,10 +43,14 @@ class FakeTenant:
     """Minimal stateful AgilePlace io v2 double for the whole smoke sequence."""
 
     def __init__(self, *, accept_stale: bool = False, fail_child_create_body: str | None = None,
-                 create_returns_version: bool = True):
+                 create_returns_version: bool = True, ignore_external_link: bool = False,
+                 ignore_tag_add: bool = False):
         self.accept_stale = accept_stale
         self.fail_child_create_body = fail_child_create_body
         self.create_returns_version = create_returns_version
+        self.ignore_external_link = ignore_external_link
+        self.ignore_tag_add = ignore_tag_add
+        self.created_custom_ids: list[str] = []
         self.writes: list[tuple[str, str]] = []
         self.cards: dict[str, dict] = {
             "P1": {"id": "P1", "title": "Existing card", "customId": "EX-1",
@@ -98,12 +102,15 @@ class FakeTenant:
                                    "version": str(self.cards[card_id]["version"])}})
 
     def _create(self, url: str, body: dict):
-        if self.fail_child_create_body and body.get("customId") == "SMOKE-C":
+        if self.fail_child_create_body and body.get("customId", "").startswith("SMOKE-C"):
             raise _http_error(url, 422, self.fail_child_create_body)
         self._next_id += 1
         card_id = f"S{self._next_id}"
+        self.created_custom_ids.append(body["customId"])
         card = {"id": card_id, "title": body["title"], "customId": body["customId"],
-                "laneId": body.get("laneId"), "tags": [], "version": 1}
+                "laneId": body.get("laneId"), "tags": [], "version": 1,
+                "plannedStart": None, "plannedFinish": None,
+                "blockedStatus": {"isBlocked": False, "reason": ""}}
         if "externalLink" in body:
             card["externalLink"] = body["externalLink"]
         self.cards[card_id] = card
@@ -121,11 +128,19 @@ class FakeTenant:
                 {"message": f"version conflict: sent {sent}, current {card['version']}"}))
         for op in ops:
             if op["path"] == "/tags/-":
-                card["tags"].append(op["value"])
+                if not self.ignore_tag_add:
+                    card["tags"].append(op["value"])
             elif op["path"].startswith("/tags/"):
                 card["tags"].pop(int(op["path"].removeprefix("/tags/")))
             elif op["path"] == "/externalLink":
-                card["externalLink"] = op["value"]
+                if not self.ignore_external_link:
+                    card["externalLink"] = op["value"]
+            elif op["path"] == "/isBlocked":
+                card["blockedStatus"]["isBlocked"] = op["value"]
+            elif op["path"] == "/blockReason":
+                card["blockedStatus"]["reason"] = op["value"]
+            elif op["path"] in ("/plannedStart", "/plannedFinish"):
+                card[op["path"].removeprefix("/")] = op["value"]
         card["version"] += 1
         return _Response({"id": card_id, "version": str(card["version"])})
 
@@ -180,6 +195,8 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
         ("POST", "card"),                 # parent (customId + externalLink)
         ("PATCH", "card/S1"),             # tag add
         ("PATCH", "card/S1"),             # tag remove (index-based)
+        ("PATCH", "card/S1"),             # blocked-state + planned dates set
+        ("PATCH", "card/S1"),             # blocked-state + planned dates clear
         ("POST", "card"),                 # child, no external link
         ("PATCH", "card/S2"),             # externalLink add on bare card
         ("POST", "card/connections"),     # connect child
@@ -194,6 +211,51 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
     assert "wrapped" in out            # single-card GET shape reported
     assert "HTTP 409" in out           # stale probe rejection surfaced verbatim
     assert "404" in out                # post-delete GET confirms the cards are gone
+    assert "blocked" in out            # blocked-state round-trip reported
+    assert "planned" in out            # planned-date round-trip reported
+
+
+def test_custom_ids_are_unique_per_run(tenant_env, monkeypatch):
+    """A leftover throwaway card must never be adoptable by the sync's customId fallback, and two
+    smoke runs must never collide -- so custom ids carry a fresh per-run suffix."""
+    first = FakeTenant()
+    tenant_env(first)
+    assert smoke.main([]) == 0
+    second = FakeTenant()
+    monkeypatch.setattr("urllib.request.urlopen", second.urlopen)
+    assert smoke.main([]) == 0
+
+    for world in (first, second):
+        parent, child = world.created_custom_ids
+        assert parent.startswith("SMOKE-P-") and len(parent) > len("SMOKE-P-")
+        assert child.startswith("SMOKE-C-") and len(child) > len("SMOKE-C-")
+    assert first.created_custom_ids[0] != second.created_custom_ids[0]
+
+
+def test_ignored_external_link_write_is_reported_as_failure(tenant_env, capsys):
+    """A 2xx PATCH is not proof: the link must be read back, so a server that silently ignores
+    /externalLink turns the check into a FAIL."""
+    tenant_env(FakeTenant(ignore_external_link=True))
+
+    assert smoke.main([]) == 1
+
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "externalLink" in out
+
+
+def test_tag_add_never_visible_still_summarizes_and_cleans_up(tenant_env, capsys):
+    """When the added tag never appears on readback, the remove step must be skipped as a FAIL --
+    not crash with an ops_tag_remove ValueError before the summary and cleanup."""
+    world = tenant_env(FakeTenant(ignore_tag_add=True))
+
+    assert smoke.main([]) == 1
+
+    out = capsys.readouterr().out
+    assert "smoke summary" in out
+    assert "FAIL" in out
+    assert "Traceback" not in out
+    assert set(world.cards) == {"P1"}  # cleanup still ran
 
 
 def test_versionless_create_response_is_informational_not_a_failure(tenant_env, capsys):

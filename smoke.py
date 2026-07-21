@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 import sys
 
 import agileplace
@@ -22,8 +23,11 @@ from config import env_config
 
 PARENT_TITLE = "SMOKE parent (safe to delete)"
 CHILD_TITLE = "SMOKE child (safe to delete)"
-PARENT_CUSTOM_ID = "SMOKE-P"
-CHILD_CUSTOM_ID = "SMOKE-C"
+# Custom ids carry a fresh per-run suffix: the sync's _matching_card falls back to customId
+# matching, so a fixed id on a leftover card could be adopted by a concurrent or later sync run
+# (and two smoke runs would collide on the board). See PR #51 review.
+PARENT_CUSTOM_ID_PREFIX = "SMOKE-P-"
+CHILD_CUSTOM_ID_PREFIX = "SMOKE-C-"
 # example.invalid can never collide with a real issue URL, so a card left behind by a failed
 # cleanup can never be adopted by a later sync run's external-link matching.
 PARENT_URL = "https://example.invalid/smoke/parent"
@@ -98,11 +102,11 @@ def _has_version(card: dict) -> bool:
     return version is not None and str(version).strip() != ""
 
 
-def _check_create_parent(cfg: dict, lane_id: str | None, created: list[str],
+def _check_create_parent(cfg: dict, lane_id: str | None, custom_id: str, created: list[str],
                          results: list) -> tuple[str, str]:
     """Steps 1-2: the sync's exact create shape, then the single-card GET response shape."""
     _step(1, "create parent card (customId + externalLink) -- the sync's create shape")
-    parent = agileplace.create_card(cfg, True, PARENT_TITLE, PARENT_CUSTOM_ID, PARENT_URL, lane_id)
+    parent = agileplace.create_card(cfg, True, PARENT_TITLE, custom_id, PARENT_URL, lane_id)
     parent_id = str(parent.get("id") or "")
     if not parent_id:
         raise SystemExit(f"create response has no card id ({dict(parent)!r}) -- cannot continue")
@@ -131,7 +135,13 @@ def _check_tag_roundtrip(cfg: dict, parent_id: str, results: list) -> None:
     fresh = agileplace.get_card(cfg, parent_id)
     agileplace.patch_card(cfg, True, fresh, [agileplace.op_tag("smoke-test")])
     tags = agileplace.card_tags(agileplace.get_card(cfg, parent_id))
-    results.append(("tag add round-trip", "smoke-test" in tags, f"tags now {sorted(tags)}"))
+    added = "smoke-test" in tags
+    results.append(("tag add round-trip", added, f"tags now {sorted(tags)}"))
+    if not added:
+        # ops_tag_remove raises on an absent tag; a failed add must skip the remove, not crash.
+        results.append(("tag remove round-trip (index-based ops)", False,
+                        "skipped -- the added tag never appeared on readback"))
+        return
 
     _step(4, "tag remove via index-based RFC-6902 ops")
     fresh = agileplace.get_card(cfg, parent_id)
@@ -142,11 +152,54 @@ def _check_tag_roundtrip(cfg: dict, parent_id: str, results: list) -> None:
                     f"tags now {sorted(tags)}"))
 
 
-def _check_child_and_link(cfg: dict, lane_id: str | None, created: list[str],
+def _date_matches(value, expected: str | None) -> bool:
+    """Tolerate the server echoing a date with a time component (e.g. 2026-01-01T00:00:00Z)."""
+    if expected is None:
+        return not value
+    return str(value or "").startswith(expected)
+
+
+def _check_blocked_and_dates(cfg: dict, parent_id: str, results: list) -> None:
+    """Steps 5-6: blocked-state and planned-date writes -- the sync's remaining PATCH shapes."""
+    _step(5, "set blocked state + planned dates in one versioned PATCH")
+    fresh = agileplace.get_card(cfg, parent_id)
+    ops = [*agileplace.ops_blocked(True, "smoke block"),
+           agileplace.op_planned_date("plannedStart", "2026-01-01"),
+           agileplace.op_planned_date("plannedFinish", "2026-01-02")]
+    agileplace.patch_card(cfg, True, fresh, ops)
+    readback = agileplace.get_card(cfg, parent_id)
+    blocked_ok = (agileplace.card_is_blocked(readback)
+                  and agileplace.card_block_reason(readback) == "smoke block")
+    dates_ok = (_date_matches(readback.get("plannedStart"), "2026-01-01")
+                and _date_matches(readback.get("plannedFinish"), "2026-01-02"))
+    results.append(("blocked-state write round-trip", blocked_ok,
+                    f"isBlocked={agileplace.card_is_blocked(readback)} "
+                    f"reason={agileplace.card_block_reason(readback)!r}"))
+    results.append(("planned-date write round-trip", dates_ok,
+                    f"plannedStart={readback.get('plannedStart')!r} "
+                    f"plannedFinish={readback.get('plannedFinish')!r}"))
+
+    _step(6, "clear blocked state + planned dates")
+    fresh = agileplace.get_card(cfg, parent_id)
+    ops = [*agileplace.ops_blocked(False, None),
+           agileplace.op_planned_date("plannedStart", None),
+           agileplace.op_planned_date("plannedFinish", None)]
+    agileplace.patch_card(cfg, True, fresh, ops)
+    readback = agileplace.get_card(cfg, parent_id)
+    cleared = (not agileplace.card_is_blocked(readback)
+               and _date_matches(readback.get("plannedStart"), None)
+               and _date_matches(readback.get("plannedFinish"), None))
+    results.append(("blocked-state + planned-date clear round-trip", cleared,
+                    f"isBlocked={agileplace.card_is_blocked(readback)} "
+                    f"plannedStart={readback.get('plannedStart')!r} "
+                    f"plannedFinish={readback.get('plannedFinish')!r}"))
+
+
+def _check_child_and_link(cfg: dict, lane_id: str | None, custom_id: str, created: list[str],
                           results: list) -> str:
-    """Steps 5-6: create a card with no external link, then PATCH-add /externalLink (init 04 shape)."""
-    _step(5, "create child card without an external link")
-    child = agileplace.create_card(cfg, True, CHILD_TITLE, CHILD_CUSTOM_ID, "", lane_id)
+    """Steps 7-8: create a card with no external link, then PATCH-add /externalLink (init 04 shape)."""
+    _step(7, "create child card without an external link")
+    child = agileplace.create_card(cfg, True, CHILD_TITLE, custom_id, "", lane_id)
     child_id = str(child.get("id") or "")
     if not child_id:
         raise SystemExit(f"child create response has no card id ({dict(child)!r}) -- cannot continue")
@@ -154,7 +207,7 @@ def _check_child_and_link(cfg: dict, lane_id: str | None, created: list[str],
     print(f"      created card {child_id}")
     results.append(("card create without external link", True, f"id {child_id}"))
 
-    _step(6, "add /externalLink to the bare card")
+    _step(8, "add /externalLink to the bare card, then read it back")
     fresh = agileplace.get_card(cfg, child_id)
     if not _has_version(fresh):
         raise SystemExit(f"card {child_id} has no resource version -- refusing unversioned PATCH")
@@ -162,19 +215,22 @@ def _check_child_and_link(cfg: dict, lane_id: str | None, created: list[str],
     print(f"      PATCH /io/card/{child_id} body={json.dumps(body)}")
     agileplace.api(cfg, "PATCH", f"card/{child_id}", body=body,
                    headers={"x-lk-resource-version": str(fresh["version"])})
-    results.append(("externalLink add on a bare card", True, ""))
+    # A 2xx is not proof the server honored the op -- read the link back before reporting PASS.
+    urls = agileplace.card_external_urls(agileplace.get_card(cfg, child_id))
+    results.append(("externalLink add on a bare card", CHILD_URL in urls,
+                    f"external urls now {urls}"))
     return child_id
 
 
 def _check_connections(cfg: dict, parent_id: str, child_id: str, results: list) -> None:
     """Steps 7-8: connect/disconnect round-trip through the documented Connections shapes."""
-    _step(7, "connect child -> parent, then read children back")
+    _step(9, "connect child -> parent, then read children back")
     agileplace.connect_children(cfg, True, parent_id, [child_id])
     children = agileplace.card_child_ids(cfg, parent_id)
     results.append(("connect children + child read round-trip", children == frozenset({child_id}),
                     f"children read back: {sorted(children) if children is not None else 'unavailable'}"))
 
-    _step(8, "disconnect child, then confirm the authoritative empty read")
+    _step(10, "disconnect child, then confirm the authoritative empty read")
     agileplace.disconnect_children(cfg, True, parent_id, [child_id])
     children = agileplace.card_child_ids(cfg, parent_id)
     results.append(("disconnect children + authoritative empty read", children == frozenset(),
@@ -183,7 +239,7 @@ def _check_connections(cfg: dict, parent_id: str, child_id: str, results: list) 
 
 def _check_stale_patch(cfg: dict, parent_id: str, stale_version: str, results: list) -> None:
     """Step 9: a stale x-lk-resource-version PATCH must be rejected, not silently applied."""
-    _step(9, "deliberately stale-version PATCH (the server MUST reject this)")
+    _step(11, "deliberately stale-version PATCH (the server MUST reject this)")
     body = [agileplace.op_tag("smoke-stale")]
     print(f"      PATCH /io/card/{parent_id} with stale x-lk-resource-version={stale_version} "
           f"body={json.dumps(body)}")
@@ -230,10 +286,13 @@ def _cleanup(cfg: dict, created: list[str], results: list) -> None:
                             f"DELETE THIS CARD BY HAND on the board -- {exc}"))
 
 
-def _run_checks(cfg: dict, lane_id: str | None, created: list[str], results: list) -> None:
-    parent_id, baseline_version = _check_create_parent(cfg, lane_id, created, results)
+def _run_checks(cfg: dict, lane_id: str | None, run_id: str, created: list[str],
+                results: list) -> None:
+    parent_id, baseline_version = _check_create_parent(
+        cfg, lane_id, PARENT_CUSTOM_ID_PREFIX + run_id, created, results)
     _check_tag_roundtrip(cfg, parent_id, results)
-    child_id = _check_child_and_link(cfg, lane_id, created, results)
+    _check_blocked_and_dates(cfg, parent_id, results)
+    child_id = _check_child_and_link(cfg, lane_id, CHILD_CUSTOM_ID_PREFIX + run_id, created, results)
     _check_connections(cfg, parent_id, child_id, results)
     _check_stale_patch(cfg, parent_id, baseline_version, results)
 
@@ -262,10 +321,12 @@ def main(argv: list[str] | None = None) -> int:
     lane = _pick_lane(lanes)
     if lane is not None:
         print(f"\nUsing lane '{agileplace.lane_title(lane)}' ({lane['id']}) for the throwaway cards")
+    run_id = secrets.token_hex(3)
+    print(f"Throwaway custom-id suffix for this run: {run_id}")
     created: list[str] = []
     results: list[tuple[str, bool, str]] = []
     try:
-        _run_checks(cfg, str(lane["id"]) if lane else None, created, results)
+        _run_checks(cfg, str(lane["id"]) if lane else None, run_id, created, results)
     except SystemExit as exc:
         _print_http_failure(exc)
         results.append(("smoke sequence ran to completion", False, str(exc)))
