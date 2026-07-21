@@ -270,7 +270,7 @@ def test_statusless_member_repair_needs_the_intake_flag(tmp_path):
     before this feature."""
     parsed = {ISSUE_URL: {"item_id": "PVTI_1"}}
     card = {**_card(), "laneId": "L_READY"}
-    stack, _, patch_card_mock, _ = _mock_io(
+    stack, _, _patch_card_mock, _ = _mock_io(
         card, (parsed, []), field_meta_return=None, lanes_return=_INTAKE_LANES,
         issue_return=_intake_issue())
     cfg = {**_cfg(tmp_path), "stage_lane_map": {"Ready": ["Ready Lane"]}}  # no Intake entry

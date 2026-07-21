@@ -445,3 +445,24 @@ def test_two_run_camelcase_convergence_issues_no_null_patch():
         run_mock.assert_not_called()                            # no PATCH -- let alone a null one -- ever issued
     assert calls == []
     assert state[url]["start"] == "2026-01-05"                  # base holds steady, no oscillation
+
+
+def test_add_item_returns_none_for_valid_but_non_object_json(monkeypatch):
+    """PR #71 review (Major): gh emitting valid-but-non-object JSON (null, an array) must become
+    a structured None -- never a TypeError mid-flow (the never-raises contract)."""
+    import ghkit
+    from types import SimpleNamespace
+    for stdout in ("null", "[]", '"just-a-string"'):
+        monkeypatch.setattr(ghkit, "_repo_context", lambda _cfg: SimpleNamespace(host=None))
+        monkeypatch.setattr(ghkit, "run",
+                            lambda *_a, _out=stdout, **_k: SimpleNamespace(stdout=_out))
+        assert ghproject.add_item(_cfg(), True, URL9) is None
+
+
+def test_status_write_meta_rejects_malformed_field_meta_shapes(monkeypatch):
+    """PR #71 review (Major): a malformed field_meta shape (non-dict meta, non-dict
+    status_options) must yield a structured failure from the preflight, not AttributeError."""
+    for meta in (["not", "a", "dict"], {"status_options": ["not-a-dict"],
+                                        "project_id": "P", "status_field_id": "F"}):
+        monkeypatch.setattr(ghproject, "field_meta", lambda _cfg, _m=meta: _m)
+        assert ghproject.can_set_status(_cfg(), "Ready") is False
