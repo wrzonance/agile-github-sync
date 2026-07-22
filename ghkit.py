@@ -327,3 +327,34 @@ def set_milestone(cfg: dict, apply: bool, number: int, title: str | None) -> Non
             print(f"gh    issue {number} milestone cleared")
         else:
             print(f"DRY   gh issue edit {number} --remove-milestone")
+
+
+def _issue_number_from_url(url: str) -> int:
+    """The trailing /issues/{n} segment of a GitHub issue URL, as an int. `gh issue create`'s
+    stdout contract is exactly one bare URL line; a malformed one is a genuine unrecovered failure,
+    so this raises (ValueError) rather than guessing -- callers let it propagate uncaught, same as
+    every other create_issue() failure mode."""
+    return int(url.rsplit("/", 1)[-1])
+
+
+def create_issue(cfg: dict, apply: bool, title: str, body: str) -> dict | None:
+    """Create one issue via `gh issue create --body-file -`, through the dry-run gate. The body is
+    never interpolated into argv -- it is piped through run()'s `input=` stdin passthrough (Task
+    2), so a body containing shell metacharacters or gh-flag-like text can't be misparsed.
+
+    Never passes --type: API-VALIDATION.md records `gh issue create --type <TYPE>` as non-atomic
+    (an org missing that type still gets the issue created before the command fails), so a blind
+    retry would double-create. The Intake feature has no need for issue types, so the flag is
+    omitted outright rather than probed for.
+
+    apply=False prints the planned title and returns None, with zero calls to run() -- identical
+    dry-run shape to edit_label/set_milestone. apply=True runs the create, parses the issue number
+    out of gh's own stdout (a bare created-issue URL), and returns {"number", "url"}. Any
+    CalledProcessError/TimeoutExpired from run() propagates uncaught -- no swallowed sentinel."""
+    if not apply:
+        print(f"DRY   gh issue create --title '{title}'")
+        return None
+    out = run(cfg, ["issue", "create", "--title", title, "--body-file", "-"], input=body)
+    url = out.stdout.strip()
+    print(f"gh    issue create -> {url}")
+    return {"number": _issue_number_from_url(url), "url": url}
