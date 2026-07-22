@@ -306,3 +306,77 @@ def test_script_and_style_content_is_suppressed_not_leaked_as_text():
     assert ".a{}" not in result
     assert "before" in result
     assert "after" in result
+
+
+# =====================================================================================
+# leankit_html_to_markdown -- headings, nested lists, links, strikethrough
+# =====================================================================================
+
+# --- invariant: content conservation -----------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "html, expected_markdown",
+    [
+        ("<h1>Title</h1>", "# Title"),
+        ("<h2>Sub</h2>", "## Sub"),
+        ("<h3>SubSub</h3>", "### SubSub"),
+        ("<h4>Four</h4>", "#### Four"),
+        ("<h5>Five</h5>", "##### Five"),
+        ("<h6>Six</h6>", "###### Six"),
+        # Fixes the spike's observed heading-endtag run-on omission: a heading immediately
+        # followed by text must not concatenate onto the same line.
+        ("<h1>Heading</h1>This is a paragraph after.", "# Heading\n\nThis is a paragraph after."),
+        ("<h2>Sub</h2><h3>SubSub</h3>", "## Sub\n\n### SubSub"),
+        ("<p>Some <s>struck</s> text</p>", "Some ~~struck~~ text"),
+        ("<del>deleted</del>", "~~deleted~~"),
+        ("<strike>old</strike>", "~~old~~"),
+        ('<a href="https://example.com">click</a>', "[click](https://example.com)"),
+        ('<a href="javascript:alert(1)">bad</a>', "bad"),
+        ("<a>no href</a>", "no href"),
+        (
+            '<a href="https://x.com"><strong>bold link</strong></a>',
+            "[**bold link**](https://x.com)",
+        ),
+        ("<ul><li>one</li><li>two</li></ul>", "- one\n- two"),
+        ("<ol><li>a</li><li>b</li></ol>", "1. a\n2. b"),
+        (
+            "<ul><li>parent<ul><li>child</li></ul></li></ul>",
+            "- parent\n  - child",
+        ),
+        ("<ul><li>item</li></ul><p>after</p>", "- item\n\nafter"),
+        ("<p>before</p><ul><li>item</li></ul>", "before\n\n- item"),
+    ],
+)
+def test_content_is_conserved_across_headings_lists_links_strikethrough(html, expected_markdown):
+    assert leankit_html_to_markdown(html) == expected_markdown
+
+
+def test_unclosed_strike_is_force_closed_rather_than_left_dangling():
+    html = "<p>Unclosed <s>struck"
+    assert leankit_html_to_markdown(html) == "Unclosed ~~struck~~"
+
+
+# --- invariant: total over content (never raises) -----------------------------------------------
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<ul><li>unclosed list item and list",
+        "<a href='javascript:evil()'>bad<a href='https://ok.com'>nested",
+        "<h1><h2>nested headings, never closed",
+        "<ol><li>one<ul><li>nested never closed",
+        "<li>orphan li with no ul/ol wrapper</li>",
+        "</a></ul></h1>stray closers with no matching opener",
+    ],
+)
+def test_headings_lists_links_never_raise_over_malformed_html(html):
+    result = leankit_html_to_markdown(html)
+    assert isinstance(result, str)
+
+
+# --- invariant: whitelist closure (Markdown output only uses the supported subset) --------------
+
+def test_disallowed_href_scheme_never_leaks_into_markdown_output():
+    html = '<a href="javascript:alert(1)">bad</a>'
+    result = leankit_html_to_markdown(html)
+    assert "javascript:" not in result

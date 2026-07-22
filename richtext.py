@@ -30,6 +30,17 @@ from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
+from typing import NamedTuple
+
+
+class _ListFrame(NamedTuple):
+    """One active list-nesting level while walking (HTML->MD) or folding (MD->HTML) list
+    structure. Immutable -- advancing an ordered list's counter replaces the stack's top entry
+    with a new frame rather than mutating one in place."""
+
+    ordered: bool
+    index: int
+
 
 # Characters that are ambiguous Markdown syntax in ANY position within a line -- always
 # backslash-escaped wherever they appear in text content.
@@ -47,14 +58,34 @@ _UNESCAPABLE_CHARS: frozenset[str] = _INLINE_AMBIGUOUS_CHARS | _STRUCTURAL_LINE_
 # schemeless strings) degrades to link text with no href.
 _ALLOWED_HREF_SCHEMES: frozenset[str] = frozenset({"http", "https", "mailto"})
 
-# HTML tags the HTML->Markdown walker currently translates (grows as later vocabulary --
-# headings, lists, links, strikethrough -- is added). Anything outside this set, including
+# ATX heading tags, GFM strikethrough tags (three HTML spellings, one Markdown marker), and the
+# list-container tags -- broken out so both _SUPPORTED_TAGS and the walker's branch logic can
+# test membership without repeating the tag names.
+_HEADING_TAGS: frozenset[str] = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+_STRIKE_TAGS: frozenset[str] = frozenset({"s", "del", "strike"})
+_LIST_CONTAINER_TAGS: frozenset[str] = frozenset({"ul", "ol"})
+
+# HTML tags the HTML->Markdown walker currently translates. Anything outside this set, including
 # ``<u>`` (no Markdown equivalent), degrades via the unified no-op path: the tag is dropped but
 # its text content is kept.
-_SUPPORTED_TAGS: frozenset[str] = frozenset({"p", "br", "strong", "em", "code", "pre"})
+_SUPPORTED_TAGS: frozenset[str] = (
+    frozenset({"p", "br", "strong", "em", "code", "pre", "a", "li"})
+    | _HEADING_TAGS
+    | _STRIKE_TAGS
+    | _LIST_CONTAINER_TAGS
+)
 
-# Tags that open/close a symmetric Markdown inline-format span with a single marker string.
-_FORMAT_MARKERS: dict[str, str] = {"strong": "**", "em": "*"}
+# Tags that open/close a symmetric Markdown inline-format span with a single marker string. All
+# three strikethrough spellings collapse onto the one GFM marker.
+_FORMAT_MARKERS: dict[str, str] = {
+    "strong": "**",
+    "em": "*",
+    **{tag: "~~" for tag in _STRIKE_TAGS},
+}
+
+# Two spaces per nesting level, matching common Markdown renderers' expectation for a nested list
+# item to be recognized as a child of the preceding item rather than a new top-level item.
+_LIST_INDENT_UNIT = "  "
 
 # Consecutive newlines beyond a single blank line collapse to the documented one-blank-line
 # block-separator convention.
@@ -177,6 +208,8 @@ class _MarkdownWalker(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.buffer: list[str] = []
         self.format_stack: list[str] = []
+        self.list_stack: list[_ListFrame] = []
+        self.href_stack: list[str | None] = []
         self.in_code = False
         self.in_pre = False
         self.suppress_text = False
@@ -194,6 +227,14 @@ class _MarkdownWalker(HTMLParser):
             self._open_code()
         elif tag in _FORMAT_MARKERS:
             self._open_format(_FORMAT_MARKERS[tag])
+        elif tag in _HEADING_TAGS:
+            self._open_heading(tag)
+        elif tag in _LIST_CONTAINER_TAGS:
+            self._open_list(ordered=tag == "ol")
+        elif tag == "li":
+            self._open_list_item()
+        elif tag == "a":
+            self._open_link(attrs)
         elif tag in ("script", "style"):
             self.suppress_text = True
         # else: unsupported tag (including "u") -- unified degrade, no markdown emitted for the
@@ -206,9 +247,15 @@ class _MarkdownWalker(HTMLParser):
             self._close_code()
         elif tag in _FORMAT_MARKERS:
             self._close_format(_FORMAT_MARKERS[tag])
+        elif tag in _HEADING_TAGS:
+            self._close_heading()
+        elif tag in _LIST_CONTAINER_TAGS:
+            self._close_list()
+        elif tag == "a":
+            self._close_link()
         elif tag in ("script", "style"):
             self.suppress_text = False
-        # else: "p"/"br"/degraded tags -- nothing to close.
+        # else: "p"/"br"/"li"/degraded tags -- nothing to close.
 
     def handle_data(self, data: str) -> None:
         # handle_data can fire multiple times for one logical run of text -- always append,
@@ -262,8 +309,62 @@ class _MarkdownWalker(HTMLParser):
         if self.buffer and not self.buffer[-1].endswith("\n\n"):
             self.buffer.append("\n\n")
 
+    def _ensure_line_start(self) -> None:
+        if self.buffer and not self.buffer[-1].endswith("\n"):
+            self.buffer.append("\n")
+
     def _at_line_start(self) -> bool:
         return not self.buffer or self.buffer[-1].endswith("\n")
+
+    def _open_heading(self, tag: str) -> None:
+        self._ensure_block_separator()
+        level = int(tag[1])
+        self.buffer.append("#" * level + " ")
+
+    def _close_heading(self) -> None:
+        # Explicit blank-line separator here (rather than relying on the next block to supply
+        # one) is what fixes the run-on omission: without it, text immediately following the
+        # heading in the source (no intervening <p>) would land on the same Markdown line.
+        self.buffer.append("\n\n")
+
+    def _open_list(self, *, ordered: bool) -> None:
+        if self.list_stack:
+            self._ensure_line_start()
+        else:
+            self._ensure_block_separator()
+        self.list_stack.append(_ListFrame(ordered=ordered, index=0))
+
+    def _close_list(self) -> None:
+        if self.list_stack:
+            self.list_stack.pop()
+        if not self.list_stack:
+            self.buffer.append("\n\n")
+
+    def _open_list_item(self) -> None:
+        self._ensure_line_start()
+        if not self.list_stack:
+            # Malformed input: a bare <li> with no enclosing <ul>/<ol>. Degrade to a top-level
+            # bullet rather than raising or dropping the content.
+            self.list_stack.append(_ListFrame(ordered=False, index=0))
+        frame = self.list_stack[-1]
+        marker = f"{frame.index + 1}. " if frame.ordered else "- "
+        self.list_stack[-1] = frame._replace(index=frame.index + 1)
+        indent = _LIST_INDENT_UNIT * (len(self.list_stack) - 1)
+        self.buffer.append(f"{indent}{marker}")
+
+    def _open_link(self, attrs: list[tuple[str, str | None]]) -> None:
+        href = _sanitize_href(dict(attrs).get("href"))
+        self.href_stack.append(href)
+        if href:
+            self.buffer.append("[")
+        # else: degraded -- no "[" marker emitted, so the following text/inline content renders
+        # as plain text with no dangling bracket.
+
+    def _close_link(self) -> None:
+        href = self.href_stack.pop() if self.href_stack else None
+        if href:
+            self.buffer.append(f"]({href})")
+        # else: degraded open (or a stray, unmatched close tag) -- nothing to emit.
 
 
 def leankit_html_to_markdown(html: str) -> str:
