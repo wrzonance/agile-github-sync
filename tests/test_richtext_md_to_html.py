@@ -23,6 +23,7 @@ from richtext import (  # noqa: E402
     _ListFrame,
     _parse_blocks,
     _render_block_html,
+    _unescape_markdown_text,
     leankit_html_to_markdown,
     markdown_to_leankit_html,
 )
@@ -281,6 +282,66 @@ def test_literal_ambiguous_char_survives_full_round_trip_without_becoming_a_deli
 )
 def test_html_to_markdown_to_html_round_trip_is_the_identity_for_supported_vocabulary(html):
     assert markdown_to_leankit_html(leankit_html_to_markdown(html)) == html
+
+
+# --- invariant: angle brackets in HTML text content round-trip without leaking a backslash -------
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<p>a &lt; b &gt; c</p>",
+        "<p>&lt;b&gt;Title&lt;/b&gt; is not a real tag</p>",
+        "<p><strong>&lt;x&gt;</strong></p>",
+        "<h1>&lt;h2&gt;</h1>",
+    ],
+)
+def test_literal_angle_brackets_round_trip_through_html_md_html_without_leaking_a_backslash(html):
+    # Regression pin for the verified pre-existing bug: the HTML->MD escaper backslash-escapes a
+    # literal '<'/'>' in text content ("a \< b"), but MD->HTML's _escape_html_text runs BEFORE the
+    # trailing unescape pass and turns that literal '<' into the four-char entity "&lt;" -- leaving
+    # the escaper's backslash stranded in front of an entity, not a bare unescapable char. Without
+    # an entity-aware branch, the trailing _unescape_markdown_text pass never recognizes
+    # "\&lt;"/"\&gt;" and the stray backslash leaks straight into the final HTML.
+    md = leankit_html_to_markdown(html)
+    result = markdown_to_leankit_html(md)
+    assert result == html
+    assert "\\" not in result
+
+
+def test_unescape_markdown_text_strips_a_backslash_before_an_angle_bracket_entity():
+    # Direct unit pin on the new branch: a backslash immediately preceding the exact four-char
+    # entity produced by _escape_html_text for '<'/'>' is stripped, leaving the entity intact --
+    # never reinterpreted char-by-char (a naive single-char strip would corrupt "&lt;" into
+    # "lt;" by consuming its leading '&').
+    assert _unescape_markdown_text("a\\&lt;b") == "a&lt;b"
+    assert _unescape_markdown_text("a\\&gt;b") == "a&gt;b"
+
+
+def test_unescape_markdown_text_still_strips_a_backslash_before_a_bare_angle_bracket():
+    # The pre-existing single-char branch (via _UNESCAPABLE_CHARS) must still handle a bare '<'/'>'
+    # backslash-escape exactly as before -- the new entity branch only adds a case, it never
+    # replaces this one.
+    assert _unescape_markdown_text("a\\<b") == "a<b"
+    assert _unescape_markdown_text("a\\>b") == "a>b"
+
+
+def test_unescape_markdown_text_does_not_treat_a_partial_entity_as_the_full_four_char_match():
+    # "&lx;" is not "&lt;" -- the new branch must require the exact four-char entity, not just a
+    # leading '&'. Neither branch matches here ('&' is not in _UNESCAPABLE_CHARS either), so the
+    # backslash is left untouched -- it was never something the escaper produced.
+    assert _unescape_markdown_text("a\\&lx;b") == "a\\&lx;b"
+    assert _unescape_markdown_text("a\\&b") == "a\\&b"
+
+
+def test_href_with_backslash_before_a_raw_angle_bracket_is_unaffected_by_the_entity_branch():
+    # hrefs are extracted and unescaped by their own href-specific pass (_unescape_href_text,
+    # inside _try_parse_link) before _protect_href_from_unescape re-doubles any surviving
+    # backslash for the trailing global unescape pass -- so a href-embedded backslash never
+    # reaches _unescape_markdown_text as a bare backslash in front of an entity. This pins that
+    # the new entity-aware branch doesn't perturb that already-correct href path.
+    result = markdown_to_leankit_html("[x](https://example.com/a\\<b)")
+    assert result == '<p><a href="https://example.com/a&lt;b">x</a></p>'
+    assert "\\" not in result
 
 
 def test_backslash_escaped_delimiter_inside_code_span_stays_literal_after_reinsertion():

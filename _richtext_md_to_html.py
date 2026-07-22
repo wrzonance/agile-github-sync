@@ -10,6 +10,19 @@ import re
 
 from _richtext_shared import _UNESCAPABLE_CHARS, _LIST_INDENT_UNIT, _Block, _ListFrame, _sanitize_href
 
+# The exact four-char entities _escape_html_text ever emits for a backslash-escaped '<'/'>'.
+# _escape_html_text runs BEFORE _unescape_markdown_text in _render_inline_html, so a literal
+# '<'/'>' that the HTML->MD escaper backslash-escaped (per _INLINE_AMBIGUOUS_CHARS) never reaches
+# the unescape pass as a bare unescapable char -- it has already been turned into "&lt;"/"&gt;" by
+# the earlier HTML-escape pass, stranding the escaper's backslash in front of the entity instead.
+# Checked before the single-char _UNESCAPABLE_CHARS branch below so that entity is recognized and
+# consumed as one unit (keeping it intact) rather than falling through to the single-char branch,
+# which would strip only the backslash and leave nothing else to reinterpret it correctly anyway
+# (the following char is '&', not itself in _UNESCAPABLE_CHARS) -- see the verified round-trip
+# regression this closes: a literal '<'/'>' surviving HTML->MD->HTML was leaking a stray backslash
+# ("\&lt;") into the final HTML instead of clean "&lt;".
+_BACKSLASH_ESCAPED_ANGLE_ENTITIES: frozenset[str] = frozenset({"&lt;", "&gt;"})
+
 # Line-oriented block patterns. Only the documented supported subset is recognized as structure;
 # anything else falls through to plain paragraph text.
 _HEADING_LINE_RE = re.compile(r"^(#{1,6})[ \t]+(.*)$")
@@ -33,12 +46,21 @@ def _unescape_markdown_text(text: str) -> str:
     """Inverse of the HTML->MD escaper: strip a backslash immediately preceding any character
     that escaper ever emits a backslash before (_UNESCAPABLE_CHARS), leaving that character
     literal. A backslash not followed by such a character, or at end of string, is left as-is --
-    it was never something that escaper produced."""
+    it was never something that escaper produced. Checked first: a backslash immediately
+    preceding the exact four-char entity _escape_html_text emits for '<'/'>' (_richtext_shared's
+    _INLINE_AMBIGUOUS_CHARS backslash-escapes the raw char, but this function runs AFTER
+    _escape_html_text has already turned that raw char into "&lt;"/"&gt;") -- consumed as one
+    unit so the entity survives intact rather than falling through to the single-char branch,
+    which would strip only the backslash and leave the entity's leading '&' unrecognized."""
     out: list[str] = []
     i = 0
     n = len(text)
     while i < n:
         ch = text[i]
+        if ch == "\\" and text[i + 1:i + 5] in _BACKSLASH_ESCAPED_ANGLE_ENTITIES:
+            out.append(text[i + 1:i + 5])
+            i += 5
+            continue
         if ch == "\\" and i + 1 < n and text[i + 1] in _UNESCAPABLE_CHARS:
             out.append(text[i + 1])
             i += 2
