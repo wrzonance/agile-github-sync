@@ -139,3 +139,22 @@ def test_create_issue_propagates_run_failures_uncaught(monkeypatch, exc):
 
     with pytest.raises(type(exc)):
         ghkit.create_issue({}, True, "Title", "body")
+
+
+# --- title validated at the boundary, before ever reaching subprocess --------
+#
+# A blank or non-string title would otherwise reach subprocess.Popen unvalidated: `None` raises an
+# opaque TypeError ("argv must be str"), and "" produces a CalledProcessError from gh itself -- both
+# uncaught by anything upstream (intake.promote's per-candidate loop, sync.main()'s call site), so a
+# single bad title would crash the entire sync run. create_issue validates its own input regardless
+# of caller behavior (intake._is_candidate now filters blank titles too, but this is this function's
+# own boundary contract, not something it may assume its caller already enforced).
+
+@pytest.mark.parametrize("title", [None, "", "   ", 42])
+@pytest.mark.parametrize("apply", [True, False])
+def test_create_issue_rejects_an_unusable_title_before_reaching_run(monkeypatch, title, apply):
+    monkeypatch.setattr(ghkit, "run", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("must not call run for an unusable title")))
+
+    with pytest.raises(ValueError, match="title"):
+        ghkit.create_issue({}, apply, title, "body")

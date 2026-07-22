@@ -106,20 +106,35 @@ def _disqualifying_custom_ids(issues: list[dict]) -> set[str]:
     return {issue_custom_id(issue) for issue in issues}
 
 
+def _has_usable_title(card: dict) -> bool:
+    """A card's title is usable when it's a non-blank string. Defensive against any other shape
+    (missing, None, whitespace-only, or a malformed non-string value) -- never raises."""
+    title = card.get("title")
+    return isinstance(title, str) and title.strip() != ""
+
+
 def _is_candidate(card: dict, intake_lane_ids: set[str], target_urls: set[str],
                    managed_custom_ids: set[str]) -> bool:
     """Pure predicate: does this card need a new GitHub issue?
 
-    A card qualifies only when it has a usable id, its current lane is one of `intake_lane_ids`, it
-    carries no external link matching `target_urls` (the known target-repo issue URLs), and its
-    customId doesn't match any of `managed_custom_ids`. A foreign external link (anything not in
-    `target_urls`) or an unrecognized customId never disqualifies a card by itself -- only an
-    actual match does.
+    A card qualifies only when it has a usable id AND a usable title, its current lane is one of
+    `intake_lane_ids`, it carries no external link matching `target_urls` (the known target-repo
+    issue URLs), and its customId doesn't match any of `managed_custom_ids`. A foreign external
+    link (anything not in `target_urls`) or an unrecognized customId never disqualifies a card by
+    itself -- only an actual match does.
 
     A card lacking a usable id (missing, None, or empty -- the same truthy check sync.py's own
     card-matching loop uses) is never a candidate: promoting it would build marker_for_card(None),
-    card_web_url(cfg, None), and eventually a live PATCH against agileplace's "/card/None"."""
+    card_web_url(cfg, None), and eventually a live PATCH against agileplace's "/card/None".
+
+    A card lacking a usable title (missing, None, blank/whitespace, or a malformed non-string
+    value) is never a candidate either: ghkit.create_issue's `gh issue create --title` would either
+    reject an empty title outright or, for a None title, crash subprocess with an uncaught
+    TypeError -- either way an unrecovered exception that would crash the entire sync run for one
+    blank-titled Intake card."""
     if not card.get("id"):
+        return False
+    if not _has_usable_title(card):
         return False
     if _card_lane_id(card) not in intake_lane_ids:
         return False
@@ -211,7 +226,13 @@ def _writeback(cfg: dict, apply: bool, card: dict, issue: dict) -> None:
     The link write is skipped (with a WARN) when `card` already carries the plural, array-shaped
     `externalLinks` field: agileplace._card_value_for_patch_path has no case for the singular
     `/externalLink` path this feature writes, so a 409/428 conflict on that write can never retry --
-    it unconditionally re-raises (see API-VALIDATION.md)."""
+    it unconditionally re-raises (see API-VALIDATION.md and _card_for_link_write below).
+
+    The customId write above may bump the card's server-side resource version. The link write below
+    must never reuse `card`'s now-possibly-stale version for its own PATCH -- doing so would send a
+    version the server has already superseded and deterministically 409/428 on every real writeback
+    against a card with a usable version (the ordinary case from agileplace.list_cards()). See
+    _card_for_link_write for how this is avoided."""
     card_id = card.get("id")
     key = _writeback_key(card.get("title", ""), issue["number"])
     agileplace.patch_card(cfg, apply, card, [agileplace.op_custom_id(key)],
@@ -221,7 +242,36 @@ def _writeback(cfg: dict, apply: bool, card: dict, issue: dict) -> None:
               "writeback (unsupported shape); customId writeback already completed")
     else:
         link_op = op_external_link(f"GitHub #{issue['number']}", issue["url"])
-        agileplace.patch_card(cfg, apply, card, [link_op], note=f"intake link -> {issue['url']}")
+        agileplace.patch_card(cfg, apply, _card_for_link_write(cfg, apply, card), [link_op],
+                              note=f"intake link -> {issue['url']}")
+
+
+def _card_for_link_write(cfg: dict, apply: bool, card: dict) -> dict:
+    """The card snapshot used for the SECOND writeback PATCH (the external link). Never mutates
+    `card`: returns it unchanged for a dry run (apply=False), or a distinct, freshly-fetched
+    snapshot for apply=True (see below) -- either way the caller's own `card` reference is intact.
+
+    The customId write just above may have bumped the card's server-side resource version.
+    agileplace._card_value_for_patch_path has no case for `/externalLink`, so agileplace's own
+    generic version-conflict recovery (patch_card's refetch-before-PATCH for a version-less card,
+    and its one-retry-on-409/428 path) can never validate or retry this path -- it always fails
+    closed and re-raises. Reusing `card`'s now-possibly-stale version here would therefore
+    deterministically 409/428 on every real apply=True writeback against a card with a usable
+    version (the ordinary agileplace.list_cards() case), with no recovery.
+
+    An explicit refetch here -- via the same agileplace.get_card GET the rest of this codebase
+    already uses -- sidesteps that gap by never sending a stale version in the first place, rather
+    than depending on agileplace to recover from a conflict it structurally can't validate. A
+    genuine concurrent edit landing in the narrow window between this refetch and the PATCH itself
+    still 409/428s and still propagates uncaught -- unchanged, intentional behavior (see
+    API-VALIDATION.md's "Reverse intake" section).
+
+    apply=False (dry run) returns `card` unchanged, performing zero network calls: patch_card's own
+    version-less-card path already tolerates a missing version without refetching when apply is
+    False, matching the dry-run convention every other codepath in this module follows."""
+    if not apply:
+        return card
+    return agileplace.get_card(cfg, card["id"])
 
 
 def _resume_or_create(cfg: dict, apply: bool, card: dict,

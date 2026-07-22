@@ -160,6 +160,18 @@ def test_card_outside_intake_lane_is_never_a_candidate_regardless_of_links():
     assert intake._is_candidate(card, {"lane-intake"}, set(), set()) is False
 
 
+def test_intake_candidates_boundary_excludes_a_card_outside_the_intake_lane():
+    """Same invariant as test_card_outside_intake_lane_is_never_a_candidate_regardless_of_links,
+    but pinned through the public intake_candidates() boundary by identity of the returned list --
+    so a regression that drops lane filtering inside intake_candidates() itself (rather than
+    delegating to _is_candidate) would still be caught."""
+    cards = [_card("card-1", lane_id="lane-backlog"), _card("card-2")]
+
+    result = intake.intake_candidates(cards, _lanes(), _stage_map(), _issues())
+
+    assert [c["id"] for c in result] == ["card-2"]
+
+
 def test_card_with_managed_custom_id_is_not_a_candidate():
     card = _card("card-1", custom_id="EP-0C")
 
@@ -172,6 +184,20 @@ def test_card_with_unmatched_custom_id_stays_a_candidate():
     card = _card("card-1", custom_id="stale-value")
 
     assert intake._is_candidate(card, {"lane-intake"}, set(), {"EP-0C"}) is True
+
+
+def test_intake_candidates_boundary_excludes_a_card_with_a_managed_custom_id():
+    """Same invariant as test_card_with_managed_custom_id_is_not_a_candidate, but pinned through
+    the public intake_candidates() boundary -- so a regression that wires the wrong disqualifying
+    set (e.g. an empty one, rather than _disqualifying_custom_ids(issues)) into _is_candidate from
+    inside intake_candidates() itself would still be caught. _issues()' fixture issues both have a
+    blank title, so their issue_custom_id() falls back to their bare issue number -- "1" here
+    matches issue #1's fallback customId."""
+    cards = [_card("card-1", custom_id="1"), _card("card-2")]
+
+    result = intake.intake_candidates(cards, _lanes(), _stage_map(), _issues())
+
+    assert [c["id"] for c in result] == ["card-2"]
 
 
 # --- a card lacking a usable id is never a candidate --------------------------
@@ -208,6 +234,46 @@ def test_intake_candidates_excludes_a_card_lacking_a_usable_id():
     assert [c.get("id") for c in result] == ["card-1"]
 
 
+# --- a card lacking a usable title is never a candidate -----------------------
+#
+# Otherwise promote() builds create_issue's `--title ''` (a CalledProcessError, uncaught) or, when
+# the title key is present but None, a straight-up TypeError from subprocess -- either way an
+# uncaught exception that crashes the whole sync run for one blank-titled Intake card.
+
+@pytest.mark.parametrize("title", [None, "", "   "])
+def test_card_lacking_a_usable_title_is_never_a_candidate(title):
+    card = {"id": "card-1", "laneId": "lane-intake", "title": title}
+
+    assert intake._is_candidate(card, {"lane-intake"}, set(), set()) is False
+
+
+def test_card_missing_the_title_key_entirely_is_never_a_candidate():
+    card = {"id": "card-1", "laneId": "lane-intake"}
+
+    assert intake._is_candidate(card, {"lane-intake"}, set(), set()) is False
+
+
+def test_card_with_non_string_title_is_never_a_candidate():
+    """Defensive against malformed AgilePlace payloads -- a non-string title must never crash the
+    check, and must never be treated as usable."""
+    card = {"id": "card-1", "laneId": "lane-intake", "title": 42}
+
+    assert intake._is_candidate(card, {"lane-intake"}, set(), set()) is False
+
+
+def test_intake_candidates_excludes_a_card_lacking_a_usable_title():
+    """Boundary-level: a card with a blank title sitting in the Intake lane must never come out of
+    intake_candidates(), regardless of the title-having candidate alongside it."""
+    cards = [
+        {"id": "card-blank", "laneId": "lane-intake", "title": "   "},
+        _card("card-1"),
+    ]
+
+    result = intake.intake_candidates(cards, _lanes(), _stage_map(), _issues())
+
+    assert [c.get("id") for c in result] == ["card-1"]
+
+
 # --- invariant 3: provenance_line never raises, always non-empty -------------
 
 @pytest.mark.parametrize("name", [
@@ -221,6 +287,13 @@ def test_provenance_line_never_raises_and_is_always_non_empty(name):
 
 def test_provenance_line_includes_the_given_name():
     assert "Jane Doe" in intake.provenance_line("Jane Doe")
+
+
+def test_provenance_line_success_format_is_exact():
+    """Pins the full success-path wording, not just substring containment of the name -- a reformat
+    that drops "Requested by ... via AgilePlace." while keeping the name would otherwise go
+    undetected (the substring-only test above would still pass)."""
+    assert intake.provenance_line("Jane Doe") == "Requested by Jane Doe via AgilePlace."
 
 
 def test_provenance_line_falls_back_when_name_is_missing():
@@ -557,6 +630,9 @@ def test_promote_resumes_a_card_whose_issue_already_carries_the_marker(monkeypat
     monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [
         _issue_with_body(7, "https://github.com/o/r/issues/7", marker),
     ])
+    monkeypatch.setattr(ghkit, "create_issue", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("marker-resume must never call create_issue -- a regression that skips "
+                       "the marker check before creating would otherwise double-create silently")))
     writeback_calls = []
     monkeypatch.setattr(intake, "_writeback",
                          lambda cfg, apply, card, issue: writeback_calls.append((card["id"], issue)))
@@ -578,6 +654,9 @@ def test_promote_resumes_a_card_whose_marked_issue_was_since_closed(monkeypatch)
     monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [
         _issue_with_body(7, "https://github.com/o/r/issues/7", marker, state="CLOSED"),
     ])
+    monkeypatch.setattr(ghkit, "create_issue", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("marker-resume must never call create_issue -- a regression that skips "
+                       "the marker check before creating would otherwise double-create silently")))
     writeback_calls = []
     monkeypatch.setattr(intake, "_writeback",
                          lambda cfg, apply, card, issue: writeback_calls.append((card["id"], issue)))
@@ -629,6 +708,10 @@ def test_promote_never_queues_a_lane_move_op(monkeypatch):
     ops_seen = []
     monkeypatch.setattr(agileplace, "patch_card",
                          lambda cfg, apply, card, ops, **k: ops_seen.extend(ops))
+    # apply=True below drives _writeback's second (link) write through _card_for_link_write's real
+    # agileplace.get_card refetch -- stubbed here since this test's concern is the /laneId
+    # invariant, not the refetch itself (see test_intake_writeback_version_conflict.py).
+    monkeypatch.setattr(agileplace, "get_card", lambda cfg, card_id: {"id": card_id, "version": 2})
     cards = [_card("card-1")]
 
     intake.promote({}, True, cards, _lanes(), _stage_map(), _issues())

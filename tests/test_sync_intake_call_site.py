@@ -22,6 +22,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import intake  # noqa: E402
 import sync  # noqa: E402
 
+# _mock_io is test_sync_main.py's richer I/O-boundary-mocking helper (lane/existing-card control,
+# a real patch_card mock to inspect) -- reused here rather than duplicated, for the one test below
+# that needs intake.promote() to run for REAL end-to-end (every other test in this file monkeypatches
+# intake.promote() itself, which _run_main's lighter stack below is built for).
+from test_sync_main import _card as _sync_main_card, _cfg as _sync_main_cfg, _mock_io  # noqa: E402
+
 ISSUE_URL = "https://github.com/acme/repo/issues/1"
 
 
@@ -107,3 +113,78 @@ def test_main_prints_no_intake_line_when_candidates_zero(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "intake:" not in out
+
+
+# --- end-to-end: intake.promote() runs for REAL through main() ---------------
+#
+# Every test above monkeypatches intake.promote() itself to pin the call-site contract in
+# isolation. This one lets it run for real (only its own collaborators -- ghkit.create_issue,
+# agileplace.patch_card, etc. -- are mocked), pinning two behavioral invariants together:
+# promoting an Intake candidate never queues a `/laneId` op, and the promoted card actually
+# receives both writeback PATCH calls (issue #62 critical-bug regression: before the version-
+# staleness fix in intake._writeback, the second of those two calls 409/428'd against a real
+# versioned card -- see tests/test_intake_writeback_version_conflict.py for the isolated version
+# of that regression).
+
+def _intake_card():
+    """A card sitting in the board's Intake lane with no external link and no customId -- the
+    shape intake.intake_candidates() must select."""
+    return {"id": "C-intake", "version": 1, "laneId": "lane-intake", "title": "Raw idea"}
+
+
+def test_main_wires_intake_promote_and_never_moves_the_promoted_cards_lane(tmp_path):
+    """main() must actually call intake.promote() with the full, unfiltered cards/lanes/stage_map/
+    issues it already loaded (not some later-filtered subset) -- and, end-to-end, promoting a
+    candidate must never queue a `/laneId` patch op for it. The newly created issue is also absent
+    from THIS run's active_issues (`issues` was fetched before promote() runs), so the ordinary
+    per-issue lane-sync loop cannot reach the new card this run either -- next run's ordinary sync
+    adopts it via the written-back link/customId like any other card."""
+    parsed = {ISSUE_URL: {
+        "item_id": "PVTI_1", "number": 1, "status": "Backlog", "start": None, "target": None,
+    }}
+    intake_lane = {"id": "lane-intake", "title": "New Requests"}
+    matched_card = _sync_main_card()
+    intake_card = _intake_card()
+    cfg = {**_sync_main_cfg(tmp_path), "stage_lane_map": {"Intake": ["New Requests"]}}
+    created_issue = {"number": 99, "url": "https://github.com/acme/repo/issues/99"}
+
+    stack, _, patch_card_mock, _ = _mock_io(
+        matched_card, (parsed, []), field_meta_return=None,
+        existing_cards=[matched_card, intake_card], lanes_return=[intake_lane])
+    state_file = tmp_path / ".sync-state.json"
+
+    # intake._card_for_link_write's real explicit refetch (issue #62 critical-bug fix) calls
+    # agileplace.get_card directly, bypassing the patch_card mock above -- stub it with a fresh,
+    # usable-version snapshot so the writeback's second PATCH proceeds normally.
+    with stack, patch("sync.env_config", return_value=cfg), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+         patch("ghkit.list_issue_bodies", return_value=[]), \
+         patch("ghkit.create_issue", return_value=created_issue) as create_issue_mock, \
+         patch("agileplace.get_card",
+               return_value={"id": intake_card["id"], "version": 2}):
+        sync.main()
+
+    # Wiring: main() actually invoked create_issue for the Intake-lane candidate, with the cfg
+    # main() itself loaded and the card's own title -- proof intake.promote() ran for real rather
+    # than being skipped or fed a stale/filtered argument.
+    create_issue_mock.assert_called_once()
+    called_cfg, called_apply, called_title, _called_body = create_issue_mock.call_args.args
+    assert called_cfg is cfg
+    assert called_apply is True
+    assert called_title == "Raw idea"
+
+    # Invariant: promotion never moves a card's lane -- neither the intake card's own writeback
+    # PATCH nor anything else in this run's full patch_card call list ever carries a /laneId op.
+    assert patch_card_mock.call_args_list, "expected at least the intake writeback PATCH calls"
+    for call in patch_card_mock.call_args_list:
+        ops = call.args[3]
+        assert all(op.get("path") != "/laneId" for op in ops)
+
+    # The intake card itself received its link + customId writeback PATCH calls. Matched by id,
+    # not object identity: the version-staleness fix (issue #62 critical bug) makes intake._writeback
+    # build a NEW, version-stripped dict for the second (link) write rather than reusing `card`, so
+    # only the first (customId) PATCH call still carries `intake_card` itself.
+    intake_calls = [call for call in patch_card_mock.call_args_list
+                    if call.args[2].get("id") == intake_card["id"]]
+    assert len(intake_calls) == 2
+    assert [call.args[3][0]["path"] for call in intake_calls] == ["/customId", "/externalLink"]

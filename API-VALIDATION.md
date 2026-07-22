@@ -328,22 +328,33 @@ alone, since this worktree has no `.env` and no live board to probe against:
 3. **The externalLink writeback has NO conflict-retry support -- this is intentional, not an
    oversight.** `agileplace.py`'s `_card_value_for_patch_path` (the table the 409/428
    conflict-retry path in `agileplace.patch_card` uses to recompute a stale op's value before
-   retrying) does not recognize `/externalLink` at all. So unlike the `customId` writeback (which
-   does retry once on a version conflict), a 409/428 hit on the link write is uncaught and
-   propagates as a failed run. `_writeback` in `intake.py` issues the `customId` write and the link
-   write as two SEPARATE `patch_card` calls, `customId` FIRST (fixed post-review, issue #62
-   follow-up): writing the more-reliable, retry-supported join-key write first means any failure
-   partway through leaves the card either fully unwritten (still a full candidate; the next run's
-   marker-resume scan retries the whole writeback) or customId-written-but-link-missing (still
-   fully tracked -- matched and reconciled by the ordinary sync via its customId -- just missing the
-   informational external-link decoration, which is never independently retried). The original
-   link-first ordering could instead strand a card permanently: a link write that succeeded followed
-   by a customId write that failed left a card matching a known target URL (disqualifying it from
-   `_is_candidate`) whose join key was never established, with no further retry path at all. This
-   asymmetry (one field retries, the other doesn't) is a deliberate fail-closed choice, not a gap:
-   extending `_card_value_for_patch_path` to cover `/externalLink` is a reasonable future
-   enhancement but was out of scope for this spike since it requires confirming the array shape
-   (finding 2) first.
+   retrying) does not recognize `/externalLink` at all -- and, per `agileplace.py`'s own file-budget
+   note (805/800 lines before this feature existed; see `intake.py`'s module docstring), extending
+   it to do so isn't free. So unlike the `customId` writeback (which does retry once on a version
+   conflict), a 409/428 hit on the link write is uncaught and propagates as a failed run.
+   `_writeback` in `intake.py` issues the `customId` write and the link write as two SEPARATE
+   `patch_card` calls, `customId` FIRST (fixed post-review, issue #62 follow-up): writing the
+   more-reliable, retry-supported join-key write first means any failure partway through leaves the
+   card either fully unwritten (still a full candidate; the next run's marker-resume scan retries
+   the whole writeback) or customId-written-but-link-missing (still fully tracked -- matched and
+   reconciled by the ordinary sync via its customId -- just missing the informational external-link
+   decoration, which is never independently retried). The original link-first ordering could
+   instead strand a card permanently: a link write that succeeded followed by a customId write that
+   failed left a card matching a known target URL (disqualifying it from `_is_candidate`) whose join
+   key was never established, with no further retry path at all.
+   **CRITICAL bug fixed post-review (issue #62 follow-up):** this two-separate-`patch_card`-calls
+   design has a sharper failure mode than "no retry on a genuine concurrent edit" -- the customId
+   write ITSELF bumps the card's server-side version, so the link write, issued against the SAME,
+   now-stale `card` snapshot, deterministically conflicted on every real apply=True writeback
+   against a card with a usable version (the ordinary `agileplace.list_cards()` case) -- and because
+   `_card_value_for_patch_path` doesn't recognize `/externalLink`, the conflict-retry path always
+   refused to recover (unsupported path -> always treated as "changed"), re-raising and aborting the
+   entire sync run. `_writeback` now routes the link write's card through `_card_for_link_write`,
+   which explicitly refetches the card via `agileplace.get_card` (apply=True only; a dry run reuses
+   `card` unchanged, zero network calls) before the second PATCH -- avoiding the self-inflicted
+   conflict outright rather than depending on a retry path that structurally can't recover from it.
+   A genuine concurrent edit landing in the narrow window between that refetch and the PATCH itself
+   still 409/428s and still propagates uncaught, unchanged from the original design intent above.
 4. **`card_web_url`'s host is an UNCONFIRMED best guess.** The issue body written for a promoted
    card links back to the card in AgilePlace's web app. No separate "web host" config key exists
    in `config.py`/`.env.example` distinct from `AGILEPLACE_HOST` (the API host), and no live board

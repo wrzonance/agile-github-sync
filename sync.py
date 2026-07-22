@@ -537,6 +537,22 @@ def _created_card_snapshot(cfg: dict, created: Mapping) -> Mapping:
     return fresh
 
 
+def _run_intake_promotion(cfg: dict, apply: bool, cards: list, lanes: list, stage_map: dict | None,
+                          issues: list[dict]) -> intake.IntakeSummary:
+    """Reverse intake (issue #62): promote unmanaged Intake-lane cards into new GitHub issues before
+    the card index below is built. Uses the FULL, unfiltered cards/issues (not the retirement-
+    filtered indices main() builds next, which #70 owns) -- intake candidate selection has nothing
+    to do with retirement. A card promoted this run is never lane-moved this run either: `issues` is
+    the run's already-fetched snapshot, so the newly created issue is absent from active_issues and
+    the ordinary per-issue lane-sync loop can't reach it until next run picks it up via its
+    written-back link. Prints the one-line summary only when there was at least one candidate."""
+    summary = intake.promote(cfg, apply, cards, lanes, stage_map, issues)
+    if summary.candidates:
+        print(f"intake: {summary.candidates} candidate(s) -- "
+              f"{summary.resumed} resumed, {summary.created} created")
+    return summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync GitHub -> AgilePlace (per-issue cards, lanes, connections, metadata)")
     parser.add_argument("--apply", action="store_true", help="actually write (default: verbose dry run)")
@@ -618,16 +634,7 @@ def main() -> None:
     cards = agileplace.list_cards(cfg) if online else []
     smap = cfg.get("stage_lane_map")
 
-    # Reverse intake (issue #62): promote unmanaged Intake-lane cards into new GitHub issues before
-    # the card index below is built. Uses the FULL, unfiltered cards/issues (not the retirement-
-    # filtered indices below, which #70 owns) -- intake candidate selection has nothing to do with
-    # retirement. A card promoted this run is never lane-moved this run either: `issues` was already
-    # fetched above, so the newly created issue is absent from active_issues and the ordinary
-    # per-issue lane-sync loop can't reach it until next run picks it up via its written-back link.
-    intake_summary = intake.promote(cfg, apply, cards, lanes, smap, issues)
-    if intake_summary.candidates:
-        print(f"intake: {intake_summary.candidates} candidate(s) -- "
-              f"{intake_summary.resumed} resumed, {intake_summary.created} created")
+    _run_intake_promotion(cfg, apply, cards, lanes, smap, issues)
 
     all_card_by_url, all_card_by_cid = {}, {}
     for card in cards:

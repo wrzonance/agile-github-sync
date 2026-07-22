@@ -350,7 +350,16 @@ def create_issue(cfg: dict, apply: bool, title: str, body: str) -> dict | None:
     apply=False prints the planned title and returns None, with zero calls to run() -- identical
     dry-run shape to edit_label/set_milestone. apply=True runs the create, parses the issue number
     out of gh's own stdout (a bare created-issue URL), and returns {"number", "url"}. Any
-    CalledProcessError/TimeoutExpired from run() propagates uncaught -- no swallowed sentinel."""
+    CalledProcessError/TimeoutExpired from run() propagates uncaught -- no swallowed sentinel.
+
+    Validates `title` at this boundary, before either the dry-run print or a live run() call: a
+    blank or non-string title would otherwise reach subprocess.Popen unvalidated -- None raises an
+    opaque TypeError ("argv must be str"), and "" produces a gh CalledProcessError -- either way an
+    exception nothing upstream catches, crashing the entire sync run for one bad title. Raises
+    ValueError with the offending value for context, matching edit_label's own boundary-validation
+    convention (unsafe label names)."""
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError(f"create_issue: title must be a non-empty string, got {title!r}")
     if not apply:
         print(f"DRY   gh issue create --title '{title}'")
         return None

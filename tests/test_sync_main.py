@@ -776,58 +776,7 @@ def test_non_epic_cards_do_not_trigger_child_reads(tmp_path):
 
     child_read_mock.assert_not_called()
 
-
-# --- issue #62 Task 6/8: intake.promote() wired into main()'s call site ------------------------
-
-def _intake_card():
-    """A card sitting in the board's Intake lane with no external link and no customId -- the
-    shape intake.intake_candidates() must select."""
-    return {"id": "C-intake", "version": 1, "laneId": "lane-intake", "title": "Raw idea"}
-
-
-def test_main_wires_intake_promote_and_never_moves_the_promoted_cards_lane(tmp_path):
-    """main() must actually call intake.promote() with the full, unfiltered cards/lanes/stage_map/
-    issues it already loaded (not some later-filtered subset) -- and, end-to-end, promoting a
-    candidate must never queue a `/laneId` patch op for it. The newly created issue is also absent
-    from THIS run's active_issues (`issues` was fetched before promote() runs), so the ordinary
-    per-issue lane-sync loop cannot reach the new card this run either -- next run's ordinary sync
-    adopts it via the written-back link/customId like any other card."""
-    parsed = {ISSUE_URL: {
-        "item_id": "PVTI_1", "number": 1, "status": "Backlog", "start": None, "target": None,
-    }}
-    intake_lane = {"id": "lane-intake", "title": "New Requests"}
-    matched_card = _card()
-    intake_card = _intake_card()
-    cfg = {**_cfg(tmp_path), "stage_lane_map": {"Intake": ["New Requests"]}}
-    created_issue = {"number": 99, "url": "https://github.com/acme/repo/issues/99"}
-
-    stack, _, patch_card_mock, _ = _mock_io(
-        matched_card, (parsed, []), field_meta_return=None,
-        existing_cards=[matched_card, intake_card], lanes_return=[intake_lane])
-    state_file = tmp_path / ".sync-state.json"
-
-    with stack, patch("sync.env_config", return_value=cfg), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
-         patch("ghkit.list_issue_bodies", return_value=[]), \
-         patch("ghkit.create_issue", return_value=created_issue) as create_issue_mock:
-        sync.main()
-
-    # Wiring: main() actually invoked create_issue for the Intake-lane candidate, with the cfg
-    # main() itself loaded and the card's own title -- proof intake.promote() ran for real rather
-    # than being skipped or fed a stale/filtered argument.
-    create_issue_mock.assert_called_once()
-    called_cfg, called_apply, called_title, _called_body = create_issue_mock.call_args.args
-    assert called_cfg is cfg
-    assert called_apply is True
-    assert called_title == "Raw idea"
-
-    # Invariant: promotion never moves a card's lane -- neither the intake card's own writeback
-    # PATCH nor anything else in this run's full patch_card call list ever carries a /laneId op.
-    assert patch_card_mock.call_args_list, "expected at least the intake writeback PATCH calls"
-    for call in patch_card_mock.call_args_list:
-        ops = call.args[3]
-        assert all(op.get("path") != "/laneId" for op in ops)
-
-    # The intake card itself received its link + customId writeback PATCH calls.
-    intake_calls = [call for call in patch_card_mock.call_args_list if call.args[2] is intake_card]
-    assert len(intake_calls) == 2
+# NOTE: the "issue #62 Task 6/8: intake.promote() wired into main()'s call site" end-to-end test
+# that used to live here has moved to tests/test_sync_intake_call_site.py (this file was already
+# over its 800-line budget; that file is this feature's dedicated, lighter-weight home -- see its
+# own module docstring).
