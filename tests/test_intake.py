@@ -295,6 +295,10 @@ def test_issue_body_never_raises_for_minimal_card():
 #   (4) Dry-run performs zero writes at the low-level transport boundary (ghkit.run /
 #       agileplace.mutate) while still reporting an accurate plan.
 #   (5) prescan_failed is True iff ghkit.list_issue_bodies() returns None.
+#
+# Plus the two edge cases the design flags as needing explicit coverage: marker-resume succeeding
+# on both an OPEN and a since-CLOSED promoted issue, and writeback's array-shaped-externalLinks
+# case (link write skipped + WARN, customId write still proceeds).
 # ================================================================================
 
 def _issue_with_body(number, url, body, state="OPEN"):
@@ -335,6 +339,18 @@ def test_find_marked_issue_is_idempotent_across_repeated_calls():
 def test_find_marked_issue_never_matches_a_different_cards_marker():
     issues = [_issue_with_body(1, "u1", intake.marker_for_card("card-OTHER"))]
     assert intake._find_marked_issue("card-1", issues) is None
+
+
+@pytest.mark.parametrize("state", ["OPEN", "CLOSED"])
+def test_find_marked_issue_resumes_regardless_of_issue_state(state):
+    """Resume is a pure marker search over body text -- a human closing the promoted issue (by
+    mistake or otherwise) must not hide it from marker-resume; the marker alone decides."""
+    marker = intake.marker_for_card("card-1")
+    issues = [_issue_with_body(1, "u1", marker, state=state)]
+
+    found = intake._find_marked_issue("card-1", issues)
+
+    assert found is not None and found["state"] == state
 
 
 # --- _writeback_key ------------------------------------------------------------
@@ -443,6 +459,25 @@ def test_promote_resumes_a_card_whose_issue_already_carries_the_marker(monkeypat
     assert writeback_calls == [("card-1", {
         "number": 7, "url": "https://github.com/o/r/issues/7", "state": "OPEN", "body": marker,
     })]
+
+
+def test_promote_resumes_a_card_whose_marked_issue_was_since_closed(monkeypatch):
+    """A promoted issue closed by a human (or an unrelated process) between runs must still be
+    found by marker-resume -- resume is never gated on issue state."""
+    marker = intake.marker_for_card("card-1")
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [
+        _issue_with_body(7, "https://github.com/o/r/issues/7", marker, state="CLOSED"),
+    ])
+    writeback_calls = []
+    monkeypatch.setattr(intake, "_writeback",
+                         lambda cfg, apply, card, issue: writeback_calls.append((card["id"], issue)))
+    cards = [_card("card-1")]
+
+    result = intake.promote({}, False, cards, _lanes(), _stage_map(), _issues())
+
+    assert result.resumed == 1
+    assert result.created == 0
+    assert writeback_calls[0][1]["state"] == "CLOSED"
 
 
 def test_promote_creates_a_new_issue_when_no_marker_found(monkeypatch):
