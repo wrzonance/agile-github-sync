@@ -380,3 +380,150 @@ def test_disallowed_href_scheme_never_leaks_into_markdown_output():
     html = '<a href="javascript:alert(1)">bad</a>'
     result = leankit_html_to_markdown(html)
     assert "javascript:" not in result
+
+
+# =====================================================================================
+# markdown_to_leankit_html -- MD->HTML block layer, plain-text inline content
+# =====================================================================================
+
+from richtext import (  # noqa: E402
+    _Block,
+    _ListFrame,
+    _parse_blocks,
+    _render_block_html,
+    markdown_to_leankit_html,
+)
+
+
+# --- invariant: nesting correctness (cross-block list folding) ---------------------------------
+
+@pytest.mark.parametrize(
+    "markdown, expected_html",
+    [
+        ("- one\n- two", "<ul><li>one</li><li>two</li></ul>"),
+        ("1. a\n2. b", "<ol><li>a</li><li>b</li></ol>"),
+        ("- parent\n  - child", "<ul><li>parent<ul><li>child</li></ul></li></ul>"),
+        ("- item\n\nafter", "<ul><li>item</li></ul><p>after</p>"),
+        ("before\n\n- item", "<p>before</p><ul><li>item</li></ul>"),
+    ],
+)
+def test_list_folding_preserves_nesting_and_numbering_across_blocks(markdown, expected_html):
+    assert markdown_to_leankit_html(markdown) == expected_html
+
+
+def test_three_level_nesting_closes_in_correct_lifo_order():
+    markdown = "- one\n  - two\n    - three"
+    result = markdown_to_leankit_html(markdown)
+    assert result == "<ul><li>one<ul><li>two<ul><li>three</li></ul></li></ul></li></ul>"
+
+
+def test_returning_to_a_shallower_depth_closes_the_deeper_list_first():
+    markdown = "- one\n  - nested\n- two"
+    result = markdown_to_leankit_html(markdown)
+    assert result == "<ul><li>one<ul><li>nested</li></ul></li><li>two</li></ul>"
+
+
+def test_switching_list_type_at_same_depth_closes_and_reopens_the_container():
+    markdown = "- bullet\n1. ordered"
+    result = markdown_to_leankit_html(markdown)
+    assert result == "<ul><li>bullet</li></ul><ol><li>ordered</li></ol>"
+
+
+def test_per_block_isolation_would_flatten_nesting_but_folding_does_not():
+    # Regression pin for the spike's failure mode: rendering each list_item block against an
+    # empty/local list_stack (instead of folding against the running stack) turns every item
+    # into its own single-item <ul>/<ol>, resetting numbering and losing nesting entirely.
+    markdown = "1. first\n2. second\n3. third"
+    result = markdown_to_leankit_html(markdown)
+    assert result.count("<ol>") == 1
+    assert result.count("</ol>") == 1
+    assert result == "<ol><li>first</li><li>second</li><li>third</li></ol>"
+
+
+# --- invariant: immutability --------------------------------------------------------------------
+
+def test_render_block_html_never_mutates_the_caller_supplied_list_stack():
+    original_stack = [_ListFrame(ordered=False, index=1)]
+    snapshot = list(original_stack)
+    block = _Block(kind="list_item", level=1, ordered=False, text="sibling")
+    _render_block_html(block, original_stack)
+    assert original_stack == snapshot
+
+
+def test_render_block_html_returns_a_new_list_stack_object():
+    original_stack = [_ListFrame(ordered=False, index=1)]
+    block = _Block(kind="list_item", level=1, ordered=False, text="sibling")
+    _, new_stack = _render_block_html(block, original_stack)
+    assert new_stack is not original_stack
+
+
+def test_render_block_html_does_not_mutate_stack_when_closing_lists_for_a_non_list_block():
+    original_stack = [_ListFrame(ordered=True, index=2)]
+    snapshot = list(original_stack)
+    block = _Block(kind="paragraph", level=0, ordered=False, text="after")
+    _render_block_html(block, original_stack)
+    assert original_stack == snapshot
+
+
+def test_parse_blocks_does_not_mutate_or_depend_on_input_string_identity():
+    markdown = "- one\n- two"
+    blocks_first = _parse_blocks(markdown)
+    blocks_second = _parse_blocks(markdown)
+    assert blocks_first == blocks_second
+    assert markdown == "- one\n- two"
+
+
+# --- invariant: whitelist closure (HTML output only uses the supported subset) -------------------
+
+@pytest.mark.parametrize(
+    "markdown, leaked_tag_syntax",
+    [
+        ("<script>alert(1)</script>", "<script"),
+        ('<div class="x">payload</div>', "<div"),
+        ("- <img src=x onerror=alert(1)>", "<img"),
+        ("plain <iframe src=evil></iframe> text", "<iframe"),
+    ],
+)
+def test_markdown_source_with_raw_html_never_leaks_unescaped_tags(markdown, leaked_tag_syntax):
+    result = markdown_to_leankit_html(markdown)
+    assert leaked_tag_syntax not in result
+
+
+def test_code_block_content_is_html_escaped_not_emitted_as_live_tags():
+    markdown = "```\n<script>alert(1)</script>\n```"
+    result = markdown_to_leankit_html(markdown)
+    assert "<script>alert(1)</script>" not in result
+    assert "&lt;script&gt;" in result
+
+
+def test_heading_and_list_item_text_is_html_escaped():
+    markdown = "# <b>Title</b>\n\n- <b>item</b>"
+    result = markdown_to_leankit_html(markdown)
+    assert "<b>" not in result
+    assert "&lt;b&gt;Title&lt;/b&gt;" in result
+    assert "&lt;b&gt;item&lt;/b&gt;" in result
+
+
+# --- boundary + totality --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad_input", [None, 123, 3.14, [], {}, b"bytes"])
+def test_markdown_to_leankit_html_raises_typeerror_at_the_str_boundary(bad_input):
+    with pytest.raises(TypeError, match="expected str, got"):
+        markdown_to_leankit_html(bad_input)
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "",
+        "   \n\n   ",
+        "- unclosed list with no trailing content",
+        "```\nunclosed fence",
+        "# " * 100,
+        ALL_PRINTABLE,
+        UNICODE_SAMPLE,
+    ],
+)
+def test_markdown_to_leankit_html_never_raises_over_arbitrary_content(markdown):
+    result = markdown_to_leankit_html(markdown)
+    assert isinstance(result, str)

@@ -42,6 +42,19 @@ class _ListFrame(NamedTuple):
     index: int
 
 
+class _Block(NamedTuple):
+    """One line-oriented Markdown block, pre-inline-rendering. ``level`` means heading depth
+    (1-6) for kind=='heading' and list-nesting depth (1-based) for kind=='list_item'; it is 0 and
+    unused for 'paragraph'/'code_block'/'blank'. ``ordered`` is only meaningful for 'list_item'.
+    ``text`` is the raw block content -- HTML-escaped (and, in a later task, inline-rendered) by
+    the block renderer, never by the parser."""
+
+    kind: str
+    level: int
+    ordered: bool
+    text: str
+
+
 # Characters that are ambiguous Markdown syntax in ANY position within a line -- always
 # backslash-escaped wherever they appear in text content.
 _INLINE_AMBIGUOUS_CHARS: frozenset[str] = frozenset({"*", "_", "~", "`", "[", "]", "\\"})
@@ -90,6 +103,12 @@ _LIST_INDENT_UNIT = "  "
 # Consecutive newlines beyond a single blank line collapse to the documented one-blank-line
 # block-separator convention.
 _BLANK_LINE_RUN = re.compile(r"\n{3,}")
+
+# Line-oriented block patterns for the MD->HTML direction. Only the documented supported subset
+# is recognized as structure; anything else falls through to plain paragraph text.
+_HEADING_LINE_RE = re.compile(r"^(#{1,6})[ \t]+(.*)$")
+_LIST_ITEM_LINE_RE = re.compile(r"^(?P<indent> *)(?:-|(?P<num>\d+)\.)[ \t]+(?P<content>.*)$")
+_CODE_FENCE_LINE_RE = re.compile(r"^```")
 
 
 def _escape_html_text(text: str) -> str:
@@ -378,3 +397,161 @@ def leankit_html_to_markdown(html: str) -> str:
     walker.feed(html)
     walker.close()
     return walker.get_markdown()
+
+
+# =====================================================================================
+# MD->HTML direction
+# =====================================================================================
+
+
+def _flush_paragraph(lines: list[str], blocks: list[_Block]) -> list[str]:
+    """Return a new (empty) paragraph-line buffer, appending the accumulated lines as one
+    _Block to ``blocks`` first if there were any. ``blocks`` is appended to in place (it is the
+    caller's own accumulator, not a shared/aliased input); ``lines`` itself is never mutated --
+    the caller always receives a fresh list back."""
+    if lines:
+        blocks.append(_Block(kind="paragraph", level=0, ordered=False, text="\n".join(lines)))
+    return []
+
+
+def _parse_blocks(md: str) -> list[_Block]:
+    """Line-oriented scan of ``md`` into _Block values: fenced code, ATX headings (1-6 '#'),
+    '-'/'N.' list items (nesting depth from 2-space indent units), blank-line separators, and
+    paragraphs (consecutive otherwise-unrecognized lines, newline-joined). Never raises -- any
+    line that doesn't match a structural pattern falls through to paragraph text."""
+    lines = md.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks: list[_Block] = []
+    paragraph_lines: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if _CODE_FENCE_LINE_RE.match(line.lstrip()):
+            paragraph_lines = _flush_paragraph(paragraph_lines, blocks)
+            i, code_text = _scan_code_fence(lines, i)
+            blocks.append(_Block(kind="code_block", level=0, ordered=False, text=code_text))
+            continue
+        heading_match = _HEADING_LINE_RE.match(line)
+        if heading_match:
+            paragraph_lines = _flush_paragraph(paragraph_lines, blocks)
+            hashes, text = heading_match.groups()
+            blocks.append(_Block(kind="heading", level=len(hashes), ordered=False, text=text.strip()))
+            i += 1
+            continue
+        list_match = _LIST_ITEM_LINE_RE.match(line)
+        if list_match:
+            paragraph_lines = _flush_paragraph(paragraph_lines, blocks)
+            level = len(list_match.group("indent")) // len(_LIST_INDENT_UNIT) + 1
+            ordered = list_match.group("num") is not None
+            blocks.append(_Block(kind="list_item", level=level, ordered=ordered, text=list_match.group("content")))
+            i += 1
+            continue
+        if line.strip() == "":
+            paragraph_lines = _flush_paragraph(paragraph_lines, blocks)
+            blocks.append(_Block(kind="blank", level=0, ordered=False, text=""))
+            i += 1
+            continue
+        paragraph_lines = paragraph_lines + [line]
+        i += 1
+    _flush_paragraph(paragraph_lines, blocks)
+    return blocks
+
+
+def _scan_code_fence(lines: list[str], start: int) -> tuple[int, str]:
+    """Collect the literal lines of a fenced code block opening at ``lines[start]``. Returns the
+    index just past the closing fence (or past EOF if the fence is never closed -- tolerated, not
+    an error) and the joined code text."""
+    i = start + 1
+    n = len(lines)
+    code_lines: list[str] = []
+    while i < n and not _CODE_FENCE_LINE_RE.match(lines[i].lstrip()):
+        code_lines.append(lines[i])
+        i += 1
+    return i + 1, "\n".join(code_lines)
+
+
+def _open_list_container_html(ordered: bool) -> str:
+    return "<ol>" if ordered else "<ul>"
+
+
+def _close_list_frame_html(frame: _ListFrame) -> str:
+    """Close one nesting level's still-open <li> and its container -- every frame on a
+    list_stack always represents a currently-open <li>, so closing a frame always closes both."""
+    return "</li>" + ("</ol>" if frame.ordered else "</ul>")
+
+
+def _close_open_lists_html(list_stack: list[_ListFrame]) -> str:
+    return "".join(_close_list_frame_html(frame) for frame in reversed(list_stack))
+
+
+def _render_list_item(block: _Block, list_stack: list[_ListFrame]) -> tuple[str, list[_ListFrame]]:
+    """Fold one list_item block against the TOP of the incoming ``list_stack`` (never mutated --
+    a local copy is built and returned) to decide: close deeper levels no longer present, close
+    and reopen the container when the list type changes at the same depth, or open new deeper
+    levels while leaving the parent <li> open so the child list nests inside it. The rendered
+    <li> is deliberately left unclosed here; it closes when its sibling/parent eventually does,
+    which is what makes real HTML list nesting (not per-item isolation) work."""
+    html_parts: list[str] = []
+    stack = list(list_stack)
+
+    while len(stack) > block.level:
+        html_parts.append(_close_list_frame_html(stack[-1]))
+        stack = stack[:-1]
+
+    if len(stack) == block.level and stack:
+        top = stack[-1]
+        html_parts.append("</li>")
+        if top.ordered != block.ordered:
+            html_parts.append("</ol>" if top.ordered else "</ul>")
+            html_parts.append(_open_list_container_html(block.ordered))
+            top = _ListFrame(ordered=block.ordered, index=0)
+        stack = stack[:-1] + [top._replace(index=top.index + 1)]
+    else:
+        while len(stack) < block.level:
+            html_parts.append(_open_list_container_html(block.ordered))
+            stack = stack + [_ListFrame(ordered=block.ordered, index=1)]
+
+    html_parts.append(f"<li>{_escape_html_text(block.text)}")
+    return "".join(html_parts), stack
+
+
+def _render_non_list_block(block: _Block) -> str:
+    if block.kind == "heading":
+        tag = f"h{block.level}"
+        return f"<{tag}>{_escape_html_text(block.text)}</{tag}>"
+    if block.kind == "code_block":
+        return f"<pre><code>{_escape_html_text(block.text)}\n</code></pre>"
+    if block.kind == "paragraph":
+        content = "<br>".join(_escape_html_text(line) for line in block.text.split("\n"))
+        return f"<p>{content}</p>"
+    # kind == "blank": a pure block separator -- nothing to emit.
+    return ""
+
+
+def _render_block_html(block: _Block, list_stack: list[_ListFrame]) -> tuple[str, list[_ListFrame]]:
+    """Render one block to HTML, folding list state against ``list_stack`` (never mutates the
+    caller's list -- always returns a new one). A non-list block first closes every list still
+    open on ``list_stack``, matching real HTML nesting rules (a list can't stay open across a
+    heading/paragraph/code block)."""
+    if block.kind == "list_item":
+        return _render_list_item(block, list_stack)
+    closing = _close_open_lists_html(list_stack)
+    return closing + _render_non_list_block(block), []
+
+
+def markdown_to_leankit_html(md: str) -> str:
+    """Translate GitHub-flavored Markdown into AgilePlace's HTML subset. Raises TypeError if
+    ``md`` isn't a str; otherwise never raises. Block content is currently rendered as escaped
+    plain text (inline formatting -- bold/italic/links/code spans within a block -- is wired in a
+    later stage of this module); the block structure itself (headings, fenced code, cross-block
+    list nesting/numbering) is already fully folded here."""
+    if not isinstance(md, str):
+        raise TypeError(f"markdown_to_leankit_html: expected str, got {type(md).__name__}")
+    blocks = _parse_blocks(md)
+    html_parts: list[str] = []
+    list_stack: list[_ListFrame] = []
+    for block in blocks:
+        rendered, list_stack = _render_block_html(block, list_stack)
+        html_parts.append(rendered)
+    html_parts.append(_close_open_lists_html(list_stack))
+    return "".join(html_parts)
