@@ -25,6 +25,8 @@ Degradation table (asymmetries -- never a crash, never unsanitized passthrough)
 | ``javascript:``/other disallowed href scheme     | link degrades to text, href omitted             |
 | Unclosed ``<strong>``/``<em>``/``<s>``/``<code>`` | force-closed at end of output (stays balanced)  |
 | Raw ``<tag>`` typed directly into Markdown source | escaped to literal text, never parsed as a tag  |
+| Markdown delimiter with no matching close         | degrades to literal delimiter text, no tag      |
+| Nesting past _MAX_INLINE_DEPTH levels deep         | remainder emitted as literal text, never raises |
 """
 from __future__ import annotations
 
@@ -470,6 +472,238 @@ def _scan_code_fence(lines: list[str], start: int) -> tuple[int, str]:
     return i + 1, "\n".join(code_lines)
 
 
+# Bold/italic/strikethrough markers tried in this fixed precedence order at each inline scan
+# position -- "**" is checked before "*" so a bold span is never mis-split into two italic opens.
+_INLINE_FORMAT_DELIMITERS: tuple[tuple[str, str], ...] = (
+    ("**", "strong"),
+    ("*", "em"),
+    ("~~", "s"),
+)
+
+# Caps how many levels of nested inline-format spans (bold-containing-italic-containing-strike, a
+# link containing more links, etc.) _parse_inline_span will open before giving up and treating
+# every remaining character as literal text -- bounds recursion depth against pathologically deep
+# nested-delimiter input rather than raising RecursionError or doing unbounded work.
+_MAX_INLINE_DEPTH = 20
+
+# Caps how far _find_closing_delimiter scans looking for a matching close marker. Without this, a
+# pathological input with many unmatched open delimiters (e.g. "[" * 20_000 with no "]" anywhere)
+# would force a scan of the entire remaining text at every one of n positions -- O(n^2) total work
+# even though each individual scan is fast. Bounding the window keeps total work linear regardless
+# of how the input is shaped; every legitimate span in this module's supported vocabulary (short
+# prose fragments) is far shorter than this.
+_MAX_DELIMITER_SCAN = 2000
+
+# Bracket/paren balance-matching (_find_balanced_close, used for link syntax) walks every char of
+# its scan window in Python rather than via C-accelerated str.find, since it must track nesting
+# depth. A pathological run of unmatched openers (e.g. "[" * 20_000) still costs O(window) per
+# position -- kept safely linear-in-practice with a tighter window than _MAX_DELIMITER_SCAN, since
+# link text in this module's supported vocabulary is always a short phrase, never a long span.
+_MAX_LINK_SCAN = 500
+
+# Positional placeholder _extract_code_spans swaps in for protected code-span content. NUL is not
+# a character this module's HTML/Markdown escaping ever produces, so a placeholder-shaped
+# substring in the rendered HTML can only originate from a NUL byte already present in the
+# *original* input, never from this module's own output.
+_CODE_SPAN_PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
+
+
+def _is_backslash_escaped(text: str, index: int) -> bool:
+    """True if ``text[index]`` is immediately preceded by an odd number of backslashes -- i.e. it
+    is escaped (a literal char), not a live delimiter. An even count (including zero) means the
+    backslashes themselves are escaped pairs and ``text[index]`` is unescaped."""
+    count = 0
+    i = index - 1
+    while i >= 0 and text[i] == "\\":
+        count += 1
+        i -= 1
+    return count % 2 == 1
+
+
+def _find_closing_delimiter(text: str, start: int, delimiter: str) -> int:
+    """Index of the next unescaped occurrence of ``delimiter`` at or after ``start``, or -1 if
+    none exists within the bounded scan window (_MAX_DELIMITER_SCAN chars past ``start``) or
+    before the end of ``text``. Uses str.find (C-speed substring search) to jump between
+    candidate occurrences rather than scanning character-by-character in Python -- what keeps a
+    pathological run of unmatched delimiters (which never finds a match at all) from costing
+    Python-level work proportional to the scan window at every position."""
+    limit = min(len(text), start + _MAX_DELIMITER_SCAN)
+    search_from = start
+    while search_from < limit:
+        candidate = text.find(delimiter, search_from, limit)
+        if candidate == -1:
+            return -1
+        if not _is_backslash_escaped(text, candidate):
+            return candidate
+        search_from = candidate + 1
+    return -1
+
+
+def _extract_code_spans(text: str) -> tuple[str, list[str]]:
+    """Replace each backtick-delimited code span in already-HTML-escaped ``text`` with a
+    positional placeholder, returning (placeholder_text, protected_contents) so the span's content
+    bypasses both delimiter substitution and the closing unescape pass -- mirroring in_code/in_pre's
+    literal handling on the HTML->MD side. A backslash-escaped backtick (``\\```) is not treated as
+    a delimiter, matching _find_closing_delimiter's escape-aware scanning used everywhere else in
+    this module."""
+    out: list[str] = []
+    protected: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "\\" and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if text[i] == "`":
+            close = _find_closing_delimiter(text, i + 1, "`")
+            if close != -1:
+                protected.append(text[i + 1:close])
+                out.append(f"\x00{len(protected) - 1}\x00")
+                i = close + 1
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out), protected
+
+
+def _reinsert_code_spans(html: str, protected: list[str]) -> str:
+    """Splice protected code-span content back into ``html`` at each positional placeholder,
+    verbatim (already HTML-escaped, never re-passed through the unescape pass). A placeholder-
+    shaped substring that doesn't correspond to a real protected span -- possible only if the
+    original input happened to contain a literal NUL byte shaped just like this module's internal
+    marker -- is left untouched rather than raising: totality over arbitrary content is a hard
+    invariant of this module's public functions."""
+    def _replace(match: re.Match[str]) -> str:
+        index = int(match.group(1))
+        if 0 <= index < len(protected):
+            return f"<code>{protected[index]}</code>"
+        return match.group(0)
+
+    return _CODE_SPAN_PLACEHOLDER_RE.sub(_replace, html)
+
+
+def _find_balanced_close(text: str, start: int, open_char: str, close_char: str) -> int:
+    """Index of the char in ``text[start:]`` that balances a single already-consumed
+    ``open_char`` (the one immediately before ``start``), tracking nested open/close pairs so
+    ``[a[b]c](url)`` finds the outer ``]`` rather than the inner one -- unlike
+    _find_closing_delimiter's nearest-occurrence search, which is only correct for symmetric
+    markers (the same string opens and closes, e.g. ``**``) and would wrongly pair an inner
+    link's close with an outer link's open. Backslash-escaped chars don't count toward the
+    balance. Bounded by _MAX_LINK_SCAN so a pathological run of unmatched openers costs linear,
+    not quadratic, work."""
+    depth = 1
+    limit = min(len(text), start + _MAX_LINK_SCAN)
+    i = start
+    while i < limit:
+        if text[i] == "\\" and i + 1 < limit:
+            i += 2
+            continue
+        if text[i] == open_char:
+            depth += 1
+        elif text[i] == close_char:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _try_parse_link(text: str, pos: int, depth: int) -> tuple[str, int] | None:
+    """If ``text[pos]`` opens a well-formed ``[text](href)`` link, render it -- recursing into the
+    link text at ``depth + 1`` so nested formatting inside link text still works -- and return
+    (html, position_after_the_closing_paren). Returns None when it isn't a link, so the caller
+    falls through to treating ``[`` as a literal character."""
+    close_bracket = _find_balanced_close(text, pos + 1, "[", "]")
+    if close_bracket == -1:
+        return None
+    if close_bracket + 1 >= len(text) or text[close_bracket + 1] != "(":
+        return None
+    close_paren = _find_balanced_close(text, close_bracket + 2, "(", ")")
+    if close_paren == -1:
+        return None
+    link_text = text[pos + 1:close_bracket]
+    href = _sanitize_href(text[close_bracket + 2:close_paren])
+    inner_html = _render_inline_run(link_text, depth + 1)
+    if href is None:
+        return inner_html, close_paren + 1
+    return f'<a href="{href}">{inner_html}</a>', close_paren + 1
+
+
+def _try_parse_delimited_span(
+    text: str, pos: int, depth: int, delimiter: str, tag: str
+) -> tuple[str, int] | None:
+    """If ``text[pos:]`` opens with ``delimiter``, find its matching close and render the content
+    between them (recursing at ``depth + 1``) wrapped in ``<tag>``. Returns None -- so the caller
+    falls through to literal-character handling -- when there's no close, or the span would be
+    empty (adjacent delimiters with nothing between them, e.g. ``****``)."""
+    dlen = len(delimiter)
+    if text[pos:pos + dlen] != delimiter:
+        return None
+    close = _find_closing_delimiter(text, pos + dlen, delimiter)
+    if close == -1 or close == pos + dlen:
+        return None
+    inner_html = _render_inline_run(text[pos + dlen:close], depth + 1)
+    return f"<{tag}>{inner_html}</{tag}>", close + dlen
+
+
+def _parse_inline_span(text: str, pos: int, depth: int) -> tuple[str, int]:
+    """Render exactly one token of ``text[pos:]`` -- a link, a nested format span, a backslash-
+    escaped literal pair, or a single literal char -- in fixed precedence order (link, then
+    **bold**, *italic*, ~~strike~~) and return (html_fragment, position_after_the_token). A
+    backslash-escaped pair is emitted verbatim (untouched) rather than treated as a delimiter --
+    the trailing _unescape_markdown_text pass in _render_inline_html is what later strips the
+    backslash. Once ``depth`` reaches _MAX_INLINE_DEPTH, no further spans are opened and every
+    remaining character is emitted literally one at a time; this is the recursion-depth bound
+    against pathologically deep nested-delimiter input."""
+    if pos >= len(text):
+        return "", pos
+    ch = text[pos]
+    if ch == "\\" and pos + 1 < len(text):
+        return text[pos:pos + 2], pos + 2
+    if depth < _MAX_INLINE_DEPTH:
+        if ch == "[":
+            link = _try_parse_link(text, pos, depth)
+            if link is not None:
+                return link
+        for delimiter, tag in _INLINE_FORMAT_DELIMITERS:
+            span = _try_parse_delimited_span(text, pos, depth, delimiter, tag)
+            if span is not None:
+                return span
+    return ch, pos + 1
+
+
+def _render_inline_run(text: str, depth: int) -> str:
+    """Render the whole of ``text`` -- a block's full content, or one delimiter span's inner
+    slice -- by repeatedly invoking _parse_inline_span until it's consumed, concatenating each
+    fragment. Passing each recursive call a fresh substring (rather than an (outer_text, end_bound)
+    pair into the original string) is what keeps a span's inner search from ever running past its
+    own closing delimiter into the surrounding text."""
+    out: list[str] = []
+    pos = 0
+    n = len(text)
+    while pos < n:
+        fragment, pos = _parse_inline_span(text, pos, depth)
+        out.append(fragment)
+    return "".join(out)
+
+
+def _render_inline_html(text: str) -> str:
+    """Render one block's raw Markdown text to its AgilePlace HTML subset. HTML-escape first (so
+    raw '<'/'>'/'&'/'"' typed directly into the Markdown source is inert before any tag-producing
+    substitution runs, and any href later pulled out of a ``(...)`` is already attribute-safe),
+    protect code spans (their content stays literal -- it bypasses both delimiter substitution and
+    the closing unescape pass), apply link/bold/italic/strike substitution via the recursive-
+    descent _parse_inline_span, unescape backslash-escaped Markdown syntax chars back to their
+    literal form (the true inverse of _escape_markdown_text applied on the HTML->MD side), and
+    finally splice the protected code-span content back in verbatim."""
+    escaped = _escape_html_text(text)
+    protected_text, code_spans = _extract_code_spans(escaped)
+    rendered = _render_inline_run(protected_text, depth=0)
+    unescaped = _unescape_markdown_text(rendered)
+    return _reinsert_code_spans(unescaped, code_spans)
+
+
 def _open_list_container_html(ordered: bool) -> str:
     return "<ol>" if ordered else "<ul>"
 
@@ -511,18 +745,20 @@ def _render_list_item(block: _Block, list_stack: list[_ListFrame]) -> tuple[str,
             html_parts.append(_open_list_container_html(block.ordered))
             stack = stack + [_ListFrame(ordered=block.ordered, index=1)]
 
-    html_parts.append(f"<li>{_escape_html_text(block.text)}")
+    html_parts.append(f"<li>{_render_inline_html(block.text)}")
     return "".join(html_parts), stack
 
 
 def _render_non_list_block(block: _Block) -> str:
     if block.kind == "heading":
         tag = f"h{block.level}"
-        return f"<{tag}>{_escape_html_text(block.text)}</{tag}>"
+        return f"<{tag}>{_render_inline_html(block.text)}</{tag}>"
     if block.kind == "code_block":
+        # Fenced code content is literal Markdown -- never inline-substituted -- so it's HTML-
+        # escaped directly rather than routed through _render_inline_html.
         return f"<pre><code>{_escape_html_text(block.text)}\n</code></pre>"
     if block.kind == "paragraph":
-        content = "<br>".join(_escape_html_text(line) for line in block.text.split("\n"))
+        content = "<br>".join(_render_inline_html(line) for line in block.text.split("\n"))
         return f"<p>{content}</p>"
     # kind == "blank": a pure block separator -- nothing to emit.
     return ""
@@ -541,10 +777,11 @@ def _render_block_html(block: _Block, list_stack: list[_ListFrame]) -> tuple[str
 
 def markdown_to_leankit_html(md: str) -> str:
     """Translate GitHub-flavored Markdown into AgilePlace's HTML subset. Raises TypeError if
-    ``md`` isn't a str; otherwise never raises. Block content is currently rendered as escaped
-    plain text (inline formatting -- bold/italic/links/code spans within a block -- is wired in a
-    later stage of this module); the block structure itself (headings, fenced code, cross-block
-    list nesting/numbering) is already fully folded here."""
+    ``md`` isn't a str; otherwise never raises. Block structure (headings, fenced code, cross-
+    block list nesting/numbering) is folded by _render_block_html; inline formatting within each
+    block's text (bold/italic/strikethrough/links/code spans) is rendered by _render_inline_html.
+    A delimiter with no matching close, or a link with a disallowed href scheme, degrades to plain
+    (HTML-escaped) text rather than emitting an unbalanced or unsafe tag."""
     if not isinstance(md, str):
         raise TypeError(f"markdown_to_leankit_html: expected str, got {type(md).__name__}")
     blocks = _parse_blocks(md)

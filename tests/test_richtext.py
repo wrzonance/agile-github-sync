@@ -527,3 +527,161 @@ def test_markdown_to_leankit_html_raises_typeerror_at_the_str_boundary(bad_input
 def test_markdown_to_leankit_html_never_raises_over_arbitrary_content(markdown):
     result = markdown_to_leankit_html(markdown)
     assert isinstance(result, str)
+
+
+# =====================================================================================
+# markdown_to_leankit_html -- inline formatting layer: bold/italic/strike/links/code spans
+# =====================================================================================
+
+import time  # noqa: E402
+
+from richtext import _MAX_INLINE_DEPTH, _render_inline_html  # noqa: E402
+
+
+# --- invariant: content conservation (inline substitution) -------------------------------------
+
+@pytest.mark.parametrize(
+    "markdown, expected_html",
+    [
+        ("**bold**", "<p><strong>bold</strong></p>"),
+        ("*italic*", "<p><em>italic</em></p>"),
+        ("~~strike~~", "<p><s>strike</s></p>"),
+        ("`code()`", "<p><code>code()</code></p>"),
+        ("[click](https://example.com)", '<p><a href="https://example.com">click</a></p>'),
+        (
+            "**bold *and nested* text**",
+            "<p><strong>bold <em>and nested</em> text</strong></p>",
+        ),
+        (
+            "**[a link](https://example.com) inside bold**",
+            '<p><strong><a href="https://example.com">a link</a> inside bold</strong></p>',
+        ),
+        ("# **Bold** heading", "<h1><strong>Bold</strong> heading</h1>"),
+        ("- **bold** item", "<ul><li><strong>bold</strong> item</li></ul>"),
+        ("plain text, no markers", "<p>plain text, no markers</p>"),
+    ],
+)
+def test_inline_formatting_renders_the_supported_subset(markdown, expected_html):
+    assert markdown_to_leankit_html(markdown) == expected_html
+
+
+def test_link_with_disallowed_href_scheme_degrades_to_text_only():
+    result = markdown_to_leankit_html("[bad](javascript:alert(1))")
+    assert result == "<p>bad</p>"
+    assert "javascript:" not in result
+
+
+def test_code_span_content_is_never_inline_substituted():
+    result = markdown_to_leankit_html("`*not bold* and _not italic_`")
+    assert result == "<p><code>*not bold* and _not italic_</code></p>"
+
+
+def test_unclosed_bold_marker_degrades_to_literal_text_not_a_dangling_tag():
+    result = markdown_to_leankit_html("**unclosed bold")
+    assert result == "<p>**unclosed bold</p>"
+    assert "<strong>" not in result
+
+
+# --- invariant: escape/unescape are true inverses outside protected code-span regions -----------
+
+def test_literal_ambiguous_char_survives_full_round_trip_without_becoming_a_delimiter():
+    html = "<p>a*b</p>"
+    md = leankit_html_to_markdown(html)
+    assert md == "a\\*b"
+    assert markdown_to_leankit_html(md) == html
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<p>Hello <strong>world</strong></p>",
+        "<p>Some <em>italic</em> text.</p>",
+        "<p>Some <s>struck</s> text</p>",
+        "<p>Inline <code>code()</code> span.</p>",
+        '<p><a href="https://example.com">click</a></p>',
+        "<p>Bold <strong>and <em>nested</em> italic</strong> together</p>",
+    ],
+)
+def test_html_to_markdown_to_html_round_trip_is_the_identity_for_supported_vocabulary(html):
+    assert markdown_to_leankit_html(leankit_html_to_markdown(html)) == html
+
+
+def test_backslash_escaped_delimiter_inside_code_span_stays_literal_after_reinsertion():
+    # A backslash preceding an ambiguous char INSIDE a code span was never produced by this
+    # module's escaper for code content (code bypasses _escape_markdown_text on the HTML->MD
+    # side), so it must survive the MD->HTML code-span path completely untouched -- no unescape
+    # pass reaches inside a protected region.
+    result = markdown_to_leankit_html("`a\\*b`")
+    assert result == "<p><code>a\\*b</code></p>"
+
+
+# --- invariant: bounded work (no catastrophic blowup on pathological delimiter runs) ------------
+
+@pytest.mark.parametrize(
+    "pathological_markdown",
+    [
+        "*" * 30_000,
+        "[" * 20_000,
+        "**" * 15_000,
+        "~~" * 15_000,
+        "*a" * 15_000,
+    ],
+)
+def test_pathological_repeated_delimiters_complete_in_bounded_time(pathological_markdown):
+    start = time.monotonic()
+    result = markdown_to_leankit_html(pathological_markdown)
+    elapsed = time.monotonic() - start
+    assert isinstance(result, str)
+    assert elapsed < 3.0
+
+
+def test_deeply_nested_links_are_capped_by_max_inline_depth_without_recursion_error():
+    depth = _MAX_INLINE_DEPTH + 10
+    markdown = "text"
+    for _ in range(depth):
+        markdown = f"[{markdown}](https://example.com)"
+    result = markdown_to_leankit_html(markdown)
+    assert isinstance(result, str)
+    # Depth is capped: strictly fewer <a> tags open than the requested nesting depth, and never
+    # more than the cap itself.
+    assert result.count("<a href") == _MAX_INLINE_DEPTH
+
+
+# --- invariant: whitelist closure (HTML output only uses the supported subset) ------------------
+
+@pytest.mark.parametrize(
+    "markdown, leaked_tag_syntax",
+    [
+        ("**<script>evil()</script>**", "<script"),
+        ("[click](javascript:alert(1))", "javascript:"),
+        ("`<img src=x onerror=alert(1)>`", "<img"),
+    ],
+)
+def test_inline_formatting_never_leaks_unsupported_tag_syntax(markdown, leaked_tag_syntax):
+    result = markdown_to_leankit_html(markdown)
+    assert leaked_tag_syntax not in result
+
+
+# --- invariant: text-node safety (inline link text / attribute injection) -----------------------
+
+def test_link_text_containing_raw_html_is_escaped_not_parsed_as_tags():
+    result = markdown_to_leankit_html("[<script>alert(1)</script>](https://example.com)")
+    assert "<script>" not in result
+    assert "&lt;script&gt;" in result
+
+
+def test_href_attribute_cannot_be_broken_out_of_by_a_quote_character():
+    result = markdown_to_leankit_html('[x](https://example.com/" onmouseover="alert(1))')
+    assert '" onmouseover="' not in result
+    assert "&quot;" in result
+
+
+# --- direct unit coverage of _render_inline_html --------------------------------------------------
+
+def test_render_inline_html_reinsert_never_raises_on_out_of_range_placeholder_pattern():
+    # A literal NUL-byte-and-digits sequence in the source text happens to be shaped like this
+    # module's internal code-span placeholder token. Reinsertion must degrade gracefully (leave it
+    # untouched) rather than raising an IndexError -- totality is a hard invariant regardless of
+    # how contrived the input.
+    result = _render_inline_html("\x009\x00 no real code span here")
+    assert isinstance(result, str)
