@@ -296,6 +296,23 @@ def test_code_span_fence_at_true_line_start_is_not_misparsed_as_a_fenced_code_bl
     assert markdown_to_leankit_html(markdown) == expected_html
 
 
+def test_longer_fence_opener_is_not_closed_by_a_shorter_backtick_run():
+    # Per CommonMark, a closing fence must be at least as long as its opener -- a 4-backtick
+    # fence commonly wraps code that itself contains a 3-backtick fence line, and that inner
+    # line is content, not the closer.
+    markdown = "````\ninner\n```\nstill code\n````\ntail"
+    result = markdown_to_leankit_html(markdown)
+    assert "inner\n```\nstill code" in result
+    assert "<p>tail</p>" in result
+
+
+def test_fence_closed_by_a_longer_backtick_run_still_closes():
+    markdown = "```\ncode\n````\ntail"
+    result = markdown_to_leankit_html(markdown)
+    assert "<p>tail</p>" in result
+    assert "code" in result
+
+
 def test_code_span_strips_exactly_one_leading_and_trailing_space_of_padding():
     # Per GFM: when a span's content both begins and ends with a space (and isn't all spaces),
     # exactly one leading/trailing space is stripped -- this is what lets a code span's content

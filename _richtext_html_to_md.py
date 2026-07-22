@@ -149,6 +149,12 @@ class _MarkdownWalker(HTMLParser):
         elif tag == "br":
             self.buffer.append("\n")
         elif tag == "pre":
+            if self.in_code and not self.in_pre:
+                # Malformed: <pre> opening inside an active <code> span (a block element inside
+                # an inline one). Same degrade as a directly-nested <code>: don't emit a fence
+                # mid-span -- the <pre>'s content just keeps buffering into the enclosing span
+                # (handle_data's in_code branch), and _close_pre ignores the matching </pre>.
+                return
             self._ensure_block_separator()
             self.in_pre = True
             self.buffer.append("```\n")
@@ -302,6 +308,11 @@ class _MarkdownWalker(HTMLParser):
         self.code_depth = 0
 
     def _close_pre(self) -> None:
+        if not self.in_pre:
+            # Stray </pre> with no open <pre> -- either genuinely unmatched input, or the
+            # closer of a <pre> that handle_starttag degraded inside an active code span.
+            # Emitting a closing fence here would fabricate one that was never opened.
+            return
         if self.buffer and not self.buffer[-1].endswith("\n"):
             self.buffer.append("\n")
         self.buffer.append("```")

@@ -37,7 +37,7 @@ _LIST_ITEM_LINE_RE = re.compile(r"^(?P<indent> *)(?:-|(?P<num>\d+)\.)[ \t]+(?P<c
 # landing as the first characters of a paragraph/line. Without the trailing lookahead, that span
 # was indistinguishable from a fence opener -- misparsed as one, it silently discarded the rest of
 # the (never-closed) "block" via _scan_code_fence instead of rendering as inline code.
-_CODE_FENCE_LINE_RE = re.compile(r"^`{3,}(?!.*`)")
+_CODE_FENCE_LINE_RE = re.compile(r"^(`{3,})(?!.*`)")
 
 
 def _escape_html_text(text: str) -> str:
@@ -93,11 +93,18 @@ def _flush_paragraph(lines: list[str], blocks: list[_Block]) -> list[str]:
 def _scan_code_fence(lines: list[str], start: int) -> tuple[int, str]:
     """Collect the literal lines of a fenced code block opening at ``lines[start]``. Returns the
     index just past the closing fence (or past EOF if the fence is never closed -- tolerated, not
-    an error) and the joined code text."""
+    an error) and the joined code text. Per CommonMark, the closing fence must be at least as
+    long as the opener -- a shorter backtick run (e.g. a 3-backtick line inside a 4-backtick
+    fence, the standard way to embed a fence in a code block) is content, not the closer."""
+    opener = _CODE_FENCE_LINE_RE.match(lines[start].lstrip())
+    opener_len = len(opener.group(1)) if opener else 3
     i = start + 1
     n = len(lines)
     code_lines: list[str] = []
-    while i < n and not _CODE_FENCE_LINE_RE.match(lines[i].lstrip()):
+    while i < n:
+        closer = _CODE_FENCE_LINE_RE.match(lines[i].lstrip())
+        if closer and len(closer.group(1)) >= opener_len:
+            break
         code_lines.append(lines[i])
         i += 1
     return i + 1, "\n".join(code_lines)

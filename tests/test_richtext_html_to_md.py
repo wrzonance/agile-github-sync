@@ -412,3 +412,17 @@ def test_nested_code_tag_preserves_text_captured_before_it_reopens():
 def test_doubly_nested_unclosed_code_tag_preserves_all_captured_text_at_eof():
     html = "<code>a<code>b<code>c"
     assert leankit_html_to_markdown(html) == "`abc`"
+
+
+# --- invariant: a <pre> opening inside an active <code> span (malformed input -- <pre> is a
+# block element, invalid inside the inline <code>) degrades exactly like a nested <code>: its
+# content merges into the one enclosing span, and no fence is emitted mid-span ----------------
+
+def test_pre_inside_an_active_code_span_merges_into_the_span_instead_of_breaking_it():
+    html = "<p><code>a<pre>b</pre>c</code></p>"
+    assert leankit_html_to_markdown(html) == "`abc`"
+
+
+def test_stray_pre_close_tag_with_no_open_pre_emits_no_fence():
+    html = "<p>a</pre>b</p>"
+    assert leankit_html_to_markdown(html) == "ab"
