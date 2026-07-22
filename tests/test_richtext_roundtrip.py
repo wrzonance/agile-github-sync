@@ -112,6 +112,11 @@ def test_mixed_type_nested_list_round_trips_to_an_exact_known_value_both_directi
         '<p><a href="https://example.com/a(b)c(d">text</a></p>',
         '<p><a href="https://example.com/)stray">text</a></p>',
         '<p><a href="https://example.com/back\\slash">text</a></p>',
+        # A backslash preceding an _UNESCAPABLE_CHARS character ('.'/'#') -- unlike the
+        # backslash-before-'s' case above -- is exactly what the trailing unescape pass in
+        # _render_inline_html would strip if the finalized href were not protected from it.
+        '<p><a href="https://example.com/a\\.b">text</a></p>',
+        '<p><a href="https://example.com/a\\#b">text</a></p>',
     ],
 )
 def test_href_with_unbalanced_paren_or_backslash_round_trips_through_markdown_link_syntax(html):

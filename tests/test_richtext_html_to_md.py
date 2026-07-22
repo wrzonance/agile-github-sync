@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from richtext import leankit_html_to_markdown  # noqa: E402
 
 ALL_PRINTABLE = string.printable
-UNICODE_SAMPLE = "héllo wörld ☃ \U0001F600 ​‌‍"
+UNICODE_SAMPLE = "héllo wörld ☃ \U0001F600 \u200b\u200c\u200d"
 
 
 # =====================================================================================

@@ -116,7 +116,7 @@ def test_unescape_leaves_a_lone_backslash_not_followed_by_an_unescapable_char_un
 # --- invariant: totality over content (never raises) ------------------------------------------
 
 ALL_PRINTABLE = string.printable
-UNICODE_SAMPLE = "héllo wörld ☃ \U0001F600 ​‌‍"
+UNICODE_SAMPLE = "héllo wörld ☃ \U0001F600 \u200b\u200c\u200d"
 
 
 @pytest.mark.parametrize(

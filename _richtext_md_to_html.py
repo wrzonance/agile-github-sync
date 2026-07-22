@@ -297,6 +297,18 @@ def _unescape_href_text(href: str) -> str:
     return "".join(out)
 
 
+def _protect_href_from_unescape(href: str) -> str:
+    """Double every backslash in a finalized href before it is spliced into the rendered
+    ``<a href="...">`` attribute, so the trailing _unescape_markdown_text pass in
+    _render_inline_html -- which collapses ``\\\\`` back to ``\\`` ('\\' is in _UNESCAPABLE_CHARS)
+    and would otherwise strip a lone href backslash preceding any unescapable char (e.g. '.') --
+    restores the attribute to exactly ``href``. Doubling is that pass's exact pre-image: it
+    yields only even-length backslash runs, which the pass consumes pairwise, and an unescapable
+    char with no preceding backslash passes through untouched. Text content needs that pass;
+    hrefs, already fully unescaped by _unescape_href_text, must survive it verbatim."""
+    return href.replace("\\", "\\\\")
+
+
 def _try_parse_link(text: str, pos: int, depth: int) -> tuple[str, int] | None:
     """If ``text[pos]`` opens a well-formed ``[text](href)`` link, render it -- recursing into the
     link text at ``depth + 1`` so nested formatting inside link text still works -- and return
@@ -316,7 +328,7 @@ def _try_parse_link(text: str, pos: int, depth: int) -> tuple[str, int] | None:
     inner_html = _render_inline_run(link_text, depth + 1)
     if href is None:
         return inner_html, close_paren + 1
-    return f'<a href="{href}">{inner_html}</a>', close_paren + 1
+    return f'<a href="{_protect_href_from_unescape(href)}">{inner_html}</a>', close_paren + 1
 
 
 def _try_parse_delimited_span(
@@ -384,8 +396,9 @@ def _render_inline_html(text: str) -> str:
     protect code spans (their content stays literal -- it bypasses both delimiter substitution and
     the closing unescape pass), apply link/bold/italic/strike substitution via the recursive-
     descent _parse_inline_span, unescape backslash-escaped Markdown syntax chars back to their
-    literal form (the true inverse of the HTML->MD escaper), and finally splice the protected
-    code-span content back in verbatim."""
+    literal form (the true inverse of the HTML->MD escaper; finalized hrefs survive this pass
+    verbatim -- see _protect_href_from_unescape), and finally splice the protected code-span
+    content back in verbatim."""
     escaped = _escape_html_text(text)
     protected_text, code_spans = _extract_code_spans(escaped)
     rendered = _render_inline_run(protected_text, depth=0)

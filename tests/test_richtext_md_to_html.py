@@ -28,7 +28,7 @@ from richtext import (  # noqa: E402
 )
 
 ALL_PRINTABLE = string.printable
-UNICODE_SAMPLE = "héllo wörld ☃ \U0001F600 ​‌‍"
+UNICODE_SAMPLE = "héllo wörld ☃ \U0001F600 \u200b\u200c\u200d"
 
 
 # =====================================================================================
@@ -360,6 +360,17 @@ def test_backslash_escaped_paren_in_href_unescapes_to_a_literal_paren():
     result = markdown_to_leankit_html("[text](http://example.com/a\\)b)")
     assert result == '<p><a href="http://example.com/a)b">text</a></p>'
     assert "\\" not in result
+
+
+@pytest.mark.parametrize("markdown_char", [".", "#"])
+def test_href_backslash_before_an_unescapable_char_survives_the_trailing_unescape_pass(markdown_char):
+    # The trailing _unescape_markdown_text pass in _render_inline_html strips a backslash before
+    # any _UNESCAPABLE_CHARS character. A finalized href containing a literal backslash that
+    # happens to precede such a character (the MD source carries it as '\\\\', the href escaper's
+    # doubled form) must reach the emitted attribute intact -- not lose its backslash to a pass
+    # meant only for text content.
+    result = markdown_to_leankit_html(f"[x](https://example.com/a\\\\{markdown_char}b)")
+    assert result == f'<p><a href="https://example.com/a\\{markdown_char}b">x</a></p>'
 
 
 # --- inline placeholder reinsertion, exercised through the public boundary -------------------------
