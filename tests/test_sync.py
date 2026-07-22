@@ -16,10 +16,10 @@ from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
 from stages import (STAGES, epic_key_for_task, issue_stage,  # noqa: E402
                     lane_matches_stage, normalize_status, title_key)
-from sync import (MS_PREFIX, _card_milestones, _child_connection_changes,  # noqa: E402
-                  _epic_task_resolution, _protect_open_pr_stage, _reconciled_custom_id_index,
-                  _stale_milestone_tags, epic_task_numbers, explicit_stage_status, issue_card_title,
-                  resolve_issue_stage)
+from metadata_sync import MS_PREFIX, _card_milestones, _stale_milestone_tags  # noqa: E402
+from sync import (_child_connection_changes, _epic_task_resolution,  # noqa: E402
+                  _protect_open_pr_stage, _reconciled_custom_id_index, epic_task_numbers,
+                  explicit_stage_status, issue_card_title, resolve_issue_stage)
 
 
 def _board_lanes():

@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import ghkit  # noqa: E402
 import ghproject  # noqa: E402
 from ghproject import _camel, _field, parse_items  # noqa: E402
-from sync import sync_dates  # noqa: E402
+from metadata_sync import sync_dates  # noqa: E402
 
 
 def _patch_ctx(host="github.com"):
