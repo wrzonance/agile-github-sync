@@ -25,7 +25,7 @@ import ghkit
 import ghproject
 import intake
 import vetting_latch
-from card_coherence import contested_cards, laneid_op_value, lane_conflict
+from card_coherence import contested_cards, laneid_op_value, lane_conflict, poisoned_card_ids
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
 from stages import (epic_key_for_task, is_retired_issue, issue_custom_id,
@@ -839,12 +839,20 @@ def main() -> None:
 
     # 3) parent/child connections: authoritative native reads reconcile exactly; title-key fallback
     # is add-only because a heuristic must never authorize destructive reconciliation.
+    poisoned = poisoned_card_ids(card_ops)
     managed_card_ids = _managed_card_ids(syncable_issues, card_for, retired_card_by_url)
     for epic in epics:
         parent = card_for(epic)
         if not parent or not parent.get("id"):
             continue
         key = issue_custom_id(epic)
+        # Issue #75: a parent card poisoned by Layer 2's lane-conflict check (queue()) already has
+        # its flush PATCH skipped -- child connections must stay consistent with that, never
+        # writing native connect/disconnect calls against a card whose own state this run refused
+        # to persist.
+        if str(parent["id"]) in poisoned:
+            print(f"WARN  [{key}] skipping child connections -- parent card {parent['id']} is poisoned")
+            continue
         task_numbers, authoritative = _epic_task_resolution(cfg, epic, by_key)
         task_issues = [by_number[number] for number in task_numbers if number in by_number]
         desired = {str(card["id"])
@@ -861,6 +869,14 @@ def main() -> None:
         adds, removes = _child_connection_changes(
             desired, existing, managed_card_ids,
             authoritative=authoritative and existing_snapshot is not None)
+        # Issue #75: a poisoned CHILD card must never be connected/disconnected either -- filter
+        # the already-computed adds/removes rather than pre-filtering `desired`, so a
+        # still-linked-but-poisoned child never gets misread as a stale edge and queued for removal.
+        filtered_adds = [a for a in adds if a not in poisoned]
+        filtered_removes = [r for r in removes if r not in poisoned]
+        if len(filtered_adds) != len(adds) or len(filtered_removes) != len(removes):
+            print(f"WARN  [{key}] dropping poisoned child card id(s) from connect/disconnect")
+        adds, removes = filtered_adds, filtered_removes
         if adds:
             agileplace.connect_children(cfg, apply, str(parent["id"]), adds)
             print(f"{'link ' if apply else 'DRY  '} [{key}] +{len(adds)} child card(s)")

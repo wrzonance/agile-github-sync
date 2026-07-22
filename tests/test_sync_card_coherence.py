@@ -39,7 +39,7 @@ from __future__ import annotations
 import sys
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -323,3 +323,49 @@ def test_poisoned_run_does_not_persist_advanced_merge_bases(tmp_path):
     assert removals == [], (
         "a poisoned card's skipped AgilePlace tag write must not advance the persisted merge base; "
         f"doing so caused a phantom next-run GitHub label removal: {removals}")
+
+
+# --- Issue #75 task 3: the step-3 parent/child guard skips a Layer-2-poisoned parent card --------
+
+def test_layer2_poisoned_epic_card_gets_no_connect_or_disconnect_calls(tmp_path, capsys):
+    """Post-#75, a customId collision between two ordinary issues is fenced wholesale by the
+    widened Layer 1 fence before either ever reaches queue() -- so this test forces `contested_cards`
+    to report nothing (simulating a shape Layer 1 doesn't catch) in order to reach a genuine Layer 2
+    lane-conflict poisoning for a card that is ALSO an epic's matched parent card, with a real child
+    task to connect. Without the step-3 poison guard, the epics loop would call
+    `agileplace.connect_children` for the poisoned card despite its flush PATCH already being
+    skipped; the guard must keep BOTH sync surfaces consistent for a poisoned card."""
+    epic_a = _issue(1, "[KEY] epic one", assignees=("dev",), labels=("type:epic",))       # In progress
+    epic_b = _issue(2, "[KEY] epic two", labels=("type:epic", "agent:in-review"))         # In review (conflict)
+    task = _issue(3, "task three")
+    epic_card = _card("500", "KEY", [])  # zero URL claims -- matched only via the customId fallback
+    task_card = _card("600", "3", [task["url"]], lane_id="L-ELSEWHERE")
+
+    connect_children_mock = Mock()
+    disconnect_children_mock = Mock()
+
+    stack, create_card_mock, patch_card_mock = _mock_io(
+        [epic_a, epic_b, task], [epic_card, task_card], lanes=(_PROG_LANE, _REVIEW_LANE))
+    with stack, \
+            patch("sync.contested_cards", return_value={}), \
+            patch("ghkit.sub_issue_numbers", return_value=[task["number"]]), \
+            patch("agileplace.card_child_ids", return_value=frozenset()), \
+            patch("agileplace.connect_children", connect_children_mock), \
+            patch("agileplace.disconnect_children", disconnect_children_mock), \
+            patch("sync.env_config", return_value=_cfg(tmp_path)), \
+            patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+            patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    out = capsys.readouterr().out
+    assert "poisoned: conflicting /laneId ops" in out, "the fixture must genuinely reach Layer 2"
+    assert any("skipping child connections" in line and "500" in line
+               for line in out.splitlines()), "the poisoned parent must be named in a skip WARN"
+
+    connect_children_mock.assert_not_called()
+    disconnect_children_mock.assert_not_called()
+
+    # The pre-existing Layer 2 flush skip still holds: no patch for the poisoned card.
+    patched_ids = [call.args[2].get("id") for call in patch_card_mock.call_args_list]
+    assert "500" not in patched_ids
+    create_card_mock.assert_not_called()
