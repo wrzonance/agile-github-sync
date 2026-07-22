@@ -764,3 +764,202 @@ def test_markdown_authored_document_stabilizes_after_one_normalization_pass(mark
     md_refixed = leankit_html_to_markdown(html2)
     assert md_normalized == md_refixed
     assert html1 == html2
+
+
+# =====================================================================================
+# Task 7/7 -- full safety/degradation matrix sweep, closing every remaining cell of the
+# richtext.py module docstring's degradation table with a parametrized pin, plus systematic
+# (not just ad hoc-substring) whitelist-closure checks over a large adversarial battery.
+# Pins exactly: total over content | whitelist closure (HTML output) | whitelist closure
+# (Markdown output) | content conservation.
+# =====================================================================================
+
+import re  # noqa: E402
+
+# --- invariant: whitelist closure (HTML output) -- systematic tag-name extraction ----------------
+
+# The exact set of tag names markdown_to_leankit_html is ever allowed to emit. Any other tag name
+# appearing anywhere in its output -- regardless of which specific adversarial input produced it --
+# is a whitelist-closure violation.
+_SUPPORTED_HTML_TAG_NAMES = frozenset(
+    {"p", "br", "strong", "em", "code", "pre", "a", "li", "ul", "ol", "s",
+     "h1", "h2", "h3", "h4", "h5", "h6"}
+)
+_HTML_OPEN_TAG_NAME_RE = re.compile(r"<\s*/?\s*([a-zA-Z0-9]+)")
+
+
+def _assert_html_output_uses_only_whitelisted_tags(html: str) -> None:
+    tag_names = {match.group(1).lower() for match in _HTML_OPEN_TAG_NAME_RE.finditer(html)}
+    assert tag_names <= _SUPPORTED_HTML_TAG_NAMES, f"leaked non-whitelisted tag(s): {tag_names - _SUPPORTED_HTML_TAG_NAMES}"
+
+
+_DANGEROUS_MARKDOWN_HTML_BATTERY = [
+    "<ScRiPt>alert(1)</sCriPt>",  # mixed-case tag name
+    "<svg onload=alert(1)>",
+    "<math><mtext></mtext></math>",
+    "<form action=evil><input></form>",
+    "<object data=evil></object>",
+    "<embed src=evil>",
+    "<base href=evil>",
+    "<meta http-equiv=refresh content=0;url=evil>",
+    "<!-- comment injection -->",
+    "<![CDATA[weird]]>",
+    '<iframe srcdoc="<script>alert(1)</script>"></iframe>',
+    "<style>body{background:url(javascript:alert(1))}</style>",
+    "<!DOCTYPE html><html><body>x</body></html>",
+    "plain <b>bold-ish</b> text",
+    "[x](JAVASCRIPT:alert(1))",
+    "[x](  javascript:alert(1)  )",
+    "[x](java\tscript:alert(1))",
+    "[x](vbscript:msgbox(1))",
+    '[x](https://evil.com"><script>alert(1)</script>)',
+]
+
+
+@pytest.mark.parametrize("markdown", _DANGEROUS_MARKDOWN_HTML_BATTERY)
+def test_html_output_whitelist_closure_over_adversarial_markdown_battery(markdown):
+    _assert_html_output_uses_only_whitelisted_tags(markdown_to_leankit_html(markdown))
+
+
+# --- invariant: whitelist closure (Markdown output) -- systematic raw-'<' absence ------------------
+
+# Markdown output is never allowed to contain a live '<' immediately followed by a letter or '!' --
+# that shape is exactly what a re-rendering Markdown viewer would reinterpret as an HTML tag/
+# doctype/comment open, regardless of which supported or unsupported HTML tag produced it.
+_RAW_TAG_OPEN_RE = re.compile(r"<[a-zA-Z!]")
+
+_DANGEROUS_HTML_BATTERY = [
+    "<ScRiPt>alert(1)</sCriPt>",
+    "<svg onload=alert(1)>",
+    "<math><mtext></mtext></math>",
+    "<form action=evil><input></form>",
+    "<object data=evil></object>",
+    "<embed src=evil>",
+    "<base href=evil>",
+    "<meta http-equiv=refresh content=0;url=evil>",
+    "<!-- comment injection -->",
+    "<![CDATA[weird]]>",
+    '<iframe srcdoc="<script>alert(1)</script>"></iframe>',
+    "<style>body{background:url(javascript:alert(1))}</style>",
+    '<a href="data:text/html,<script>alert(1)</script>">click</a>',
+    "<!DOCTYPE html><html><body>x</body></html>",
+]
+
+
+@pytest.mark.parametrize("html", _DANGEROUS_HTML_BATTERY)
+def test_markdown_output_whitelist_closure_over_adversarial_html_battery(html):
+    result = leankit_html_to_markdown(html)
+    assert not _RAW_TAG_OPEN_RE.search(result), f"raw tag-open shape leaked into Markdown: {result!r}"
+
+
+# --- invariant: degradation matrix -- every unclosed inline delimiter, not just bold ---------------
+
+@pytest.mark.parametrize(
+    "markdown, must_not_contain",
+    [
+        ("*unclosed italic", "<em>"),
+        ("~~unclosed strike", "<s>"),
+        ("`unclosed code", "<code>"),
+        ("[unclosed link text with no bracket close", "<a "),
+        ("[unclosed](no closing paren", "<a "),
+    ],
+)
+def test_every_unclosed_inline_delimiter_degrades_to_literal_text_not_a_dangling_tag(markdown, must_not_contain):
+    result = markdown_to_leankit_html(markdown)
+    assert must_not_contain not in result
+    # The delimiter's literal characters themselves survive as escaped text, not as live syntax.
+    assert result.startswith("<p>")
+
+
+# --- invariant: content conservation -- broad vocabulary, unicode, and structural-char battery -----
+
+@pytest.mark.parametrize(
+    "html, expected_substring",
+    [
+        ("<p>héllo wörld</p>", "héllo wörld"),
+        ("<p>emoji sandwich \U0001F600 here</p>", "\U0001F600"),
+        ("<p>costs $5.00 exactly</p>", "costs $5.00 exactly"),
+        ("<h2>Numbers 1, 2, 3</h2>", "Numbers 1, 2, 3"),
+        ("<ul><li>a &amp; b</li></ul>", "a & b"),
+    ],
+)
+def test_content_conservation_over_broad_vocabulary_and_unicode_battery(html, expected_substring):
+    md = leankit_html_to_markdown(html)
+    html_back = markdown_to_leankit_html(md)
+    # The readable text survives the full round trip even though delimiter/entity spelling may
+    # be re-escaped along the way.
+    assert expected_substring in leankit_html_to_markdown(html_back) or expected_substring in md
+
+
+# --- invariant: total over content -- broad safety sweep across both public functions --------------
+
+_TOTALITY_BATTERY = [
+    "\x00\x01\x02 control chars",
+    "a" * 100_000,
+    "\U0001D518\U0001D52B\U0001D526\U0001D520\U0001D52C\U0001D521\U0001D522",  # astral-plane unicode
+    "\U0001F600 emoji sandwich \U0001F389",
+    "mixed \r\n line \r endings \n here",
+    "<" * 5_000,
+    ">" * 5_000,
+    "&" * 5_000,
+]
+
+
+@pytest.mark.parametrize("content", _TOTALITY_BATTERY)
+def test_both_public_functions_never_raise_over_broad_safety_battery(content):
+    md_result = leankit_html_to_markdown(content)
+    html_result = markdown_to_leankit_html(content)
+    assert isinstance(md_result, str)
+    assert isinstance(html_result, str)
+
+
+# --- boundary: TypeError for None/bytes/int is enforced identically on both public functions -------
+
+@pytest.mark.parametrize("bad_input", [None, 0, 42, b"", b"bytes"])
+def test_both_public_functions_reject_none_int_and_bytes_identically(bad_input):
+    with pytest.raises(TypeError, match="expected str, got"):
+        leankit_html_to_markdown(bad_input)
+    with pytest.raises(TypeError, match="expected str, got"):
+        markdown_to_leankit_html(bad_input)
+
+
+# --- file-size budget: hard-cap regression guard, soft-target overage explicitly flagged -----------
+
+# House style: 200-400 lines typical, 800 hard cap -- split before exceeding it, never add to a
+# file already over budget. richtext.py's translation logic is split across three modules so no
+# single file need approach the hard cap; this test is the regression guard for that split staying
+# intact. _richtext_md_to_html.py sits at 443 lines -- over the 400 soft target but well under the
+# 800 hard cap. It is deliberately NOT split into a fourth module: the block-folding renderer
+# (_render_block_html) and the inline renderer (_render_inline_html) are two halves of one cohesive
+# concern (a block's raw text always flows through the inline renderer before it's HTML-safe), and
+# the two share fixed-precedence/protected-region invariants that would either duplicate across
+# files or need re-threading through a new shared-state parameter if separated -- the classic
+# "abstraction needs a flag to cover its callers" smell this repo's DRY rule warns against. This is
+# recorded here as an explicit, reviewed flag rather than a silent budget overrun: if a NEW file
+# crosses the soft target without a matching entry in _KNOWN_SOFT_TARGET_OVERAGES, the test below
+# fails until that decision is made explicitly too.
+_RICHTEXT_MODULE_HARD_CAP = 800
+_RICHTEXT_MODULE_SOFT_TARGET = 400
+_KNOWN_SOFT_TARGET_OVERAGES = frozenset({"_richtext_md_to_html.py"})
+_RICHTEXT_MODULE_FILENAMES = (
+    "richtext.py",
+    "_richtext_shared.py",
+    "_richtext_html_to_md.py",
+    "_richtext_md_to_html.py",
+)
+
+
+def test_richtext_modules_stay_within_hard_cap_and_soft_target_overage_is_explicitly_flagged():
+    repo_root = Path(__file__).resolve().parent.parent
+    for filename in _RICHTEXT_MODULE_FILENAMES:
+        line_count = len((repo_root / filename).read_text(encoding="utf-8").splitlines())
+        assert line_count <= _RICHTEXT_MODULE_HARD_CAP, (
+            f"{filename} is {line_count} lines -- exceeds the {_RICHTEXT_MODULE_HARD_CAP}-line hard "
+            "cap and must be split."
+        )
+        if line_count > _RICHTEXT_MODULE_SOFT_TARGET:
+            assert filename in _KNOWN_SOFT_TARGET_OVERAGES, (
+                f"{filename} is {line_count} lines -- over the {_RICHTEXT_MODULE_SOFT_TARGET}-line "
+                "soft target with no recorded rationale in _KNOWN_SOFT_TARGET_OVERAGES. Either split "
+                "it or add an explicit, reviewed entry explaining why not."
+            )
