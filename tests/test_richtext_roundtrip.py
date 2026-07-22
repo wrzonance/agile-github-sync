@@ -76,6 +76,40 @@ def test_directly_adjacent_nested_inline_formats_round_trip_without_delimiter_co
 
 
 @pytest.mark.parametrize(
+    "html, code_texts",
+    [
+        # two directly-adjacent <code> spans, no separating text -- the first span's closing
+        # fence and the second's opening fence would otherwise concatenate into one longer run of
+        # live backtick characters on reparse, merging both spans' content into one and losing the
+        # element boundary between them entirely.
+        ("<p><code>a</code><code>b</code></p>", ["a", "b"]),
+        # same collision with a leading word first, so the pair never lands at true line start --
+        # isolates the adjacent-span collision under test here from the separate (now fixed)
+        # fenced-code-BLOCK collision a 3+ backtick run used to hit at true line start; see
+        # test_code_span_needing_a_three_plus_backtick_fence_round_trips_even_at_true_line_start.
+        ("<p>Inline <code>a</code><code>b</code> spans.</p>", ["a", "b"]),
+        # three-way chain of adjacent spans -- the collision must not just be fixed pairwise.
+        ("<p><code>a</code><code>b</code><code>c</code></p>", ["a", "b", "c"]),
+    ],
+)
+def test_directly_adjacent_code_spans_preserve_distinct_boundaries_and_content(html, code_texts):
+    # Markdown has no escape syntax that can separate two touching backtick runs (see
+    # _chunk_ends_in_live_backtick's docstring), so a perfectly byte-identical round trip is not
+    # achievable here -- the documented degrade is an invisible zero-width-space inserted between
+    # the two spans (never inside either one). Each span's own content is conserved exactly and
+    # the element boundary survives; that invisible separator is the one unavoidable difference,
+    # analogous to this module's other documented, honest degrades (e.g. the empty-<code> case).
+    md1 = leankit_html_to_markdown(html)
+    html2 = markdown_to_leankit_html(md1)
+    for text in code_texts:
+        assert f"<code>{text}</code>" in html2
+    # Idempotent: re-translating the already-degraded HTML must not add another layer of
+    # separators or otherwise keep drifting.
+    md2 = leankit_html_to_markdown(html2)
+    assert md2 == md1
+
+
+@pytest.mark.parametrize(
     "html, markdown",
     [
         # an ordered sublist nested inside a bullet item's <li> -- and the inverse (a bullet
@@ -163,6 +197,85 @@ def test_markdown_authored_document_stabilizes_after_one_normalization_pass(mark
     md_refixed = leankit_html_to_markdown(html2)
     assert md_normalized == md_refixed
     assert html1 == html2
+
+
+# =====================================================================================
+# Issue #78 gate -- fixed-point round trip covering the two fixes together (variable-length
+# code-span backtick fencing + symmetric '<'/'>' escaping), combined with tag-looking prose and a
+# link in the SAME document. Individual vocabulary items are pinned in isolation by
+# test_richtext_html_to_md.py / test_richtext_md_to_html.py; this closes the spike's own
+# highest-risk gap those files call out -- that raw '<'/'>' escaping and the new run-length-N
+# backtick fencing don't destabilize each other, or the link-escaping/list/heading machinery
+# already pinned above, once all combined into one document. Code spans here still use the
+# established "leading word" convention (see
+# test_code_span_needing_a_three_plus_backtick_fence_round_trips_when_not_at_true_line_start) to
+# keep this gate scoped to the angle-bracket/fencing/link interaction under test -- the separate
+# true-line-start fenced-code-BLOCK collision a 3+ backtick run used to hit is fixed and pinned on
+# its own by test_code_span_needing_a_three_plus_backtick_fence_round_trips_even_at_true_line_start.
+# =====================================================================================
+
+_ANGLE_AND_CODE_SPAN_COMBINED_HTML = (
+    "<p>Compare a &lt; b and b &gt; a while reading fake tags like &lt;div&gt; and "
+    '&lt;/div&gt;. See <a href="https://example.com/a(b)c">the docs</a> for inline '
+    "<code>a``b</code> and <code>x```y</code> examples, plus a "
+    "<code>has a ` single backtick</code> case.</p>"
+)
+
+
+def test_angle_brackets_and_variable_length_code_span_fences_round_trip_together():
+    md = leankit_html_to_markdown(_ANGLE_AND_CODE_SPAN_COMBINED_HTML)
+    assert markdown_to_leankit_html(md) == _ANGLE_AND_CODE_SPAN_COMBINED_HTML
+
+
+def test_angle_brackets_and_variable_length_code_span_fences_reach_a_fixed_point_after_one_pass():
+    # A second HTML->MD->HTML pass over the already-round-tripped Markdown must reproduce the
+    # exact same Markdown -- neither the new escape chars nor the new fence-length rule may drift
+    # once combined with each other, a link, and tag-looking prose in the same document.
+    md1 = leankit_html_to_markdown(_ANGLE_AND_CODE_SPAN_COMBINED_HTML)
+    html2 = markdown_to_leankit_html(md1)
+    md2 = leankit_html_to_markdown(html2)
+    assert md1 == md2
+
+
+_ANGLE_AND_CODE_SPAN_COMBINED_MARKDOWN = (
+    "Compare a \\< b and b \\> a while reading fake tags like \\<div\\> and \\</div\\>. "
+    "See [the docs](https://example.com/a\\(b\\)c) for inline ```a``b``` and "
+    "````x```y```` examples, plus a ``has a ` single backtick`` case."
+)
+
+
+def test_markdown_authored_angle_brackets_and_code_spans_stabilize_after_one_normalization_pass():
+    # Mirrors test_markdown_authored_document_stabilizes_after_one_normalization_pass but for
+    # Markdown authored directly with the new backslash-escaped angle brackets and variable-length
+    # backtick fences, rather than Markdown produced by this module's own HTML->MD direction.
+    html1 = markdown_to_leankit_html(_ANGLE_AND_CODE_SPAN_COMBINED_MARKDOWN)
+    md_normalized = leankit_html_to_markdown(html1)
+    html2 = markdown_to_leankit_html(md_normalized)
+    md_refixed = leankit_html_to_markdown(html2)
+    assert md_normalized == md_refixed
+    assert html1 == html2
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        # unclosed backtick span colliding with unescaped-looking tag soup
+        "a < b and b > a with `unclosed backtick and <tag> soup",
+        # mismatched backtick-run lengths that can never find a valid closing fence
+        "``` broken fence `` mismatched `` more",
+        # angle brackets inside an otherwise well-formed link target
+        "[link text with < and > inside](https://example.com/<>)",
+        # unterminated <code> (HTML input) whose buffered content itself contains angle brackets
+        "<code>``unterminated code span with < and >",
+        # pre-escaped angle brackets adjacent to a run of empty-ish backtick spans
+        "\\<div\\> plus `` `` `` many empty-ish spans",
+    ],
+)
+def test_neither_direction_raises_over_malformed_angle_bracket_and_code_span_input(malformed):
+    md_result = leankit_html_to_markdown(malformed)
+    html_result = markdown_to_leankit_html(malformed)
+    assert isinstance(md_result, str)
+    assert isinstance(html_result, str)
 
 
 # =====================================================================================
@@ -279,8 +392,12 @@ def test_markdown_output_whitelist_closure_over_adversarial_html_battery(html):
 def test_every_unclosed_inline_delimiter_degrades_to_literal_text_not_a_dangling_tag(markdown, must_not_contain):
     result = markdown_to_leankit_html(markdown)
     assert must_not_contain not in result
-    # The delimiter's literal characters themselves survive as escaped text, not as live syntax.
-    assert result.startswith("<p>")
+    # The delimiter's literal characters themselves survive as escaped text, not as live syntax --
+    # pinned as an exact value (not just "starts with <p>") so a regression that drops the
+    # delimiter, or the surrounding prose, while still avoiding must_not_contain can't silently
+    # pass. None of these inputs contain an HTML-special character, so the whole input is expected
+    # back verbatim inside the paragraph wrapper.
+    assert result == f"<p>{markdown}</p>"
 
 
 # --- invariant: content conservation -- broad vocabulary, unicode, and structural-char battery -----
@@ -342,10 +459,12 @@ def test_both_public_functions_reject_none_int_and_bytes_identically(bad_input):
 # --- file-size budget: hard-cap regression guard, soft-target overage explicitly flagged -----------
 
 # House style: 200-400 lines typical, 800 hard cap -- split before exceeding it, never add to a
-# file already over budget. richtext.py's translation logic is split across three modules so no
+# file already over budget. richtext.py's translation logic is split across four modules (shared
+# structs/sanitizers, HTML->MD, MD->HTML, and code-span fencing/matching -- pulled into its own
+# _richtext_code_spans.py since it's a self-contained concern used by both directions) so no
 # single file need approach the hard cap; this test is the regression guard for that split staying
 # intact. _richtext_md_to_html.py sits at 476 lines -- over the 400 soft target but well under the
-# 800 hard cap. It is deliberately NOT split into a fourth module: the block-folding renderer
+# 800 hard cap. It is deliberately NOT split further: the block-folding renderer
 # (_render_block_html) and the inline renderer (_render_inline_html) are two halves of one cohesive
 # concern (a block's raw text always flows through the inline renderer before it's HTML-safe), and
 # the two share fixed-precedence/protected-region invariants that would either duplicate across
@@ -360,6 +479,7 @@ _KNOWN_SOFT_TARGET_OVERAGES = frozenset({"_richtext_md_to_html.py"})
 _RICHTEXT_MODULE_FILENAMES = (
     "richtext.py",
     "_richtext_shared.py",
+    "_richtext_code_spans.py",
     "_richtext_html_to_md.py",
     "_richtext_md_to_html.py",
 )

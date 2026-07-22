@@ -8,13 +8,36 @@ from __future__ import annotations
 
 import re
 
+from _richtext_code_spans import _extract_code_spans, _reinsert_code_spans
 from _richtext_shared import _UNESCAPABLE_CHARS, _LIST_INDENT_UNIT, _Block, _ListFrame, _sanitize_href
+
+# The exact four-char entities _escape_html_text ever emits for a backslash-escaped '<'/'>'.
+# _escape_html_text runs BEFORE _unescape_markdown_text in _render_inline_html, so a literal
+# '<'/'>' that the HTML->MD escaper backslash-escaped (per _INLINE_AMBIGUOUS_CHARS) never reaches
+# the unescape pass as a bare unescapable char -- it has already been turned into "&lt;"/"&gt;" by
+# the earlier HTML-escape pass, stranding the escaper's backslash in front of the entity instead.
+# Checked before the single-char _UNESCAPABLE_CHARS branch below so that entity is recognized and
+# consumed as one unit (keeping it intact) rather than falling through to the single-char branch,
+# which would strip only the backslash and leave nothing else to reinterpret it correctly anyway
+# (the following char is '&', not itself in _UNESCAPABLE_CHARS) -- see the verified round-trip
+# regression this closes: a literal '<'/'>' surviving HTML->MD->HTML was leaking a stray backslash
+# ("\&lt;") into the final HTML instead of clean "&lt;".
+_BACKSLASH_ESCAPED_ANGLE_ENTITIES: frozenset[str] = frozenset({"&lt;", "&gt;"})
 
 # Line-oriented block patterns. Only the documented supported subset is recognized as structure;
 # anything else falls through to plain paragraph text.
 _HEADING_LINE_RE = re.compile(r"^(#{1,6})[ \t]+(.*)$")
 _LIST_ITEM_LINE_RE = re.compile(r"^(?P<indent> *)(?:-|(?P<num>\d+)\.)[ \t]+(?P<content>.*)$")
-_CODE_FENCE_LINE_RE = re.compile(r"^```")
+
+# A genuine block-level fence opener/closer: a leading run of 3+ backticks with NO further
+# backtick anywhere else on the line. Per CommonMark, a backtick-fence's info string may never
+# itself contain a backtick -- that's exactly what lets this tell a real fence line apart from an
+# inline code span's own self-contained opening+closing fence pair (e.g. "```a``b```", rendered by
+# _render_code_span for content whose longest internal backtick run needs a 3+ backtick fence)
+# landing as the first characters of a paragraph/line. Without the trailing lookahead, that span
+# was indistinguishable from a fence opener -- misparsed as one, it silently discarded the rest of
+# the (never-closed) "block" via _scan_code_fence instead of rendering as inline code.
+_CODE_FENCE_LINE_RE = re.compile(r"^(`{3,})(?!.*`)")
 
 
 def _escape_html_text(text: str) -> str:
@@ -33,12 +56,21 @@ def _unescape_markdown_text(text: str) -> str:
     """Inverse of the HTML->MD escaper: strip a backslash immediately preceding any character
     that escaper ever emits a backslash before (_UNESCAPABLE_CHARS), leaving that character
     literal. A backslash not followed by such a character, or at end of string, is left as-is --
-    it was never something that escaper produced."""
+    it was never something that escaper produced. Checked first: a backslash immediately
+    preceding the exact four-char entity _escape_html_text emits for '<'/'>' (_richtext_shared's
+    _INLINE_AMBIGUOUS_CHARS backslash-escapes the raw char, but this function runs AFTER
+    _escape_html_text has already turned that raw char into "&lt;"/"&gt;") -- consumed as one
+    unit so the entity survives intact rather than falling through to the single-char branch,
+    which would strip only the backslash and leave the entity's leading '&' unrecognized."""
     out: list[str] = []
     i = 0
     n = len(text)
     while i < n:
         ch = text[i]
+        if ch == "\\" and text[i + 1:i + 5] in _BACKSLASH_ESCAPED_ANGLE_ENTITIES:
+            out.append(text[i + 1:i + 5])
+            i += 5
+            continue
         if ch == "\\" and i + 1 < n and text[i + 1] in _UNESCAPABLE_CHARS:
             out.append(text[i + 1])
             i += 2
@@ -61,11 +93,18 @@ def _flush_paragraph(lines: list[str], blocks: list[_Block]) -> list[str]:
 def _scan_code_fence(lines: list[str], start: int) -> tuple[int, str]:
     """Collect the literal lines of a fenced code block opening at ``lines[start]``. Returns the
     index just past the closing fence (or past EOF if the fence is never closed -- tolerated, not
-    an error) and the joined code text."""
+    an error) and the joined code text. Per CommonMark, the closing fence must be at least as
+    long as the opener -- a shorter backtick run (e.g. a 3-backtick line inside a 4-backtick
+    fence, the standard way to embed a fence in a code block) is content, not the closer."""
+    opener = _CODE_FENCE_LINE_RE.match(lines[start].lstrip())
+    opener_len = len(opener.group(1)) if opener else 3
     i = start + 1
     n = len(lines)
     code_lines: list[str] = []
-    while i < n and not _CODE_FENCE_LINE_RE.match(lines[i].lstrip()):
+    while i < n:
+        closer = _CODE_FENCE_LINE_RE.match(lines[i].lstrip())
+        if closer and len(closer.group(1)) >= opener_len:
+            break
         code_lines.append(lines[i])
         i += 1
     return i + 1, "\n".join(code_lines)
@@ -159,13 +198,6 @@ _MAX_DELIMITER_SCAN = 2000
 # link text in this module's supported vocabulary is always a short phrase, never a long span.
 _MAX_LINK_SCAN = 500
 
-# Positional placeholder _extract_code_spans swaps in for protected code-span content. NUL is not
-# a character this module's HTML/Markdown escaping ever produces, so a placeholder-shaped
-# substring in the rendered HTML can only originate from a NUL byte already present in the
-# *original* input, never from this module's own output.
-_CODE_SPAN_PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
-
-
 def _is_backslash_escaped(text: str, index: int) -> bool:
     """True if ``text[index]`` is immediately preceded by an odd number of backslashes -- i.e. it
     is escaped (a literal char), not a live delimiter. An even count (including zero) means the
@@ -195,58 +227,6 @@ def _find_closing_delimiter(text: str, start: int, delimiter: str) -> int:
             return candidate
         search_from = candidate + 1
     return -1
-
-
-def _extract_code_spans(text: str) -> tuple[str, list[str]]:
-    """Replace each backtick-delimited code span in already-HTML-escaped ``text`` with a
-    positional placeholder, returning (placeholder_text, protected_contents) so the span's content
-    bypasses both delimiter substitution and the closing unescape pass -- mirroring in_code/in_pre's
-    literal handling on the HTML->MD side. A backslash-escaped backtick (``\\```) is not treated as
-    a delimiter, matching _find_closing_delimiter's escape-aware scanning used everywhere else in
-    this module."""
-    out: list[str] = []
-    protected: list[str] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        if text[i] == "\\" and i + 1 < n:
-            out.append(text[i:i + 2])
-            i += 2
-            continue
-        if text[i] == "`":
-            close = _find_closing_delimiter(text, i + 1, "`")
-            if close != -1:
-                protected.append(text[i + 1:close])
-                out.append(f"\x00{len(protected) - 1}\x00")
-                i = close + 1
-                continue
-        out.append(text[i])
-        i += 1
-    return "".join(out), protected
-
-
-def _reinsert_code_spans(html: str, protected: list[str]) -> str:
-    """Splice protected code-span content back into ``html`` at each positional placeholder,
-    verbatim (already HTML-escaped, never re-passed through the unescape pass). A placeholder-
-    shaped substring that doesn't correspond to a real protected span -- possible only if the
-    original input happened to contain a literal NUL byte shaped just like this module's internal
-    marker -- is left untouched rather than raising, whether its digit run is merely out of range
-    or too long for int() to parse at all (see _replace): totality over arbitrary content is a hard
-    invariant of this module's public functions."""
-    def _replace(match: re.Match[str]) -> str:
-        try:
-            index = int(match.group(1))
-        except ValueError:
-            # A digit run longer than CPython's int-string-conversion limit (4300 digits by
-            # default, 3.11+) can only come from adversarial input -- this module's own placeholder
-            # indices are tiny -- so leave it untouched rather than raising, exactly as an
-            # out-of-range index below does. Totality (never raises) is a hard invariant.
-            return match.group(0)
-        if 0 <= index < len(protected):
-            return f"<code>{protected[index]}</code>"
-        return match.group(0)
-
-    return _CODE_SPAN_PLACEHOLDER_RE.sub(_replace, html)
 
 
 def _find_balanced_close(text: str, start: int, open_char: str, close_char: str) -> int:

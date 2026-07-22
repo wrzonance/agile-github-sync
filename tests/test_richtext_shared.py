@@ -21,6 +21,29 @@ from richtext import (  # noqa: E402
     _sanitize_href,
     _unescape_markdown_text,
 )
+from _richtext_shared import (  # noqa: E402
+    _INLINE_AMBIGUOUS_CHARS,
+    _UNESCAPABLE_CHARS,
+)
+
+
+# --- invariant: '<'/'>' are inline-ambiguous, and thus transitively unescapable ----------------
+
+@pytest.mark.parametrize("ch", ["<", ">"])
+def test_angle_brackets_are_inline_ambiguous_chars(ch):
+    # '<'/'>' must be escaped wherever they occur in text content (not just at line start) --
+    # otherwise a literal "<b>" typed into Markdown source round-trips as a real HTML tag instead
+    # of escaped text (see richtext.py's degradation table: "Raw <tag> ... escaped to literal
+    # text, never parsed as a tag").
+    assert ch in _INLINE_AMBIGUOUS_CHARS
+
+
+@pytest.mark.parametrize("ch", ["<", ">"])
+def test_angle_brackets_are_unescapable_chars_via_the_inline_ambiguous_union(ch):
+    # _UNESCAPABLE_CHARS is the union the MD->HTML unescaper strips a backslash before; '<'/'>'
+    # must be included here too or _escape_markdown_text's new escaping of them would never be
+    # undone on the way back to HTML.
+    assert ch in _UNESCAPABLE_CHARS
 
 
 # --- invariant: text-node safety (HTML) -------------------------------------------------------

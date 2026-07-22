@@ -7,6 +7,11 @@ from __future__ import annotations
 import re
 from html.parser import HTMLParser
 
+from _richtext_code_spans import (
+    _ADJACENT_FENCE_SEPARATOR,
+    _chunk_ends_in_live_backtick,
+    _render_code_span,
+)
 from _richtext_shared import (
     _INLINE_AMBIGUOUS_CHARS,
     _LIST_INDENT_UNIT,
@@ -127,11 +132,26 @@ class _MarkdownWalker(HTMLParser):
         self.tag_marker_stack: dict[str, list[str]] = {}
         self.list_stack: list[_ListFrame] = []
         self.href_stack: list[str | None] = []
+        # Accumulates a <code> span's text (outside <pre>) so the fence/padding -- which depend
+        # on the whole span's content -- can be chosen at close time. See _flush_code_span.
+        self.code_span_buffer: list[str] = []
         self.in_code = False
         self.in_pre = False
+        # Counts nested (non-<pre>) <code> opens. Markdown has no nested code-span syntax, so a
+        # directly-nested <code> (malformed input) is not a new span -- it just keeps adding to
+        # the same one. Only a 0->1 transition resets code_span_buffer; see _open_code.
+        self.code_depth = 0
         self.suppress_text = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.in_code and not self.in_pre and tag not in ("code", "script", "style"):
+            # A GFM code span is literal text -- markup cannot nest inside it. Any other tag
+            # opening while a span is buffering (formatting, <br>, a malformed block-level
+            # <pre>, ...) gets the unified unsupported-tag degrade: nothing emitted for the tag
+            # itself (its markers/fences must not land in self.buffer mid-span) while
+            # handle_data keeps buffering its text into the span. <code> passes through for the
+            # nested-<code> depth handling; script/style so their suppression still applies.
+            return
         if tag == "p":
             self._ensure_block_separator()
         elif tag == "br":
@@ -160,6 +180,11 @@ class _MarkdownWalker(HTMLParser):
         # tag itself; handle_data still runs so its content is kept.
 
     def handle_endtag(self, tag: str) -> None:
+        if self.in_code and not self.in_pre and tag not in ("code", "script", "style"):
+            # Mirror of the starttag guard: emits nothing, pops no stack -- the opener either
+            # pushed nothing (guarded) or predates the span (malformed cross-nesting, e.g.
+            # "<strong><code>x</strong>y</code>"); get_markdown flushes it balanced at EOF.
+            return
         if tag == "pre":
             self._close_pre()
         elif tag == "code":
@@ -180,13 +205,19 @@ class _MarkdownWalker(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         # handle_data can fire multiple times for one logical run of text -- always append,
-        # never overwrite the buffer.
+        # never overwrite the buffer/code_span_buffer.
         if self.suppress_text or not data:
             return
-        if self.in_pre or self.in_code:
-            # Code content is literal Markdown (backtick/fence spans don't reinterpret syntax
-            # inside them), so it bypasses _escape_markdown_text entirely.
+        if self.in_pre:
+            # <pre> content is literal Markdown (the fence itself doesn't reinterpret syntax
+            # inside it), so it bypasses _escape_markdown_text entirely.
             self.buffer.append(data)
+            return
+        if self.in_code:
+            # Buffered rather than appended directly -- the right-sized fence/padding
+            # (_render_code_span) can only be chosen once the whole span's content is known, at
+            # close time (_flush_code_span).
+            self.code_span_buffer.append(data)
             return
         self.buffer.append(_escape_markdown_text(data, at_line_start=self._at_line_start()))
 
@@ -194,6 +225,14 @@ class _MarkdownWalker(HTMLParser):
         """Flush any still-open inline-format markers (an unclosed ``<strong>`` degrades to a
         balanced ``**word**`` instead of a dangling ``**word``), join the buffer, and collapse
         blank-line runs to the documented single-blank-line block-separator convention."""
+        if self.in_code and not self.in_pre:
+            # An unclosed <code> at EOF never reaches _close_code, so flush it here or its
+            # buffered content is silently dropped. Runs BEFORE the format_stack loop below since
+            # format_stack no longer carries a code marker -- for degenerate, never-closed nested
+            # tag-soup (e.g. "<code><strong>x", neither closed) this changes the relative order
+            # of the code fence vs. the outer format's closer in the output. A harmless behavior
+            # change with no stated invariant covering it -- documented, not test-pinned.
+            self._flush_code_span()
         while self.format_stack:
             self.buffer.append(self.format_stack.pop())
         text = _BLANK_LINE_RUN.sub("\n\n", "".join(self.buffer))
@@ -231,17 +270,55 @@ class _MarkdownWalker(HTMLParser):
         self._close_format(marker)
 
     def _open_code(self) -> None:
+        if self.in_pre:
+            # Still inside <pre> -- content goes straight to self.buffer via handle_data,
+            # unbuffered; code_depth is irrelevant here.
+            self.in_code = True
+            return
+        if self.code_depth == 0:
+            # Start collecting this span's content fresh -- the fence/padding it needs can only
+            # be chosen once the whole span is known, at close time. A directly-nested <code>
+            # (code_depth already > 0, malformed input -- Markdown has no nested code-span
+            # syntax) skips this reset, so text already captured for the outer span survives
+            # rather than being silently overwritten.
+            self.code_span_buffer = []
         self.in_code = True
-        if not self.in_pre:
-            self._open_format("`")
+        self.code_depth += 1
 
     def _close_code(self) -> None:
+        if self.in_pre:
+            # Still inside <pre> -- the fence itself closes on </pre>, not here.
+            self.in_code = False
+            return
+        self.code_depth = max(0, self.code_depth - 1)
+        if self.code_depth == 0:
+            self._flush_code_span()
+        # else: this closed an inner nested <code> -- still buffering for the outer span, which
+        # is still open.
+
+    def _flush_code_span(self) -> None:
+        """Render the buffered ``<code>`` span's content as a GFM code span (_render_code_span)
+        and append it to the buffer, then reset code-span state. An empty span renders to ""
+        (see _render_code_span's documented degrade) and is not appended -- it leaves no trace in
+        the Markdown output rather than a bare, meaningless "``". If the buffer's last emitted
+        chunk already ends in a live (unescaped) backtick -- another code span's closing fence, or
+        a <pre> block's closing fence, immediately touching this one with no separating text --
+        a zero-width separator is inserted first so the two fences can never merge into one longer
+        run on reparse (see _chunk_ends_in_live_backtick)."""
+        rendered = _render_code_span("".join(self.code_span_buffer))
+        if rendered:
+            if self.buffer and _chunk_ends_in_live_backtick(self.buffer[-1]):
+                self.buffer.append(_ADJACENT_FENCE_SEPARATOR)
+            self.buffer.append(rendered)
+        self.code_span_buffer = []
         self.in_code = False
-        if not self.in_pre:
-            self._close_format("`")
-        # else: still inside <pre> -- the fence itself closes on </pre>, not here.
+        self.code_depth = 0
 
     def _close_pre(self) -> None:
+        if not self.in_pre:
+            # Stray </pre> (unmatched input, or the closer of a <pre> degraded inside an active
+            # code span) -- emitting a closing fence would fabricate one that was never opened.
+            return
         if self.buffer and not self.buffer[-1].endswith("\n"):
             self.buffer.append("\n")
         self.buffer.append("```")

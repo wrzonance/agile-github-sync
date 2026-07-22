@@ -23,6 +23,7 @@ from richtext import (  # noqa: E402
     _ListFrame,
     _parse_blocks,
     _render_block_html,
+    _unescape_markdown_text,
     leankit_html_to_markdown,
     markdown_to_leankit_html,
 )
@@ -253,6 +254,101 @@ def test_code_span_content_is_never_inline_substituted():
     assert result == "<p><code>*not bold* and _not italic_</code></p>"
 
 
+# --- invariant: variable-length backtick-run code-span matching --------------------------------
+
+def test_code_span_delimiter_is_a_backtick_run_not_a_single_backtick():
+    # A double-backtick delimiter lets a single literal backtick appear inside the span's content
+    # without prematurely closing it -- the fence chosen (2 backticks) never occurs inside the
+    # span's own content (a lone backtick), which is exactly what makes it a valid fence.
+    result = markdown_to_leankit_html("``a`b``")
+    assert result == "<p><code>a`b</code></p>"
+
+
+def test_code_span_run_length_must_match_exactly_to_close():
+    # A shorter/longer backtick run encountered mid-scan (here a literal "``" pair) must not
+    # prematurely close a longer opening run (here 3 backticks) -- only an exact-length-3 run
+    # closes it. Confirms the fence chosen (3 backticks) never occurs inside the extracted content.
+    # ("text " prefix keeps this a paragraph, not a fenced code BLOCK -- that's a line-level
+    # pattern requiring the triple-backtick at the very start of the line, an unrelated layer.)
+    result = markdown_to_leankit_html("text ```a `` b``` end")
+    assert result == "<p>text <code>a `` b</code> end</p>"
+
+
+@pytest.mark.parametrize(
+    "markdown, expected_html",
+    [
+        # Content has an internal 2-backtick run, so the chosen fence is 3 backticks -- landing
+        # as the very first characters of the (single-line) document/paragraph.
+        ("```a``b```", "<p><code>a``b</code></p>"),
+        # Same collision one level up: an internal 3-backtick run needs a 4-backtick fence.
+        ("````x```y````", "<p><code>x```y</code></p>"),
+    ],
+)
+def test_code_span_fence_at_true_line_start_is_not_misparsed_as_a_fenced_code_block(markdown, expected_html):
+    # Regression pin for the verified live bug: _CODE_FENCE_LINE_RE's naive "line starts with a
+    # run of 3+ backticks" check couldn't tell a code span's own self-contained opening+closing
+    # fence pair apart from an actual block-level fence opener whenever that pair landed as the
+    # first characters of a line. Misfiring there sent the rest of the (never-closed) "block"
+    # through _scan_code_fence, which silently discarded the paragraph's real text and emitted an
+    # essentially-empty ``<pre><code>\n</code></pre>`` instead. Per CommonMark, a genuine fence
+    # opener's info string may never itself contain a backtick -- exactly the property that
+    # distinguishes the two shapes.
+    assert markdown_to_leankit_html(markdown) == expected_html
+
+
+def test_longer_fence_opener_is_not_closed_by_a_shorter_backtick_run():
+    # Per CommonMark, a closing fence must be at least as long as its opener -- a 4-backtick
+    # fence commonly wraps code that itself contains a 3-backtick fence line, and that inner
+    # line is content, not the closer.
+    markdown = "````\ninner\n```\nstill code\n````\ntail"
+    result = markdown_to_leankit_html(markdown)
+    assert "inner\n```\nstill code" in result
+    assert "<p>tail</p>" in result
+
+
+def test_fence_closed_by_a_longer_backtick_run_still_closes():
+    markdown = "```\ncode\n````\ntail"
+    result = markdown_to_leankit_html(markdown)
+    assert "<p>tail</p>" in result
+    assert "code" in result
+
+
+def test_code_span_strips_exactly_one_leading_and_trailing_space_of_padding():
+    # Per GFM: when a span's content both begins and ends with a space (and isn't all spaces),
+    # exactly one leading/trailing space is stripped -- this is what lets a code span's content
+    # start or end with a backtick itself without merging into the delimiter run.
+    result = markdown_to_leankit_html("`` `code` ``")
+    assert result == "<p><code>`code`</code></p>"
+
+
+def test_two_adjacent_double_backticks_form_one_span_not_two_spurious_empty_ones():
+    # Regression pin for the verified live bug: fixed single-backtick matching treated the second
+    # backtick of an opening "``" as if it could itself close a (now-empty) span, producing two
+    # spurious empty code spans instead of one span containing "b". Run-length-aware matching
+    # recognizes the opening run is 2 backticks wide and searches for the next *equal-length* run,
+    # correctly landing on the closing "``" after "b".
+    result = markdown_to_leankit_html("a ``b``")
+    assert result == "<p>a <code>b</code></p>"
+
+
+def test_unmatched_backtick_run_is_emitted_literally_advancing_past_the_whole_run():
+    # No closing run of length 2 exists anywhere in the remaining text -- the entire opening run
+    # must be emitted as literal text (not just its first character), and scanning must continue
+    # past it (not raise, not loop) rather than re-splitting it into single backticks.
+    result = markdown_to_leankit_html("text `` unmatched")
+    assert result == "<p>text `` unmatched</p>"
+
+
+def test_backslash_before_a_closing_backtick_run_does_not_prevent_it_from_closing():
+    # A backslash has no special meaning before a code-span delimiter per GFM -- unlike every other
+    # delimiter in this module (bold/italic/strike/links), which _is_backslash_escaped exempts, a
+    # backslash immediately preceding a code span's opening or closing backtick run must have zero
+    # effect on span-boundary matching: the backtick right after it still closes the span, and the
+    # backslash itself becomes part of the (literal, unsubstituted) span content.
+    result = markdown_to_leankit_html("`x\\`y`")
+    assert result == "<p><code>x\\</code>y`</p>"
+
+
 def test_unclosed_bold_marker_degrades_to_literal_text_not_a_dangling_tag():
     result = markdown_to_leankit_html("**unclosed bold")
     assert result == "<p>**unclosed bold</p>"
@@ -283,6 +379,66 @@ def test_html_to_markdown_to_html_round_trip_is_the_identity_for_supported_vocab
     assert markdown_to_leankit_html(leankit_html_to_markdown(html)) == html
 
 
+# --- invariant: angle brackets in HTML text content round-trip without leaking a backslash -------
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<p>a &lt; b &gt; c</p>",
+        "<p>&lt;b&gt;Title&lt;/b&gt; is not a real tag</p>",
+        "<p><strong>&lt;x&gt;</strong></p>",
+        "<h1>&lt;h2&gt;</h1>",
+    ],
+)
+def test_literal_angle_brackets_round_trip_through_html_md_html_without_leaking_a_backslash(html):
+    # Regression pin for the verified pre-existing bug: the HTML->MD escaper backslash-escapes a
+    # literal '<'/'>' in text content ("a \< b"), but MD->HTML's _escape_html_text runs BEFORE the
+    # trailing unescape pass and turns that literal '<' into the four-char entity "&lt;" -- leaving
+    # the escaper's backslash stranded in front of an entity, not a bare unescapable char. Without
+    # an entity-aware branch, the trailing _unescape_markdown_text pass never recognizes
+    # "\&lt;"/"\&gt;" and the stray backslash leaks straight into the final HTML.
+    md = leankit_html_to_markdown(html)
+    result = markdown_to_leankit_html(md)
+    assert result == html
+    assert "\\" not in result
+
+
+def test_unescape_markdown_text_strips_a_backslash_before_an_angle_bracket_entity():
+    # Direct unit pin on the new branch: a backslash immediately preceding the exact four-char
+    # entity produced by _escape_html_text for '<'/'>' is stripped, leaving the entity intact --
+    # never reinterpreted char-by-char (a naive single-char strip would corrupt "&lt;" into
+    # "lt;" by consuming its leading '&').
+    assert _unescape_markdown_text("a\\&lt;b") == "a&lt;b"
+    assert _unescape_markdown_text("a\\&gt;b") == "a&gt;b"
+
+
+def test_unescape_markdown_text_still_strips_a_backslash_before_a_bare_angle_bracket():
+    # The pre-existing single-char branch (via _UNESCAPABLE_CHARS) must still handle a bare '<'/'>'
+    # backslash-escape exactly as before -- the new entity branch only adds a case, it never
+    # replaces this one.
+    assert _unescape_markdown_text("a\\<b") == "a<b"
+    assert _unescape_markdown_text("a\\>b") == "a>b"
+
+
+def test_unescape_markdown_text_does_not_treat_a_partial_entity_as_the_full_four_char_match():
+    # "&lx;" is not "&lt;" -- the new branch must require the exact four-char entity, not just a
+    # leading '&'. Neither branch matches here ('&' is not in _UNESCAPABLE_CHARS either), so the
+    # backslash is left untouched -- it was never something the escaper produced.
+    assert _unescape_markdown_text("a\\&lx;b") == "a\\&lx;b"
+    assert _unescape_markdown_text("a\\&b") == "a\\&b"
+
+
+def test_href_with_backslash_before_a_raw_angle_bracket_is_unaffected_by_the_entity_branch():
+    # hrefs are extracted and unescaped by their own href-specific pass (_unescape_href_text,
+    # inside _try_parse_link) before _protect_href_from_unescape re-doubles any surviving
+    # backslash for the trailing global unescape pass -- so a href-embedded backslash never
+    # reaches _unescape_markdown_text as a bare backslash in front of an entity. This pins that
+    # the new entity-aware branch doesn't perturb that already-correct href path.
+    result = markdown_to_leankit_html("[x](https://example.com/a\\<b)")
+    assert result == '<p><a href="https://example.com/a&lt;b">x</a></p>'
+    assert "\\" not in result
+
+
 def test_backslash_escaped_delimiter_inside_code_span_stays_literal_after_reinsertion():
     # A backslash preceding an ambiguous char INSIDE a code span was never produced by this
     # module's escaper for code content (code bypasses _escape_markdown_text on the HTML->MD
@@ -302,6 +458,9 @@ def test_backslash_escaped_delimiter_inside_code_span_stays_literal_after_reinse
         "**" * 15_000,
         "~~" * 15_000,
         "*a" * 15_000,
+        # Many unmatched backtick runs of distinct lengths: each opener's closing-run search
+        # must be window-bounded or this input is quadratic in the document size.
+        " ".join("`" * k for k in range(1, 530)),
     ],
 )
 def test_pathological_repeated_delimiters_complete_in_bounded_time(pathological_markdown):
