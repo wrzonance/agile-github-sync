@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from typing import NamedTuple
 
 import ghkit
 
@@ -202,6 +203,59 @@ def hydrate_item_dates(cfg: dict, project_items: dict[str, dict],
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
             KeyError, TypeError, ValueError, AttributeError, IndexError, FileNotFoundError):
         return None
+
+
+class ProjectV2Status(NamedTuple):
+    """One run's GitHub Projects v2 read, already resolved to the tri-state main() needs."""
+    project_items: dict
+    project_status: dict
+    field_meta: dict | None
+    project_read_failed: bool
+    move_lanes: bool
+
+
+def resolve_project_v2_status(cfg: dict) -> ProjectV2Status:
+    """Projects v2: tri-state. A configured-but-FAILED read must not silently fall back and
+    mass-move lanes -- and neither may a technically-successful read that yields zero recognized
+    statuses despite the Project actually having issue-linked items (misspelled
+    GH_PROJECT_STATUS_FIELD, or a gh output-shape change): that is the same mass-move reached
+    through a different door (issue #5). Prints the one summary/WARN line this run's read earned;
+    not pure, but self-contained (reads only `cfg` via `ghproject`, mutates nothing)."""
+    if configured(cfg):
+        pit = items(cfg)
+        call_failed = pit is None
+        project_items = pit or {}
+    else:
+        call_failed, project_items = False, {}
+    project_status = {u: v["status"] for u, v in project_items.items() if v.get("status")}
+    zero_status_despite_items = (configured(cfg) and not call_failed
+                                  and bool(project_items) and not project_status)
+    project_read_failed = call_failed or zero_status_despite_items
+    field_meta_ = field_meta(cfg) if (configured(cfg) and not project_read_failed) else None
+    if field_meta_ and not (field_meta_.get("start_field_id") or field_meta_.get("target_field_id")):
+        field_meta_ = None
+    date_read_failed = False
+    if field_meta_:
+        dated_items = hydrate_item_dates(cfg, project_items, field_meta_)
+        if dated_items is None:
+            date_read_failed = True
+            field_meta_ = None
+        else:
+            project_items = dated_items
+    if zero_status_despite_items:
+        print(f"WARN  Projects v2 has {len(project_items)} issue item(s) but none carry a recognized "
+              f"'{cfg['gh_project']['status_field']}' Status -- check GH_PROJECT_STATUS_FIELD; "
+              f"leaving active-issue lanes untouched this run")
+    elif project_read_failed:
+        print("WARN  Projects v2 read FAILED -- leaving active-issue lanes untouched this run "
+              "(Status is the source of truth)")
+    elif configured(cfg):
+        print(f"projects v2: {len(project_status)} items carry Status{'; dates enabled' if field_meta_ else ''}")
+    if date_read_failed:
+        print("WARN  Projects v2 date field-value read FAILED -- skipping all date sync this run")
+    return ProjectV2Status(project_items=project_items, project_status=project_status,
+                           field_meta=field_meta_, project_read_failed=project_read_failed,
+                           move_lanes=not project_read_failed)
 
 
 def issue_status_map(cfg: dict) -> dict[str, str]:
