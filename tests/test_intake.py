@@ -440,7 +440,7 @@ def test_issue_body_never_raises_for_minimal_card():
 #
 # These tests pin the boundary invariants:
 #   (1) Marker resume (_find_marked_issue) is idempotent and state-order-independent.
-#   (2) Writeback ordering is fixed: the external link is written before the customId, as two
+#   (2) Writeback ordering is fixed: the customId is written before the external link, as two
 #       separate patch_card calls.
 #   (3) Promotion never queues a lane-move op for any candidate card.
 #   (4) Dry-run performs zero writes at the low-level transport boundary (ghkit.run /
@@ -510,39 +510,86 @@ def test_find_marked_issue_resumes_regardless_of_issue_state(state):
 # customId DERIVED FROM THE CARD'S TITLE (_writeback_key -> title_key of a [KEY] prefix). If that
 # derived key already belongs to a different URL-owned card -- an existing issue's issue_custom_id,
 # or another candidate this run -- the writeback creates a customId collision that the next sync's
-# _reconciled_custom_id_index fail-closed guard aborts on. intake_candidates must drop such cards.
+# _reconciled_custom_id_index fail-closed guard aborts on. promote() must skip such cards -- but
+# ONLY when the card has no resumable issue of its own (the guard runs AFTER marker-resume, so a
+# card whose "collision" IS its own crashed-run issue is resumed, never stranded).
 
-def test_candidate_with_title_derived_key_claimed_by_existing_issue_is_excluded():
-    # Blank own customId (so _is_candidate accepts it) but a [EP-9] title whose derived key EP-9 is
-    # already the customId of an existing issue -- promoting it would collide and stall all sync.
+def test_promote_skips_a_fresh_candidate_whose_title_derived_key_is_claimed(monkeypatch, capsys):
+    # Blank own customId (so _is_candidate accepts it) and NO resume marker, but a [EP-9] title whose
+    # derived key EP-9 already belongs to an existing issue -- creating it would collide, so skip it.
     existing = [{"number": 3, "title": "[EP-9] Existing", "url": "https://github.com/o/r/issues/3",
                  "state": "OPEN"}]
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])  # no marker anywhere
+    monkeypatch.setattr(ghkit, "create_issue", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("must not create an issue for a colliding, non-resumable candidate")))
     card = {"id": "card-1", "laneId": "lane-intake", "title": "[EP-9] Fresh request"}
 
-    result = intake.intake_candidates([card], _lanes(), _stage_map(), existing)
+    result = intake.promote({}, True, [card], _lanes(), _stage_map(), existing)
 
-    assert result == []
+    assert result.created == 0 and result.resumed == 0
+    assert "WARN" in capsys.readouterr().out
 
 
-def test_two_candidates_sharing_a_title_derived_key_promote_only_the_first():
+def test_promote_creates_only_the_first_of_two_candidates_sharing_a_title_derived_key(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
+    created_titles = []
+
+    def fake_create(cfg, apply, title, body):
+        created_titles.append(title)
+        n = 100 + len(created_titles)
+        return {"number": n, "url": f"https://github.com/o/r/issues/{n}"}
+
+    monkeypatch.setattr(ghkit, "create_issue", fake_create)
+    monkeypatch.setattr(intake, "_writeback", lambda *a, **k: None)
     cards = [
         {"id": "card-1", "laneId": "lane-intake", "title": "[DUP-1] First"},
         {"id": "card-2", "laneId": "lane-intake", "title": "[DUP-1] Second"},
     ]
 
-    result = intake.intake_candidates(cards, _lanes(), _stage_map(), _issues())
+    result = intake.promote({}, True, cards, _lanes(), _stage_map(), _issues())
 
-    assert [c["id"] for c in result] == ["card-1"]
+    assert result.created == 1
+    assert created_titles == ["[DUP-1] First"]
 
 
-def test_candidate_with_an_unclaimed_title_derived_key_is_still_kept():
+def test_promote_creates_a_candidate_whose_title_derived_key_is_unclaimed(monkeypatch):
     """The guard drops only genuine collisions -- a bracket-titled card whose derived key matches no
     existing issue and no earlier candidate is promoted normally (no over-rejection)."""
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
+    monkeypatch.setattr(ghkit, "create_issue",
+                        lambda *a, **k: {"number": 99, "url": "https://github.com/o/r/issues/99"})
+    monkeypatch.setattr(intake, "_writeback", lambda *a, **k: None)
     card = {"id": "card-1", "laneId": "lane-intake", "title": "[NEW-1] Fresh"}
 
-    result = intake.intake_candidates([card], _lanes(), _stage_map(), _issues())
+    result = intake.promote({}, True, [card], _lanes(), _stage_map(), _issues())
 
-    assert [c["id"] for c in result] == ["card-1"]
+    assert result.created == 1
+
+
+def test_promote_resumes_rather_than_skips_when_the_collision_is_the_cards_own_marked_issue(
+        monkeypatch):
+    """The collision guard is marker-aware. After a run crashes between create and writeback, the
+    card's own issue is now in the issues snapshot, so its title-derived key EP-9 looks 'claimed'.
+    Because that issue carries the card's resume marker, the card must be RESUMED (writeback
+    completed), never dropped as a collision and stranded with an orphan issue."""
+    card_id = "card-9"
+    marker = intake.marker_for_card(card_id)
+    existing = [{"number": 40, "title": "[EP-9] Fresh request",
+                 "url": "https://github.com/o/r/issues/40", "state": "OPEN"}]
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [
+        {"number": 40, "url": "https://github.com/o/r/issues/40", "state": "OPEN", "body": marker}])
+    monkeypatch.setattr(ghkit, "create_issue", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("resume must not create a new issue")))
+    writeback = []
+    monkeypatch.setattr(intake, "_writeback",
+                        lambda cfg, apply, c, issue: writeback.append((c["id"], issue["number"])))
+    card = {"id": card_id, "laneId": "lane-intake", "title": "[EP-9] Fresh request"}
+
+    result = intake.promote({}, True, [card], _lanes(), _stage_map(), existing)
+
+    assert result.resumed == 1
+    assert result.created == 0
+    assert writeback == [(card_id, 40)]
 
 
 # --- _writeback_key ------------------------------------------------------------
@@ -820,7 +867,7 @@ def test_promote_dry_run_never_reaches_the_transport_write_boundary(monkeypatch,
 
 def test_promote_dry_run_create_path_never_reaches_the_transport_write_boundary(monkeypatch, capsys):
     """CREATE-path counterpart of test_promote_dry_run_never_reaches_the_transport_write_boundary
-    above: here NO issue carries the candidate's marker, so _resume_or_create falls all the way
+    above: here NO issue carries the candidate's marker, so promote() falls all the way
     through to ghkit.create_issue -- the code path the marker-resume version structurally can't
     reach. Monkeypatches ghkit.run itself (never the higher-level ghkit.create_issue) so a future
     refactor that dispatches `gh issue create` directly via ghkit.run, bypassing create_issue's own

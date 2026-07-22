@@ -538,7 +538,8 @@ def _created_card_snapshot(cfg: dict, created: Mapping) -> Mapping:
 
 
 def _run_intake_promotion(cfg: dict, apply: bool, cards: list, lanes: list, stage_map: dict | None,
-                          issues: list[dict]) -> intake.IntakeSummary:
+                          issues: list[dict], card_by_url: dict, card_by_cid: dict
+                          ) -> intake.IntakeSummary:
     """Reverse intake (issue #62): promote unmanaged Intake-lane cards into new GitHub issues. Runs
     only AFTER _reconciled_custom_id_index's fail-closed identity check has passed, so an ambiguous
     URL/customId board state still aborts the run BEFORE any intake write -- preserving the
@@ -547,9 +548,20 @@ def _run_intake_promotion(cfg: dict, apply: bool, cards: list, lanes: list, stag
     selection has nothing to do with retirement. A card promoted this run is never lane-moved this
     run either: `issues` is the run's already-fetched snapshot, so the newly created issue is absent
     from active_issues and the ordinary per-issue lane-sync loop can't reach it until next run picks
-    it up via its written-back link. Prints the one-line summary only when there was at least one
+    it up via its written-back link.
+
+    Then registers each adopted card in the caller's ownership indices under its issue's URL and
+    written-back customId. Without this, a marker-resumed card (its issue already active this run,
+    its writeback landing only now -- AFTER the `cards` snapshot card_by_url/card_by_cid were built
+    from) stays invisible to the per-issue creation loop below, which would then create a DUPLICATE
+    card for that same issue. Prints the one-line summary only when there was at least one
     candidate."""
     summary = intake.promote(cfg, apply, cards, lanes, stage_map, issues)
+    for card, issue in summary.adopted:
+        card_by_url[issue["url"]] = card
+        key = issue_custom_id({"title": card.get("title", ""), "number": issue["number"]})
+        if key:
+            card_by_cid[key] = card
     if summary.candidates:
         print(f"intake: {summary.candidates} candidate(s) -- "
               f"{summary.resumed} resumed, {summary.created} created")
@@ -689,7 +701,7 @@ def main() -> None:
     card_by_cid, pending_custom_id_releases = _reconciled_custom_id_index(
         syncable_issues, card_by_url, card_by_cid)
 
-    _run_intake_promotion(cfg, apply, cards, lanes, smap, issues)
+    _run_intake_promotion(cfg, apply, cards, lanes, smap, issues, card_by_url, card_by_cid)
 
     epics = [i for i in syncable_issues if "type:epic" in i["labels"]]
 

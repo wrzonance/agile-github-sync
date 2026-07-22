@@ -145,19 +145,15 @@ def _is_candidate(card: dict, intake_lane_ids: set[str], target_urls: set[str],
 
 def intake_candidates(cards: list[dict], lanes: list, stage_map: dict | None,
                        issues: list[dict]) -> list[dict]:
-    """Cards eligible for promotion into a new GitHub issue, in `cards`' own order. Reads `cards`,
-    `lanes`, `stage_map`, and `issues` without mutating any of them (may emit a WARN when it drops a
-    collision candidate, below). Returns [] outright (zero AgilePlace/GitHub calls from any caller)
-    whenever the Intake stage isn't configured.
+    """Cards eligible for promotion into a new GitHub issue, in `cards`' own order. Pure -- reads
+    `cards`, `lanes`, `stage_map`, and `issues` without mutating any of them. Returns [] outright
+    (zero AgilePlace/GitHub calls from any caller) whenever the Intake stage isn't configured.
 
-    Beyond `_is_candidate`'s per-card predicate, this rejects any card whose PROSPECTIVE writeback
-    customId (`title_key` of its title -- what `_writeback_key` would derive from a `[KEY]` prefix)
-    is already claimed, either by an existing issue's `issue_custom_id` or by an earlier candidate
-    this same run. Promoting such a card would write a customId that collides with a different
-    URL-owned card, and the next sync's `_reconciled_custom_id_index` fail-closed guard would then
-    abort every sync on the ambiguity. A card whose title has no `[KEY]` prefix derives no such key
-    (its writeback falls back to the new issue's own unique number, which can never collide) and is
-    never dropped here.
+    This is the lane/link/customId predicate only. The title-derived customId collision guard lives
+    in promote() instead (not here), because it must run AFTER marker-resume matching: a card whose
+    title-derived key matches an existing issue that is ITS OWN resume target must be resumed, not
+    dropped -- and marker awareness needs the body-bearing ghkit.list_issue_bodies() snapshot that
+    only promote() fetches.
 
     `issues` is the already-fetched, title-bearing ghkit.list_issues() snapshot (same one sync.py's
     main loop uses) -- not ghkit.list_issue_bodies()'s separate, tri-state, body-bearing read that
@@ -167,21 +163,8 @@ def intake_candidates(cards: list[dict], lanes: list, stage_map: dict | None,
         return []
     target_urls = {issue["url"] for issue in issues}
     managed_custom_ids = _disqualifying_custom_ids(issues)
-    claimed_keys = set(managed_custom_ids)
-    selected = []
-    for card in cards:
-        if not _is_candidate(card, intake_lane_ids, target_urls, managed_custom_ids):
-            continue
-        derived_key = title_key(card.get("title") or "")
-        if derived_key is not None and derived_key in claimed_keys:
-            print(f"WARN  intake: skipping card {card.get('id')} -- its title-derived customId "
-                  f"[{derived_key}] is already claimed by an existing issue or another candidate; "
-                  "promoting it would collide and stall the ordinary sync")
-            continue
-        if derived_key is not None:
-            claimed_keys.add(derived_key)
-        selected.append(card)
-    return selected
+    return [card for card in cards
+            if _is_candidate(card, intake_lane_ids, target_urls, managed_custom_ids)]
 
 
 def _issue_body(card: dict, cfg: dict) -> str:
@@ -208,11 +191,17 @@ class IntakeSummary(NamedTuple):
         only needed writeback -- recovery from a prior run that crashed between create and writeback.
     created: candidates for which a brand-new GitHub issue was actually created (apply=True only --
         a dry-run "would create" plan never increments this, since nothing was actually created).
+    adopted: (card, issue) pairs for every candidate whose card got a writeback this run (resumed
+        AND created). The caller (sync._run_intake_promotion) registers each card in its ownership
+        indices under the issue's URL/customId, so the per-issue card-creation loop matches a
+        just-linked card instead of creating a DUPLICATE for a resumed, already-active issue whose
+        writeback landed after the local cards snapshot was taken.
     """
     candidates: int
     prescan_failed: bool
     resumed: int
     created: int
+    adopted: tuple = ()
 
 
 def _find_marked_issue(card_id, issues_with_bodies: list[dict]) -> dict | None:
@@ -303,15 +292,13 @@ def _card_for_link_write(cfg: dict, apply: bool, card: dict) -> dict:
     return agileplace.get_card(cfg, card["id"])
 
 
-def _resume_or_create(cfg: dict, apply: bool, card: dict,
-                      issues_with_bodies: list[dict]) -> tuple[dict | None, bool]:
-    """One candidate's issue: (issue_or_None, resumed). `issue` is None only for a dry-run plan with
-    no prior marker match -- create_issue's own dry-run gate returns None without writing anything."""
-    marked = _find_marked_issue(card.get("id"), issues_with_bodies)
-    if marked is not None:
-        return marked, True
-    created = ghkit.create_issue(cfg, apply, card.get("title", ""), _issue_body(card, cfg))
-    return created, False
+def _collides_with_a_different_card(derived_key: str | None, claimed_keys: set[str]) -> bool:
+    """True when this card's PROSPECTIVE writeback customId (`derived_key` -- the `title_key` of its
+    title, what `_writeback_key` produces from a `[KEY]` prefix) is already owned by a DIFFERENT
+    URL-owned card: an existing issue's `issue_custom_id`, or a candidate promoted earlier this run.
+    A card whose title has no `[KEY]` prefix derives no key (None -- its writeback falls back to the
+    new issue's own unique number, which can never collide) and never collides here."""
+    return derived_key is not None and derived_key in claimed_keys
 
 
 def promote(cfg: dict, apply: bool, cards: list[dict], lanes: list, stage_map: dict | None,
@@ -319,6 +306,14 @@ def promote(cfg: dict, apply: bool, cards: list[dict], lanes: list, stage_map: d
     """Promote every Intake candidate into a GitHub issue (or resume one already created by a prior,
     interrupted run), then write the link/customId back so the ordinary one-way sync adopts it next
     cycle. Never moves a card's lane -- that stays the ordinary sync's job.
+
+    Marker-resume is checked FIRST for every candidate: a card whose own promoted issue already
+    exists (found by its resume marker) is resumed -- writeback re-run -- regardless of whether that
+    issue's title-derived customId now looks "claimed". Only for a card with NO resumable issue does
+    the collision guard apply: if its title-derived writeback customId is already owned by a
+    different issue or an earlier candidate this run, it is skipped (creating it would write a
+    customId that stalls the next sync's fail-closed identity guard). This ordering is what keeps the
+    crash-recovery case from stranding a card whose own issue is now in the `issues` snapshot.
 
     Zero AgilePlace/GitHub calls when there are no candidates. Any create_issue/patch_card failure
     propagates uncaught -- no in-run retry; recovery is the next cycle's marker-based resume scan."""
@@ -331,8 +326,25 @@ def promote(cfg: dict, apply: bool, cards: list[dict], lanes: list, stage_map: d
               f"all {len(candidates)} candidate(s) this run")
         return IntakeSummary(candidates=len(candidates), prescan_failed=True, resumed=0, created=0)
     resumed = created = 0
+    adopted: list[tuple[dict, dict]] = []
+    # customIds already owned by an existing issue, plus any reserved by a card created earlier this
+    # run -- the collision set the (marker-unaware) guard below checks a fresh candidate's key against.
+    claimed_keys = {issue_custom_id(issue) for issue in issues}
     for card in candidates:
-        issue, was_resumed = _resume_or_create(cfg, apply, card, issues_with_bodies)
+        marked = _find_marked_issue(card.get("id"), issues_with_bodies)
+        derived_key = title_key(card.get("title") or "")
+        if marked is not None:
+            issue, was_resumed = marked, True
+        else:
+            if _collides_with_a_different_card(derived_key, claimed_keys):
+                print(f"WARN  intake: skipping card {card.get('id')} -- its title-derived customId "
+                      f"[{derived_key}] is already claimed by an existing issue or another "
+                      "candidate; promoting it would collide and stall the ordinary sync")
+                continue
+            if derived_key is not None:
+                claimed_keys.add(derived_key)
+            issue = ghkit.create_issue(cfg, apply, card.get("title", ""), _issue_body(card, cfg))
+            was_resumed = False
         if issue is None:
             print(f"DRY   intake: would create issue for card {card.get('id')} "
                   f"({card.get('title', '')!r})")
@@ -342,5 +354,6 @@ def promote(cfg: dict, apply: bool, cards: list[dict], lanes: list, stage_map: d
         else:
             created += 1
         _writeback(cfg, apply, card, issue)
+        adopted.append((card, issue))
     return IntakeSummary(candidates=len(candidates), prescan_failed=False,
-                         resumed=resumed, created=created)
+                         resumed=resumed, created=created, adopted=tuple(adopted))

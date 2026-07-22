@@ -91,12 +91,42 @@ def test_main_calls_intake_promote_with_full_unfiltered_cards_and_issues(tmp_pat
     promote_mock = _run_main(tmp_path, summary, lanes=lanes, cards=cards)
 
     promote_mock.assert_called_once()
-    call_cfg, call_apply, call_cards, call_lanes, call_stage_map, call_issues = promote_mock.call_args.args
+    _call_cfg, call_apply, call_cards, call_lanes, call_stage_map, call_issues = promote_mock.call_args.args
     assert call_apply is True
     assert call_cards == cards
     assert call_lanes == lanes
     assert call_stage_map == {"Intake": ["New Requests"]}
     assert call_issues == issues
+
+
+def test_main_does_not_create_a_duplicate_card_for_a_resumed_active_issue(tmp_path):
+    """Data-integrity regression (issue #62 follow-up): when marker-resume reattaches an existing
+    Intake card to an ALREADY-ACTIVE issue, the run must NOT then create a duplicate card for that
+    same issue. The card's writeback lands after main()'s local `cards` snapshot was taken, so
+    _run_intake_promotion must refresh card_by_url/card_by_cid from the promotion's adoptions before
+    the per-issue card-creation loop -- otherwise card_for(issue) misses and agileplace.create_card
+    is called for an issue that already has a card. Dry run: create_card is still mock-observed
+    whether or not --apply is set, and the marker-resume writeback needs no live get_card refetch."""
+    active_url = "https://github.com/acme/repo/issues/7"
+    active_issue = {"number": 7, "title": "Raw idea", "state": "OPEN", "labels": [],
+                    "milestone": None, "assignees": [], "url": active_url}
+    intake_card = {"id": "C-intake", "version": 1, "laneId": "lane-intake", "title": "Raw idea"}
+    intake_lane = {"id": "lane-intake", "title": "New Requests"}
+    cfg = {**_sync_main_cfg(tmp_path), "stage_lane_map": {"Intake": ["New Requests"]}}
+    state_file = tmp_path / ".sync-state.json"
+
+    stack, _run, _patch_card, create_card_mock = _mock_io(
+        intake_card, ({}, []), field_meta_return=None,
+        existing_cards=[intake_card], lanes_return=[intake_lane], issue_return=active_issue)
+
+    with stack, patch("sync.env_config", return_value=cfg), \
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py"]), \
+         patch("ghkit.list_issue_bodies",
+               return_value=[{"number": 7, "url": active_url, "state": "OPEN",
+                              "body": intake.marker_for_card("C-intake")}]):
+        sync.main()
+
+    create_card_mock.assert_not_called()
 
 
 def test_main_runs_intake_only_after_the_fail_closed_identity_check(tmp_path):
