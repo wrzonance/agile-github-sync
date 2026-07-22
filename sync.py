@@ -23,12 +23,13 @@ from collections.abc import Mapping
 import agileplace
 import ghkit
 import ghproject
+import intake
 import vetting_latch
 from card_coherence import contested_cards, laneid_op_value, lane_conflict
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
-from stages import (epic_key_for_task, is_retired_issue, issue_stage,
-                    normalize_status, title_key)
+from stages import (epic_key_for_task, is_retired_issue, issue_custom_id,
+                    issue_stage, normalize_status, title_key)
 
 MS_PREFIX = "milestone:"
 STATE_SCHEMA = 2
@@ -209,11 +210,6 @@ def issue_card_title(issue: dict) -> str:
     if k and t.startswith(f"[{k}]"):
         return t[len(f"[{k}]"):].strip() or t
     return t
-
-
-def issue_custom_id(issue: dict) -> str:
-    """The customId written to and read from AgilePlace for one GitHub issue."""
-    return title_key(issue["title"]) or str(issue["number"])
 
 
 def _same_card(left: dict | None, right: dict | None) -> bool:
@@ -542,6 +538,37 @@ def _created_card_snapshot(cfg: dict, created: Mapping) -> Mapping:
     return fresh
 
 
+def _run_intake_promotion(cfg: dict, apply: bool, cards: list, lanes: list, stage_map: dict | None,
+                          issues: list[dict], card_by_url: dict, card_by_cid: dict
+                          ) -> intake.IntakeSummary:
+    """Reverse intake (issue #62): promote unmanaged Intake-lane cards into new GitHub issues. Runs
+    only AFTER _reconciled_custom_id_index's fail-closed identity check has passed, so an ambiguous
+    URL/customId board state still aborts the run BEFORE any intake write -- preserving the
+    "ambiguous identity fails before any mutation" guarantee. Uses the FULL, unfiltered cards/issues
+    (not the retirement-filtered indices main() builds, which #70 owns) -- intake candidate
+    selection has nothing to do with retirement. A card promoted this run is never lane-moved this
+    run either: `issues` is the run's already-fetched snapshot, so the newly created issue is absent
+    from active_issues and the ordinary per-issue lane-sync loop can't reach it until next run picks
+    it up via its written-back link.
+
+    Then registers each adopted card in the caller's ownership indices under its issue's URL and
+    written-back customId. Without this, a marker-resumed card (its issue already active this run,
+    its writeback landing only now -- AFTER the `cards` snapshot card_by_url/card_by_cid were built
+    from) stays invisible to the per-issue creation loop below, which would then create a DUPLICATE
+    card for that same issue. Prints the one-line summary only when there was at least one
+    candidate."""
+    summary = intake.promote(cfg, apply, cards, lanes, stage_map, issues)
+    for card, issue in summary.adopted:
+        card_by_url[issue["url"]] = card
+        key = issue_custom_id({"title": card.get("title", ""), "number": issue["number"]})
+        if key:
+            card_by_cid[key] = card
+    if summary.candidates:
+        print(f"intake: {summary.candidates} candidate(s) -- "
+              f"{summary.resumed} resumed, {summary.created} created")
+    return summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync GitHub -> AgilePlace (per-issue cards, lanes, connections, metadata)")
     parser.add_argument("--apply", action="store_true", help="actually write (default: verbose dry run)")
@@ -694,6 +721,9 @@ def main() -> None:
 
     card_by_cid, pending_custom_id_releases = _reconciled_custom_id_index(
         syncable_issues, card_by_url, card_by_cid)
+
+    _run_intake_promotion(cfg, apply, cards, lanes, smap, issues, card_by_url, card_by_cid)
+
     epics = [i for i in syncable_issues if "type:epic" in i["labels"]]
 
     def card_for(issue):

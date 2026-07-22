@@ -775,3 +775,8 @@ def test_non_epic_cards_do_not_trigger_child_reads(tmp_path):
         sync.main()
 
     child_read_mock.assert_not_called()
+
+# NOTE: the "issue #62 Task 6/8: intake.promote() wired into main()'s call site" end-to-end test
+# that used to live here has moved to tests/test_sync_intake_call_site.py (this file was already
+# over its 800-line budget; that file is this feature's dedicated, lighter-weight home -- see its
+# own module docstring).

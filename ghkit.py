@@ -52,8 +52,12 @@ def _gh_subprocess_env(host: str | None = None) -> dict[str, str]:
     return env
 
 
-def run(cfg: dict, args: list[str], *, check: bool = True,
-        host: str | None = None) -> subprocess.CompletedProcess:
+def run(cfg: dict, args: list[str], *, check: bool = True, host: str | None = None,
+        input: str | None = None) -> subprocess.CompletedProcess:
+    """Run one `gh` invocation. `input`, when given, is piped to the subprocess's stdin -- the
+    mechanism create_issue() uses for `--body-file -` so an issue body never has to survive a shell
+    quoting pass. Every existing call site omits it, so the default (None) reproduces exactly the
+    subprocess.run(input=None) behavior those call sites already relied on."""
     target = cfg.get("target_repo_path")
     if target is None:
         raise SystemExit("TARGET_REPO_PATH is not set (.env or environment) -- cannot target the repo")
@@ -62,7 +66,7 @@ def run(cfg: dict, args: list[str], *, check: bool = True,
     try:
         return subprocess.run(["gh", *args], cwd=str(target), check=check, capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=GH_TIMEOUT,
-                              env=_gh_subprocess_env(host))
+                              env=_gh_subprocess_env(host), input=input)
     except subprocess.CalledProcessError as exc:
         # Surface gh's own message; captured-and-discarded stderr makes every failure opaque.
         if exc.stderr:
@@ -128,6 +132,31 @@ def list_issues(cfg: dict) -> list[dict]:
             "has_open_pr": False,  # populated by open_pr_issue_numbers()
         })
     return normalized
+
+
+def list_issue_bodies(cfg: dict) -> list[dict] | None:
+    """Every issue's number/url/state/body, for the Intake feature's disqualification and marker-
+    resume reads. Tri-state, mirroring open_pr_issue_numbers exactly: a list on success (possibly
+    empty when the repo genuinely has zero issues -- a real, distinguishable result), and **None**
+    on ANY failure (gh error, timeout, or a malformed/non-list response), so callers can tell "no
+    issues" from "we don't know" instead of treating a failed read as an empty snapshot and
+    double-creating issues a resume should have found. `body` is normalized to "" -- gh's JSON
+    output omits the field entirely for a bodyless issue rather than emitting null."""
+    try:
+        out = run(cfg, ["issue", "list", "--state", "all", "--limit", "1000", "--json",
+                        "number,url,state,body"])
+        issues = json.loads(out.stdout or "[]")
+        if not isinstance(issues, list):
+            raise TypeError("gh issue list must return a JSON array")
+        return [{
+            "number": i["number"],
+            "url": i.get("url", ""),
+            "state": i.get("state", ""),
+            "body": i.get("body") or "",
+        } for i in issues]
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
+            KeyError, TypeError):
+        return None
 
 
 def open_pr_issue_numbers(cfg: dict) -> set[int] | None:
@@ -298,3 +327,43 @@ def set_milestone(cfg: dict, apply: bool, number: int, title: str | None) -> Non
             print(f"gh    issue {number} milestone cleared")
         else:
             print(f"DRY   gh issue edit {number} --remove-milestone")
+
+
+def _issue_number_from_url(url: str) -> int:
+    """The trailing /issues/{n} segment of a GitHub issue URL, as an int. `gh issue create`'s
+    stdout contract is exactly one bare URL line; a malformed one is a genuine unrecovered failure,
+    so this raises (ValueError) rather than guessing -- callers let it propagate uncaught, same as
+    every other create_issue() failure mode."""
+    return int(url.rsplit("/", 1)[-1])
+
+
+def create_issue(cfg: dict, apply: bool, title: str, body: str) -> dict | None:
+    """Create one issue via `gh issue create --body-file -`, through the dry-run gate. The body is
+    never interpolated into argv -- it is piped through run()'s `input=` stdin passthrough (Task
+    2), so a body containing shell metacharacters or gh-flag-like text can't be misparsed.
+
+    Never passes --type: API-VALIDATION.md records `gh issue create --type <TYPE>` as non-atomic
+    (an org missing that type still gets the issue created before the command fails), so a blind
+    retry would double-create. The Intake feature has no need for issue types, so the flag is
+    omitted outright rather than probed for.
+
+    apply=False prints the planned title and returns None, with zero calls to run() -- identical
+    dry-run shape to edit_label/set_milestone. apply=True runs the create, parses the issue number
+    out of gh's own stdout (a bare created-issue URL), and returns {"number", "url"}. Any
+    CalledProcessError/TimeoutExpired from run() propagates uncaught -- no swallowed sentinel.
+
+    Validates `title` at this boundary, before either the dry-run print or a live run() call: a
+    blank or non-string title would otherwise reach subprocess.Popen unvalidated -- None raises an
+    opaque TypeError ("argv must be str"), and "" produces a gh CalledProcessError -- either way an
+    exception nothing upstream catches, crashing the entire sync run for one bad title. Raises
+    ValueError with the offending value for context, matching edit_label's own boundary-validation
+    convention (unsafe label names)."""
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError(f"create_issue: title must be a non-empty string, got {title!r}")
+    if not apply:
+        print(f"DRY   gh issue create --title '{title}'")
+        return None
+    out = run(cfg, ["issue", "create", "--title", title, "--body-file", "-"], input=body)
+    url = out.stdout.strip()
+    print(f"gh    issue create -> {url}")
+    return {"number": _issue_number_from_url(url), "url": url}

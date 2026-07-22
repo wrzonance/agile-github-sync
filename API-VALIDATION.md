@@ -305,3 +305,63 @@ already trusts). Two behaviors remain `[live-check]` pending:
    (`can_set_status`), and a member left Status-less anyway becomes a pending latch (card held,
    Status retried from its lane) -- all test-pinned. The happy path awaits the same first real
    promotion.
+
+## Reverse intake (issue #62) -- spike findings, `[live-check]` pending
+
+Reverse intake (`intake.py`) writes an `/externalLink` back onto the AgilePlace card that a new
+GitHub issue was created from, so the marker-resume scan can find it again next run. A design
+spike (before implementation) probed four open questions that could not be settled from docs
+alone, since this worktree has no `.env` and no live board to probe against:
+
+1. **`/externalLink` singular-`add` is the confirmed-safe write shape.** The existing
+   `[live-check]`-confirmed init `04` result above (`{op:"add", path:"/externalLink",
+   value:{label,url}}` succeeds on a card with no link yet) covers exactly the case reverse
+   intake needs -- an Intake-lane card that has never been linked to an issue. `_writeback` in
+   `intake.py` uses this confirmed shape and nothing else.
+2. **The plural `/externalLinks` array shape is UNCONFIRMED and intentionally not attempted.**
+   Cards *can* carry more than one external link in the AgilePlace UI, which raises the
+   possibility of a separate array-typed patch path for adding a second link without clobbering
+   the first. No doc or prior `[live-check]` run in this file confirms that shape's op/path/value,
+   and no live probe was possible here. `intake.py`'s `op_external_link` ships only the singular
+   `add`; a card that already has a different external link is treated as the array-shaped case
+   (see finding 3) rather than guessed at.
+3. **The externalLink writeback has NO conflict-retry support -- this is intentional, not an
+   oversight.** `agileplace.py`'s `_card_value_for_patch_path` (the table the 409/428
+   conflict-retry path in `agileplace.patch_card` uses to recompute a stale op's value before
+   retrying) does not recognize `/externalLink` at all -- and, per `agileplace.py`'s own file-budget
+   note (805/800 lines before this feature existed; see `intake.py`'s module docstring), extending
+   it to do so isn't free. So unlike the `customId` writeback (which does retry once on a version
+   conflict), a 409/428 hit on the link write is uncaught and propagates as a failed run.
+   `_writeback` in `intake.py` issues the `customId` write and the link write as two SEPARATE
+   `patch_card` calls, `customId` FIRST (fixed post-review, issue #62 follow-up): writing the
+   more-reliable, retry-supported join-key write first means any failure partway through leaves the
+   card either fully unwritten (still a full candidate; the next run's marker-resume scan retries
+   the whole writeback) or customId-written-but-link-missing (still fully tracked -- matched and
+   reconciled by the ordinary sync via its customId -- just missing the informational external-link
+   decoration, which is never independently retried). The original link-first ordering could
+   instead strand a card permanently: a link write that succeeded followed by a customId write that
+   failed left a card matching a known target URL (disqualifying it from `_is_candidate`) whose join
+   key was never established, with no further retry path at all.
+   **CRITICAL bug fixed post-review (issue #62 follow-up):** this two-separate-`patch_card`-calls
+   design has a sharper failure mode than "no retry on a genuine concurrent edit" -- the customId
+   write ITSELF bumps the card's server-side version, so the link write, issued against the SAME,
+   now-stale `card` snapshot, deterministically conflicted on every real apply=True writeback
+   against a card with a usable version (the ordinary `agileplace.list_cards()` case) -- and because
+   `_card_value_for_patch_path` doesn't recognize `/externalLink`, the conflict-retry path always
+   refused to recover (unsupported path -> always treated as "changed"), re-raising and aborting the
+   entire sync run. `_writeback` now routes the link write's card through `_card_for_link_write`,
+   which explicitly refetches the card via `agileplace.get_card` (apply=True only; a dry run reuses
+   `card` unchanged, zero network calls) before the second PATCH -- avoiding the self-inflicted
+   conflict outright rather than depending on a retry path that structurally can't recover from it.
+   A genuine concurrent edit landing in the narrow window between that refetch and the PATCH itself
+   still 409/428s and still propagates uncaught, unchanged from the original design intent above.
+4. **`card_web_url`'s host is an UNCONFIRMED best guess.** The issue body written for a promoted
+   card links back to the card in AgilePlace's web app. No separate "web host" config key exists
+   in `config.py`/`.env.example` distinct from `AGILEPLACE_HOST` (the API host), and no live board
+   was reachable to confirm whether the API host and the web-app host are the same value for a
+   Planview/LeanKit tenant. `card_web_url` falls back to `cfg.get('host')` with an inline comment
+   flagging this as unconfirmed. If a tenant's web UI is served from a different host than its API,
+   the generated link will be wrong until this is confirmed live and corrected.
+
+All four remain `[live-check]` pending -- the first real reverse-intake promotion against a
+production board should confirm or correct them and update this section.
