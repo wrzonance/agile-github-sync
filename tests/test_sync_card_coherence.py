@@ -354,7 +354,7 @@ def test_fenced_card_syncs_normally_once_the_customid_collision_resolves(tmp_pat
     # customId ("2") no longer collides with issue 1's ("KEY"). Issue 1's claim on card 500 is now
     # unique, and it must sync normally: no more fence WARN, and its overdue lane move fires.
     second_resolved = _issue(2, "unrelated issue two", labels=("agent:in-review",))
-    create_card_mock2, patch_card_mock2 = _run_main_once(
+    _create_card_mock2, patch_card_mock2 = _run_main_once(
         tmp_path, [first, second_resolved], [card], lanes=(_PROG_LANE, _REVIEW_LANE))
     out2 = capsys.readouterr().out
     assert not any(line.startswith("WARN  card 500 claimed by") for line in out2.splitlines()), (
