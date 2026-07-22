@@ -254,6 +254,62 @@ def test_code_span_content_is_never_inline_substituted():
     assert result == "<p><code>*not bold* and _not italic_</code></p>"
 
 
+# --- invariant: variable-length backtick-run code-span matching --------------------------------
+
+def test_code_span_delimiter_is_a_backtick_run_not_a_single_backtick():
+    # A double-backtick delimiter lets a single literal backtick appear inside the span's content
+    # without prematurely closing it -- the fence chosen (2 backticks) never occurs inside the
+    # span's own content (a lone backtick), which is exactly what makes it a valid fence.
+    result = markdown_to_leankit_html("``a`b``")
+    assert result == "<p><code>a`b</code></p>"
+
+
+def test_code_span_run_length_must_match_exactly_to_close():
+    # A shorter/longer backtick run encountered mid-scan (here a literal "``" pair) must not
+    # prematurely close a longer opening run (here 3 backticks) -- only an exact-length-3 run
+    # closes it. Confirms the fence chosen (3 backticks) never occurs inside the extracted content.
+    # ("text " prefix keeps this a paragraph, not a fenced code BLOCK -- that's a line-level
+    # pattern requiring the triple-backtick at the very start of the line, an unrelated layer.)
+    result = markdown_to_leankit_html("text ```a `` b``` end")
+    assert result == "<p>text <code>a `` b</code> end</p>"
+
+
+def test_code_span_strips_exactly_one_leading_and_trailing_space_of_padding():
+    # Per GFM: when a span's content both begins and ends with a space (and isn't all spaces),
+    # exactly one leading/trailing space is stripped -- this is what lets a code span's content
+    # start or end with a backtick itself without merging into the delimiter run.
+    result = markdown_to_leankit_html("`` `code` ``")
+    assert result == "<p><code>`code`</code></p>"
+
+
+def test_two_adjacent_double_backticks_form_one_span_not_two_spurious_empty_ones():
+    # Regression pin for the verified live bug: fixed single-backtick matching treated the second
+    # backtick of an opening "``" as if it could itself close a (now-empty) span, producing two
+    # spurious empty code spans instead of one span containing "b". Run-length-aware matching
+    # recognizes the opening run is 2 backticks wide and searches for the next *equal-length* run,
+    # correctly landing on the closing "``" after "b".
+    result = markdown_to_leankit_html("a ``b``")
+    assert result == "<p>a <code>b</code></p>"
+
+
+def test_unmatched_backtick_run_is_emitted_literally_advancing_past_the_whole_run():
+    # No closing run of length 2 exists anywhere in the remaining text -- the entire opening run
+    # must be emitted as literal text (not just its first character), and scanning must continue
+    # past it (not raise, not loop) rather than re-splitting it into single backticks.
+    result = markdown_to_leankit_html("text `` unmatched")
+    assert result == "<p>text `` unmatched</p>"
+
+
+def test_backslash_before_a_closing_backtick_run_does_not_prevent_it_from_closing():
+    # A backslash has no special meaning before a code-span delimiter per GFM -- unlike every other
+    # delimiter in this module (bold/italic/strike/links), which _is_backslash_escaped exempts, a
+    # backslash immediately preceding a code span's opening or closing backtick run must have zero
+    # effect on span-boundary matching: the backtick right after it still closes the span, and the
+    # backslash itself becomes part of the (literal, unsubstituted) span content.
+    result = markdown_to_leankit_html("`x\\`y`")
+    assert result == "<p><code>x\\</code>y`</p>"
+
+
 def test_unclosed_bold_marker_degrades_to_literal_text_not_a_dangling_tag():
     result = markdown_to_leankit_html("**unclosed bold")
     assert result == "<p>**unclosed bold</p>"
