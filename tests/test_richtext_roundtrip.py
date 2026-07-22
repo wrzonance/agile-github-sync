@@ -83,10 +83,10 @@ def test_directly_adjacent_nested_inline_formats_round_trip_without_delimiter_co
         # live backtick characters on reparse, merging both spans' content into one and losing the
         # element boundary between them entirely.
         ("<p><code>a</code><code>b</code></p>", ["a", "b"]),
-        # same collision with a leading word first, so the pair never lands at true line start
-        # (kept clear of the separate, pre-existing, documented fenced-code-BLOCK collision that
-        # only fires for a 3+ backtick run at true line start -- see
-        # test_code_span_needing_a_three_plus_backtick_fence_round_trips_when_not_at_true_line_start).
+        # same collision with a leading word first, so the pair never lands at true line start --
+        # isolates the adjacent-span collision under test here from the separate (now fixed)
+        # fenced-code-BLOCK collision a 3+ backtick run used to hit at true line start; see
+        # test_code_span_needing_a_three_plus_backtick_fence_round_trips_even_at_true_line_start.
         ("<p>Inline <code>a</code><code>b</code> spans.</p>", ["a", "b"]),
         # three-way chain of adjacent spans -- the collision must not just be fixed pairwise.
         ("<p><code>a</code><code>b</code><code>c</code></p>", ["a", "b", "c"]),
@@ -206,11 +206,12 @@ def test_markdown_authored_document_stabilizes_after_one_normalization_pass(mark
 # test_richtext_html_to_md.py / test_richtext_md_to_html.py; this closes the spike's own
 # highest-risk gap those files call out -- that raw '<'/'>' escaping and the new run-length-N
 # backtick fencing don't destabilize each other, or the link-escaping/list/heading machinery
-# already pinned above, once all combined into one document. Code spans use the established
-# "leading word" convention (see test_code_span_needing_a_three_plus_backtick_fence_round_trips_
-# when_not_at_true_line_start) so a 3+ backtick fence never lands at true line start and collides
-# with fenced-code-BLOCK detection -- a separate, pre-existing, documented-out-of-scope layer this
-# gate is not re-litigating.
+# already pinned above, once all combined into one document. Code spans here still use the
+# established "leading word" convention (see
+# test_code_span_needing_a_three_plus_backtick_fence_round_trips_when_not_at_true_line_start) to
+# keep this gate scoped to the angle-bracket/fencing/link interaction under test -- the separate
+# true-line-start fenced-code-BLOCK collision a 3+ backtick run used to hit is fixed and pinned on
+# its own by test_code_span_needing_a_three_plus_backtick_fence_round_trips_even_at_true_line_start.
 # =====================================================================================
 
 _ANGLE_AND_CODE_SPAN_COMBINED_HTML = (
@@ -391,8 +392,12 @@ def test_markdown_output_whitelist_closure_over_adversarial_html_battery(html):
 def test_every_unclosed_inline_delimiter_degrades_to_literal_text_not_a_dangling_tag(markdown, must_not_contain):
     result = markdown_to_leankit_html(markdown)
     assert must_not_contain not in result
-    # The delimiter's literal characters themselves survive as escaped text, not as live syntax.
-    assert result.startswith("<p>")
+    # The delimiter's literal characters themselves survive as escaped text, not as live syntax --
+    # pinned as an exact value (not just "starts with <p>") so a regression that drops the
+    # delimiter, or the surrounding prose, while still avoiding must_not_contain can't silently
+    # pass. None of these inputs contain an HTML-special character, so the whole input is expected
+    # back verbatim inside the paragraph wrapper.
+    assert result == f"<p>{markdown}</p>"
 
 
 # --- invariant: content conservation -- broad vocabulary, unicode, and structural-char battery -----

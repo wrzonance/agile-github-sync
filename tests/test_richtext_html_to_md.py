@@ -109,19 +109,23 @@ def test_unsupported_tag_syntax_never_leaks_into_markdown_output(html, leaked_ta
 
 
 @pytest.mark.parametrize(
-    "html",
+    "html, expected_text",
     [
-        "<p>Unclosed <strong>bold</p>",
-        "<p><em>Unclosed italic and text after</p>",
-        "<p><code>unclosed inline code</p>",
+        ("<p>Unclosed <strong>bold</p>", "bold"),
+        ("<p><em>Unclosed italic and text after</p>", "Unclosed italic and text after"),
+        ("<p><code>unclosed inline code</p>", "unclosed inline code"),
     ],
 )
-def test_force_closed_format_markers_are_always_balanced(html):
+def test_force_closed_format_markers_are_always_balanced(html, expected_text):
     # A single mismatched tag type per case, with trailing text, so the appended closer never
     # sits directly adjacent to another marker -- isolates the balance guarantee from Markdown's
     # separate (and inherent, not this module's concern) delimiter-adjacency ambiguity when
     # several unclosed spans all flush back-to-back at end of input.
     result = leankit_html_to_markdown(html)
+    # The span's own text must actually survive -- marker-count parity alone would be trivially
+    # (and wrongly) satisfied by a total-content-loss regression that emits an empty string (a
+    # count of zero markers is still "even").
+    assert expected_text in result
     for marker in ("**", "*", "`"):
         scan = result.replace("**", "") if marker == "*" else result
         assert scan.count(marker) % 2 == 0
@@ -269,14 +273,37 @@ def test_code_span_html_to_markdown_to_html_round_trip_reproduces_exact_content(
     ],
 )
 def test_code_span_needing_a_three_plus_backtick_fence_round_trips_when_not_at_true_line_start(code_content):
-    # A fence of 3+ backticks landing as the very first characters of a line collides with
-    # _richtext_md_to_html's line-level fenced-CODE-BLOCK detection (_CODE_FENCE_LINE_RE) -- an
-    # unrelated layer this module's own test suite already documents as out of scope for
-    # code-span matching (see test_richtext_md_to_html.py's "text " prefix convention on its own
-    # 3-backtick-run case). A leading word keeps the code span from ever starting its line, which
-    # is also how this module's supported vocabulary is actually used in practice -- inline code
-    # embedded in surrounding prose, never a bare code span alone at the top of a document.
+    # A leading word is how this module's supported vocabulary is actually used in practice --
+    # inline code embedded in surrounding prose, never a bare code span alone at the top of a
+    # document. (A fence of 3+ backticks landing at true line start used to collide with
+    # _richtext_md_to_html's line-level fenced-CODE-BLOCK detection -- see
+    # test_code_span_needing_a_three_plus_backtick_fence_round_trips_even_at_true_line_start below
+    # for the fix now covering that case too.)
     html = f"<p>Inline <code>{code_content}</code> span.</p>"
+    md = leankit_html_to_markdown(html)
+    assert markdown_to_leankit_html(md) == html
+
+
+@pytest.mark.parametrize(
+    "code_content",
+    [
+        "has `` a double backtick run",
+        "has ``` a triple backtick run",
+        "``surrounded``",
+        "````````````long run of backticks alone````````````",
+    ],
+)
+def test_code_span_needing_a_three_plus_backtick_fence_round_trips_even_at_true_line_start(code_content):
+    # Regression pin for the verified live bug (now fixed): a fence of 3+ backticks landing as the
+    # very first characters of a line used to collide with _richtext_md_to_html's line-level
+    # fenced-CODE-BLOCK detection (_CODE_FENCE_LINE_RE only checked for a leading backtick run,
+    # with no way to tell a code span's self-contained opening+closing fence pair apart from an
+    # actual block-level fence opener) -- silently discarding the rest of the document instead of
+    # rendering inline code. _CODE_FENCE_LINE_RE now also requires no further backtick anywhere
+    # else on the line (the CommonMark rule that a fence's info string can't itself contain a
+    # backtick), which is exactly what distinguishes the two shapes. No leading word here, unlike
+    # the sibling test above -- the code span is the very first thing in the document.
+    html = f"<p><code>{code_content}</code></p>"
     md = leankit_html_to_markdown(html)
     assert markdown_to_leankit_html(md) == html
 

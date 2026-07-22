@@ -28,7 +28,16 @@ _BACKSLASH_ESCAPED_ANGLE_ENTITIES: frozenset[str] = frozenset({"&lt;", "&gt;"})
 # anything else falls through to plain paragraph text.
 _HEADING_LINE_RE = re.compile(r"^(#{1,6})[ \t]+(.*)$")
 _LIST_ITEM_LINE_RE = re.compile(r"^(?P<indent> *)(?:-|(?P<num>\d+)\.)[ \t]+(?P<content>.*)$")
-_CODE_FENCE_LINE_RE = re.compile(r"^```")
+
+# A genuine block-level fence opener/closer: a leading run of 3+ backticks with NO further
+# backtick anywhere else on the line. Per CommonMark, a backtick-fence's info string may never
+# itself contain a backtick -- that's exactly what lets this tell a real fence line apart from an
+# inline code span's own self-contained opening+closing fence pair (e.g. "```a``b```", rendered by
+# _render_code_span for content whose longest internal backtick run needs a 3+ backtick fence)
+# landing as the first characters of a paragraph/line. Without the trailing lookahead, that span
+# was indistinguishable from a fence opener -- misparsed as one, it silently discarded the rest of
+# the (never-closed) "block" via _scan_code_fence instead of rendering as inline code.
+_CODE_FENCE_LINE_RE = re.compile(r"^`{3,}(?!.*`)")
 
 
 def _escape_html_text(text: str) -> str:

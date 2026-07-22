@@ -274,6 +274,28 @@ def test_code_span_run_length_must_match_exactly_to_close():
     assert result == "<p>text <code>a `` b</code> end</p>"
 
 
+@pytest.mark.parametrize(
+    "markdown, expected_html",
+    [
+        # Content has an internal 2-backtick run, so the chosen fence is 3 backticks -- landing
+        # as the very first characters of the (single-line) document/paragraph.
+        ("```a``b```", "<p><code>a``b</code></p>"),
+        # Same collision one level up: an internal 3-backtick run needs a 4-backtick fence.
+        ("````x```y````", "<p><code>x```y</code></p>"),
+    ],
+)
+def test_code_span_fence_at_true_line_start_is_not_misparsed_as_a_fenced_code_block(markdown, expected_html):
+    # Regression pin for the verified live bug: _CODE_FENCE_LINE_RE's naive "line starts with a
+    # run of 3+ backticks" check couldn't tell a code span's own self-contained opening+closing
+    # fence pair apart from an actual block-level fence opener whenever that pair landed as the
+    # first characters of a line. Misfiring there sent the rest of the (never-closed) "block"
+    # through _scan_code_fence, which silently discarded the paragraph's real text and emitted an
+    # essentially-empty ``<pre><code>\n</code></pre>`` instead. Per CommonMark, a genuine fence
+    # opener's info string may never itself contain a backtick -- exactly the property that
+    # distinguishes the two shapes.
+    assert markdown_to_leankit_html(markdown) == expected_html
+
+
 def test_code_span_strips_exactly_one_leading_and_trailing_space_of_padding():
     # Per GFM: when a span's content both begins and ends with a space (and isn't all spaces),
     # exactly one leading/trailing space is stripped -- this is what lets a code span's content
