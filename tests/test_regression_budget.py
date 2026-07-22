@@ -15,7 +15,11 @@ These tests pin, at the repo boundary (not sync.py's internals):
     file by re-inlining logic that belongs in card_coherence.py.
   Invariant B -- the full pre-existing test suite (432 tests, before issue #70's own test files
     were added) remains green: running the whole suite reports zero failures and at least as many
-    passing tests as the pre-existing baseline plus this change's own new test files.
+    passing tests as the pre-existing baseline. A pass-count floor alone cannot notice a whole new
+    test file silently dropping out of collection (renamed out of `test_*.py` discovery, or emptied)
+    -- passed_count would merely fall back toward the baseline while still clearing it -- so the
+    companion test below additionally asserts each of issue #70's four new test files is collected
+    and contributes at least one test, making that failure loud.
 
 Run: pytest -q
 """
@@ -42,6 +46,15 @@ WIRING_BUDGET_LINES = 50
 # (test_card_coherence.py, test_sync_contested_cards.py, test_sync_lane_conflict.py,
 # test_sync_card_coherence.py) were added.
 PRE_CHANGE_TEST_COUNT = 432
+
+# Issue #70's four new test files. Invariant B's companion check asserts each is still collected
+# (deleting/renaming/emptying one is exactly the silent-loss a >= baseline pass-count floor misses).
+NEW_TEST_FILES = (
+    "tests/test_card_coherence.py",
+    "tests/test_sync_contested_cards.py",
+    "tests/test_sync_lane_conflict.py",
+    "tests/test_sync_card_coherence.py",
+)
 
 
 def test_sync_py_stays_within_wiring_only_line_budget():
@@ -90,3 +103,28 @@ def test_full_suite_remains_green_with_no_regressions():
         f"only {passed_count} tests passed, below the pre-existing baseline of "
         f"{PRE_CHANGE_TEST_COUNT} -- a pre-existing test appears to have been lost or broken."
     )
+
+
+def test_every_new_test_file_is_still_collected():
+    """Invariant B, companion check: a `passed_count >= PRE_CHANGE_TEST_COUNT` floor cannot detect a
+    whole new test file silently leaving collection -- if one of issue #70's four files were renamed
+    out of `test_*.py` discovery or emptied, the suite would merely shed ~a-few-dozen tests and still
+    clear the pre-existing baseline. Collect each file explicitly (by the exact path it must live at)
+    and require it to contribute at least one test, so that silent loss fails loudly instead.
+
+    Collection-only, so it never executes the files (no recursion risk from re-running the suite);
+    an explicit path that no longer exists makes pytest exit non-zero, which this catches directly."""
+    for path in NEW_TEST_FILES:
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", path],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, (
+            f"{path} failed to collect (renamed away or removed?):\n{result.stdout}\n{result.stderr}")
+        collected = re.search(r"(\d+) tests? collected", result.stdout)
+        assert collected and int(collected.group(1)) >= 1, (
+            f"{path} contributed no collected tests -- it was emptied or its tests were renamed out "
+            f"of pytest discovery:\n{result.stdout}")
