@@ -24,6 +24,7 @@ import agileplace
 import ghkit
 import ghproject
 import vetting_latch
+from card_coherence import contested_cards, laneid_op_value, lane_conflict
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
 from stages import (epic_key_for_task, is_retired_issue, issue_stage,
@@ -630,9 +631,19 @@ def main() -> None:
         if cid:
             all_card_by_cid[cid] = card
 
+    # Issue #70 Layer 1: before any card is touched, detect this run's issue URLs that don't
+    # resolve 1:1 onto AgilePlace cards (>= 2 distinct issue URLs claiming the same card id) and
+    # exclude those cards from every match/queue path this run, rather than risk one issue's sync
+    # clobbering another's.
+    contested = contested_cards(active_issues + retired_issues, all_card_by_url)
+    contested_urls = {u for urls in contested.values() for u in urls}
+    for cid, urls in sorted(contested.items()):
+        print(f"WARN  card {cid} claimed by {len(urls)} issue URLs, deferring: {sorted(urls)}")
+
     retired_card_by_url = {
         issue["url"]: all_card_by_url[issue["url"]]
-        for issue in retired_issues if issue["url"] in all_card_by_url
+        for issue in retired_issues
+        if issue["url"] in all_card_by_url and issue["url"] not in contested_urls
     }
     retired_cards = tuple(retired_card_by_url.values())
 
@@ -644,10 +655,17 @@ def main() -> None:
         for card in retired_cards if agileplace.custom_id_value(card)
     }
     card_by_url = {
-        url: card for url, card in all_card_by_url.items() if not reserved_for_retirement(card)
+        url: card for url, card in all_card_by_url.items()
+        if not reserved_for_retirement(card) and url not in contested_urls
     }
     card_by_cid = {
-        cid: card for cid, card in all_card_by_cid.items() if not reserved_for_retirement(card)
+        # `cid` here is the card's customId (the comprehension's loop var), NOT its id -- `contested`
+        # is keyed by card id, so the predicate must test the card's own id, never the loop var.
+        # `card.get("id") or ""` (not `card["id"]`): a partial, id-less payload is never a contested
+        # id ("" is never a `contested` key), so it survives the filter and is deferred by the
+        # downstream `card.get("id")` guards rather than KeyError-ing the whole run.
+        cid: card for cid, card in all_card_by_cid.items()
+        if not reserved_for_retirement(card) and str(card.get("id") or "") not in contested
     }
 
     def retirement_reservation(issue):
@@ -663,7 +681,10 @@ def main() -> None:
         issue["url"]: reservation
         for issue in active_issues if (reservation := retirement_reservation(issue))
     }
-    syncable_issues = [issue for issue in active_issues if issue["url"] not in active_reservations]
+    syncable_issues = [
+        issue for issue in active_issues
+        if issue["url"] not in active_reservations and issue["url"] not in contested_urls
+    ]
     for issue in active_issues:
         reservation = active_reservations.get(issue["url"])
         if reservation:
@@ -681,7 +702,22 @@ def main() -> None:
     card_ops: dict = {}
 
     def queue(card, ops, note):
-        entry = card_ops.setdefault(str(card["id"]), {"card": card, "ops": [], "notes": []})
+        # Issue #70 Layer 2: two queue() calls for the same card can carry conflicting /laneId
+        # values (e.g. duplicate [KEY]-prefixed issue titles matching the same card through the
+        # customId fallback within one run). Detect and poison the entry rather than risk one
+        # issue's lane move clobbering another's -- the poisoned entry is skipped wholesale at
+        # flush (below), never partially applied.
+        cid = str(card["id"])
+        entry = card_ops.setdefault(
+            cid, {"card": card, "ops": [], "notes": [], "lane_id": None, "poisoned": False})
+        new_lane_id, conflict = lane_conflict(ops, entry["lane_id"])
+        if conflict:
+            entry["poisoned"] = True
+            conflicting_value = laneid_op_value(ops)
+            print(f"WARN  card {cid} poisoned: conflicting /laneId ops "
+                  f"({entry['lane_id']!r} vs {conflicting_value!r})")
+        else:
+            entry["lane_id"] = new_lane_id
         entry["ops"].extend(ops)
         entry["notes"].append(note)
 
@@ -690,10 +726,16 @@ def main() -> None:
     # another issue's card. Retirement is independent of Projects/open-PR read health because the
     # CLOSED reason itself is the authoritative signal.
     for issue in retired_issues:
+        if issue["url"] in contested_urls:
+            continue  # Layer 1: contested cards are deferred wholesale, not partially retired
         card = retired_card_by_url.get(issue["url"])
+        cid_card = all_card_by_cid.get(issue_custom_id(issue))
         if card:
             _retire_card(issue, card, lanes, smap, apply, queue)
-        elif all_card_by_cid.get(issue_custom_id(issue)):
+        elif cid_card and str(cid_card.get("id") or "") not in contested:
+            # A customId match against an already-contested card is not a distinct finding --
+            # Layer 1 already printed the "card N claimed by K issue URLs" WARN for that card id;
+            # warning again here under a different message would duplicate it for the same card.
             print(f"WARN  [{issue_custom_id(issue)}] retired issue has only a customId card match; "
                   "refusing to retire without the GitHub external-link URL")
 
@@ -816,10 +858,18 @@ def main() -> None:
 
     # 5) flush: ONE versioned PATCH per card (optimistic concurrency)
     for entry in card_ops.values():
+        if entry["poisoned"]:
+            continue  # Issue #70 Layer 2: conflicting /laneId ops -- discard, don't half-apply
         agileplace.patch_card(cfg, apply, entry["card"], entry["ops"], "; ".join(entry["notes"]))
 
-    if apply:
+    if apply and not any(entry["poisoned"] for entry in card_ops.values()):
         save_state(state)
+    elif apply:
+        # Issue #70 Layer 2: skipping a poisoned card's PATCH leaves this run's already-advanced merge
+        # bases (sync_metadata/sync_dates) unbacked by a write; persisting them would desync next run
+        # into a phantom external-delete revert. Hold state at the last clean run -- skipped writes
+        # retry then, and healthy cards re-derive harmlessly from the older base.
+        print("WARN  poisoned card(s) this run -- sync state NOT persisted (merge bases held clean)")
     else:
         print("--- dry run complete. Re-run with --apply (full .env) to write.")
 
