@@ -369,3 +369,47 @@ def test_layer2_poisoned_epic_card_gets_no_connect_or_disconnect_calls(tmp_path,
     patched_ids = [call.args[2].get("id") for call in patch_card_mock.call_args_list]
     assert "500" not in patched_ids
     create_card_mock.assert_not_called()
+
+
+# --- Issue #75 task 4: the step-4 dependency guard skips a Layer-2-poisoned card ------------------
+
+def test_layer2_poisoned_card_gets_no_dependency_writes(tmp_path, capsys):
+    """Post-#75, a card poisoned by Layer 2's lane-conflict check must also skip step 4's
+    dependency sync entirely -- not just step 3's child connections (task 3) and step 5's flush
+    PATCH. Forces `contested_cards` to report nothing (Layer 1 doesn't catch this shape) to reach
+    a genuine Layer 2 poisoning on card 500, which is ALSO blocked-by a real GitHub edge onto task
+    card 600 -- without the step-4 poison guard, sync_dependencies would still call
+    agileplace.create_dependencies for the poisoned card's desired edge."""
+    first = _issue(1, "[KEY] issue one", assignees=("dev",))            # -> In progress
+    second = _issue(2, "[KEY] issue two", labels=("agent:in-review",))  # -> In review (conflict)
+    task = _issue(3, "task three")
+    poisoned_card = _card("500", "KEY", [])  # zero URL claims -- matched only via the customId fallback
+    task_card = _card("600", "3", [task["url"]], lane_id="L-ELSEWHERE")
+
+    create_dependencies_mock = Mock()
+    delete_dependencies_mock = Mock()
+
+    stack, create_card_mock, patch_card_mock = _mock_io(
+        [first, second, task], [poisoned_card, task_card], lanes=(_PROG_LANE, _REVIEW_LANE))
+    with stack, \
+            patch("sync.contested_cards", return_value={}), \
+            patch("ghkit.blocked_by_map", return_value={1: [3]}), \
+            patch("agileplace.create_dependencies", create_dependencies_mock), \
+            patch("agileplace.delete_dependencies", delete_dependencies_mock), \
+            patch("sync.env_config", return_value=_cfg(tmp_path)), \
+            patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+            patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    out = capsys.readouterr().out
+    assert "poisoned: conflicting /laneId ops" in out, "the fixture must genuinely reach Layer 2"
+    assert any("skipping dependency sync" in line and "500" in line
+               for line in out.splitlines()), "the poisoned card must be named in a skip WARN"
+
+    create_dependencies_mock.assert_not_called()
+    delete_dependencies_mock.assert_not_called()
+
+    # The pre-existing Layer 2 flush skip still holds: no patch for the poisoned card.
+    patched_ids = [call.args[2].get("id") for call in patch_card_mock.call_args_list]
+    assert "500" not in patched_ids
+    create_card_mock.assert_not_called()

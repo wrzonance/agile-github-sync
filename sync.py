@@ -167,7 +167,8 @@ def _removal_authority_card_ids(syncable_issues: list[dict], card_by_url: dict[s
 
 def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by: dict,
                       blocker_card_by_number: dict, card_for,
-                      removal_authority_card_ids: set[str]) -> None:
+                      removal_authority_card_ids: set[str],
+                      poisoned: frozenset[str]) -> None:
     """Mirror GitHub blocked-by edges as native AgilePlace dependencies (issue #57).
 
     EVERY edge is mirrored, including edges whose blocker is Done -- the edge is structural, and
@@ -177,16 +178,24 @@ def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by:
     behavior is unconfirmed live, so nothing is ever re-created against unknown state.
 
     Dependency REMOVALS additionally require the target card to carry strong (URL-matched)
-    identity -- a customId-only match never confers removal authority (issue #60)."""
+    identity -- a customId-only match never confers removal authority (issue #60).
+
+    Issue #75: a card poisoned by Layer 2's lane-conflict check (queue()) never gets its own
+    dependency edges touched, and a poisoned BLOCKER card is filtered out of the already-computed
+    adds/removes (never pre-filtered out of `desired` -- doing so would make a still-linked-but-
+    poisoned blocker look like a stale edge and get queued into `removes`)."""
     for issue in syncable_issues:
         card = card_for(issue)
         if not card or not card.get("id"):
             continue
+        cid = str(card["id"])
+        key = issue_custom_id(issue)
+        if cid in poisoned:
+            print(f"WARN  [{key}] skipping dependency sync -- card {cid} is poisoned")
+            continue
         desired = {str(blocker_card_by_number[number]["id"])
                    for number in blocked_by.get(issue["number"], [])
                    if number in blocker_card_by_number}
-        cid = str(card["id"])
-        key = issue_custom_id(issue)
         if card.get("_planOnly"):
             current = set()  # a fresh card has no server-side dependencies; never read a plan-only id
         else:
@@ -196,6 +205,11 @@ def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by:
                 continue
             current = agileplace.incoming_dependency_ids(entries)
         adds, removes = _dependency_changes(desired, current, removal_authority_card_ids)
+        filtered_adds = [a for a in adds if a not in poisoned]
+        filtered_removes = [r for r in removes if r not in poisoned]
+        if len(filtered_adds) != len(adds) or len(filtered_removes) != len(removes):
+            print(f"WARN  [{key}] dropping poisoned card id(s) from dependency writes")
+        adds, removes = filtered_adds, filtered_removes
         if adds:
             agileplace.create_dependencies(cfg, apply, cid, adds)
             print(f"{'dep   ' if apply else 'DRY  '} [{key}] +{len(adds)} dependency(ies)")
@@ -900,7 +914,8 @@ def main() -> None:
         sync_dependencies(cfg, apply, syncable_issues, blocked_by,
                           _blocker_cards(by_number, card_for, retired_issues, retired_card_by_url),
                           card_for,
-                          _removal_authority_card_ids(syncable_issues, card_by_url, retired_card_by_url))
+                          _removal_authority_card_ids(syncable_issues, card_by_url, retired_card_by_url),
+                          poisoned)
 
     # 5) flush: ONE versioned PATCH per card (optimistic concurrency)
     for entry in card_ops.values():
