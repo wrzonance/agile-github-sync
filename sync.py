@@ -661,8 +661,11 @@ def main() -> None:
     card_by_cid = {
         # `cid` here is the card's customId (the comprehension's loop var), NOT its id -- `contested`
         # is keyed by card id, so the predicate must test the card's own id, never the loop var.
+        # `card.get("id") or ""` (not `card["id"]`): a partial, id-less payload is never a contested
+        # id ("" is never a `contested` key), so it survives the filter and is deferred by the
+        # downstream `card.get("id")` guards rather than KeyError-ing the whole run.
         cid: card for cid, card in all_card_by_cid.items()
-        if not reserved_for_retirement(card) and str(card["id"]) not in contested
+        if not reserved_for_retirement(card) and str(card.get("id") or "") not in contested
     }
 
     def retirement_reservation(issue):
@@ -729,7 +732,7 @@ def main() -> None:
         cid_card = all_card_by_cid.get(issue_custom_id(issue))
         if card:
             _retire_card(issue, card, lanes, smap, apply, queue)
-        elif cid_card and str(cid_card["id"]) not in contested:
+        elif cid_card and str(cid_card.get("id") or "") not in contested:
             # A customId match against an already-contested card is not a distinct finding --
             # Layer 1 already printed the "card N claimed by K issue URLs" WARN for that card id;
             # warning again here under a different message would duplicate it for the same card.
@@ -859,8 +862,14 @@ def main() -> None:
             continue  # Issue #70 Layer 2: conflicting /laneId ops -- discard, don't half-apply
         agileplace.patch_card(cfg, apply, entry["card"], entry["ops"], "; ".join(entry["notes"]))
 
-    if apply:
+    if apply and not any(entry["poisoned"] for entry in card_ops.values()):
         save_state(state)
+    elif apply:
+        # Issue #70 Layer 2: skipping a poisoned card's PATCH leaves this run's already-advanced merge
+        # bases (sync_metadata/sync_dates) unbacked by a write; persisting them would desync next run
+        # into a phantom external-delete revert. Hold state at the last clean run -- skipped writes
+        # retry then, and healthy cards re-derive harmlessly from the older base.
+        print("WARN  poisoned card(s) this run -- sync state NOT persisted (merge bases held clean)")
     else:
         print("--- dry run complete. Re-run with --apply (full .env) to write.")
 

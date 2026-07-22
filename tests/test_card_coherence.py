@@ -32,6 +32,23 @@ def test_contested_cards_groups_only_multiply_claimed_cards():
     }
 
 
+def test_contested_cards_defers_idless_cards_instead_of_raising():
+    """A partial AgilePlace payload can carry a matchable externalLink but no `id` yet. Such a card
+    is unresolvable -- it cannot be excluded by id downstream -- so contested_cards must skip it
+    (defer, exactly as the rest of the run's `card.get("id")` guards do) rather than KeyError on
+    `card["id"]` and abort the whole sync. Two issue URLs both resolving only to an id-less card
+    contest nothing, because there is no id to fence."""
+    issues = [
+        {"url": "https://github.com/o/r/issues/1"},
+        {"url": "https://github.com/o/r/issues/2"},
+    ]
+    all_card_by_url = {
+        "https://github.com/o/r/issues/1": {"customId": "KEY"},           # no id
+        "https://github.com/o/r/issues/2": {"customId": "KEY", "id": ""},  # falsy id
+    }
+    assert contested_cards(issues, all_card_by_url) == {}
+
+
 def test_contested_cards_excludes_unmatched_and_uncontested():
     issues = [
         {"url": "https://github.com/o/r/issues/1"},

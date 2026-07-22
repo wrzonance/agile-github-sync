@@ -261,3 +261,55 @@ def test_unrelated_card_and_issue_are_unaffected_by_a_poisoned_card(tmp_path, ca
     assert "500" not in patched_ids, "the poisoned card must never reach patch_card"
     assert "600" in patched_ids, "an unrelated card must sync normally despite the poisoned card"
     create_card_mock.assert_not_called()
+
+
+# --- Codex P2#3: an id-less card in the board snapshot must not crash the whole run ----------------
+
+def test_idless_card_in_snapshot_does_not_abort_the_run(tmp_path, capsys):
+    """AgilePlace can return a partial card carrying a customId but no `id` yet. The issue #70 filters
+    index `str(card["id"])` directly; on such a payload that raises KeyError and aborts the entire
+    sync. An id-less card is unresolvable, so it must be deferred (skipped), never crash -- and an
+    unrelated, fully-formed issue/card pair in the same snapshot must still sync normally."""
+    idless = {"customId": "GHOST", "externalLinks": [], "laneId": "L-ELSEWHERE",
+              "tags": [], "version": 1}  # no "id" key at all
+
+    healthy_issue = _issue(1, "widget one", assignees=("dev",))            # -> In progress -> L-PROG
+    healthy_card = _card("600", "1", [healthy_issue["url"]], lane_id="L-ELSEWHERE")
+
+    create_card_mock, patch_card_mock = _run_main_once(
+        tmp_path, [healthy_issue], [idless, healthy_card], lanes=(_PROG_LANE, _REVIEW_LANE))
+
+    # The healthy card still syncs its ordinary lane move despite the id-less card sharing the run.
+    patched_ids = [call.args[2].get("id") for call in patch_card_mock.call_args_list]
+    assert "600" in patched_ids, "the id-less card must not abort an unrelated card's sync"
+
+
+# --- Codex P1#2: a poisoned run must not persist merge bases for writes it deliberately skipped ----
+
+def test_poisoned_run_does_not_persist_advanced_merge_bases(tmp_path):
+    """When a lane conflict poisons a card, its AgilePlace PATCH is skipped -- but sync_metadata has
+    already advanced this run's label merge base in apply mode. Persisting that base records a tag
+    write that never reached AgilePlace: on the NEXT run the unchanged AgilePlace card reads as a
+    fresh external delete, and the sync destructively removes the GitHub label to match. Across two
+    identical runs of a persistently-poisoned card, no GitHub label may ever be removed."""
+    first = _issue(1, "[KEY] one", assignees=("dev",), labels=("feature",))   # In progress -> L-PROG
+    second = _issue(2, "[KEY] two", labels=("agent:in-review",))              # In review -> L-REVIEW (conflict)
+    card = _card("500", "KEY", [], lane_id="L-ELSEWHERE")
+
+    removals: list = []
+
+    def _capture_edit_label(cfg, apply, number, name, *, add):
+        if not add:
+            removals.append((number, name))
+
+    for _ in range(2):  # same collision twice; state from run 1 feeds run 2
+        stack, _create, _patch = _mock_io([first, second], [card], lanes=(_PROG_LANE, _REVIEW_LANE))
+        with stack, patch("ghkit.edit_label", side_effect=_capture_edit_label), \
+                patch("sync.env_config", return_value=_cfg(tmp_path)), \
+                patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+                patch("sys.argv", ["sync.py", "--apply"]):
+            sync.main()
+
+    assert removals == [], (
+        "a poisoned card's skipped AgilePlace tag write must not advance the persisted merge base; "
+        f"doing so caused a phantom next-run GitHub label removal: {removals}")

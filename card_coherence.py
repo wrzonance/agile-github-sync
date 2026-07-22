@@ -24,15 +24,19 @@ def contested_cards(issues: list[dict], all_card_by_url: dict[str, dict]) -> dic
     claiming URL. Cards claimed by 0 or 1 URL are omitted entirely.
 
     Pure: never mutates `issues` or `all_card_by_url`; never raises; no I/O. An issue whose URL
-    has no card match is silently excluded (nothing to contest)."""
+    has no card match is silently excluded (nothing to contest). A matched but id-less card (a
+    partial AgilePlace payload) is likewise skipped: with no id it cannot be fenced downstream, so
+    it is deferred rather than indexed -- mirrors the run's other `card.get("id")` guards."""
     urls_by_cid: dict[str, set[str]] = {}
     for issue in issues:
         url = issue.get("url")
         card = all_card_by_url.get(url)
         if card is None:
             continue
-        cid = str(card["id"])
-        urls_by_cid.setdefault(cid, set()).add(url)
+        card_id = card.get("id")
+        if not card_id:
+            continue
+        urls_by_cid.setdefault(str(card_id), set()).add(url)
     return {cid: urls for cid, urls in urls_by_cid.items() if len(urls) >= 2}
 
 
