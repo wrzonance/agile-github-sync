@@ -1,14 +1,17 @@
-"""Pure card-coherence logic for issue #70. No I/O -- exhaustively unit-tested.
+"""Pure card-coherence logic for issues #70 and #75. No I/O -- exhaustively unit-tested.
 
 Two genuinely-new decisions this run's sync needs, extracted out of sync.py rather than added
 inline: sync.py was already 828 lines (over the 800-line hard cap) before this change, so growing
 it further would compound a pre-existing budget violation instead of fixing it.
 
-Layer 1 (contested_cards): before any card is touched, detect when this run's issue URLs
-(active + retired) don't resolve 1:1 onto AgilePlace cards -- i.e. two or more GitHub issues
-both claim the same card id. Those cards are excluded from every match/queue path for the run
-(sync.py filters them out via the card ids -> URLs this function returns) rather than risk one
-issue's sync clobbering another's.
+Layer 1 (contested_cards): before any card is touched, detect when this run's issues (active +
+retired) don't resolve 1:1 onto AgilePlace cards -- i.e. two or more GitHub issues both claim the
+same card id, via EITHER match path (external-link URL or customId fallback -- mirroring
+sync.py's own `_matching_card` precedence: URL first, customId only as a fallback). Those cards
+are excluded from every match/queue path for the run (sync.py filters them out via the card ids ->
+claimant-URLs this function returns) rather than risk one issue's sync clobbering another's. A
+customId-only claim is just as capable of a clobber as a URL claim, so it fences the card exactly
+the same way (issue #75).
 
 Layer 2 (lane_conflict): even for uncontested cards, multiple queued ops for the same card can
 carry conflicting `/laneId` values (e.g. duplicate `[KEY]`-prefixed issue titles matching the same
@@ -17,26 +20,48 @@ mark the card poisoned and skip its flush.
 """
 from __future__ import annotations
 
+from stages import issue_custom_id
 
-def contested_cards(issues: list[dict], all_card_by_url: dict[str, dict]) -> dict[str, set[str]]:
-    """Group this run's issue URLs by the card id they resolve to via all_card_by_url. Returns
-    ONLY card ids (str(card['id'])) claimed by >= 2 distinct issue URLs -> the set of every
-    claiming URL. Cards claimed by 0 or 1 URL are omitted entirely.
 
-    Pure: never mutates `issues` or `all_card_by_url`; never raises; no I/O. An issue whose URL
-    has no card match is silently excluded (nothing to contest). A matched but id-less card (a
-    partial AgilePlace payload) is likewise skipped: with no id it cannot be fenced downstream, so
-    it is deferred rather than indexed -- mirrors the run's other `card.get("id")` guards."""
+def _claimed_card_id(issue: dict, all_card_by_url: dict[str, dict],
+                     all_card_by_cid: dict[str, dict]) -> str | None:
+    """Which card (by id) this issue claims, mirroring sync.py's `_matching_card` precedence: a
+    url match is the ONLY claim considered when it resolves -- the customId fallback is never
+    even attempted in that case, even if it would separately resolve to a different card. Only
+    when the url doesn't resolve is the customId fallback attempted, and only when the issue dict
+    actually carries the keys issue_custom_id() needs ('title' and 'number'); a minimal/malformed
+    issue dict is treated as having no customId claim, never as a KeyError. Returns None when
+    neither path resolves, or the resolved card's id is falsy (an id-less partial payload).
+
+    Pure: never mutates any input; never raises for ANY issue dict shape."""
+    card = all_card_by_url.get(issue.get("url"))
+    if card is None and "title" in issue and "number" in issue:
+        card = all_card_by_cid.get(issue_custom_id(issue))
+    if card is None:
+        return None
+    card_id = card.get("id")
+    return str(card_id) if card_id else None
+
+
+def contested_cards(issues: list[dict], all_card_by_url: dict[str, dict],
+                    all_card_by_cid: dict[str, dict]) -> dict[str, set[str]]:
+    """Group this run's issues by the card id each claims (via _claimed_card_id -- URL first, else
+    a guarded customId fallback). Returns ONLY card ids (str) claimed by >= 2 distinct issues ->
+    the set of each claiming issue's OWN url (claimant identity is always the issue's url,
+    regardless of which path produced the claim). Cards claimed by 0 or 1 issue are omitted
+    entirely.
+
+    Pure: never mutates `issues`, `all_card_by_url`, or `all_card_by_cid`; never raises; no I/O.
+    An issue that resolves to no card is silently excluded (nothing to contest). A matched but
+    id-less card (a partial AgilePlace payload) is likewise skipped: with no id it cannot be
+    fenced downstream, so it is deferred rather than indexed -- mirrors the run's other
+    `card.get("id")` guards."""
     urls_by_cid: dict[str, set[str]] = {}
     for issue in issues:
-        url = issue.get("url")
-        card = all_card_by_url.get(url)
-        if card is None:
+        card_id = _claimed_card_id(issue, all_card_by_url, all_card_by_cid)
+        if card_id is None:
             continue
-        card_id = card.get("id")
-        if not card_id:
-            continue
-        urls_by_cid.setdefault(str(card_id), set()).add(url)
+        urls_by_cid.setdefault(card_id, set()).add(issue.get("url"))
     return {cid: urls for cid, urls in urls_by_cid.items() if len(urls) >= 2}
 
 

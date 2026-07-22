@@ -1,8 +1,10 @@
-"""Unit tests for card_coherence.py's pure boundary invariants (issue #70).
+"""Unit tests for card_coherence.py's pure boundary invariants (issues #70 and #75).
 
 These need no network or gh -- they pin what the rest of the sync run depends on:
 contested_cards() and lane_conflict() never mutate their inputs and never raise, and
-contested_cards() only reports card ids claimed by >= 2 distinct issue URLs. Run: pytest -q
+contested_cards() only reports card ids claimed by >= 2 distinct issue URLs -- via EITHER
+match path (URL or customId fallback), with the URL path always taking precedence over the
+customId fallback for a given issue. Run: pytest -q
 """
 import copy
 import sys
@@ -26,7 +28,7 @@ def test_contested_cards_groups_only_multiply_claimed_cards():
         "https://github.com/o/r/issues/2": {"id": 100},  # same card as issue 1 -> contested
         "https://github.com/o/r/issues/3": {"id": 200},  # sole claimant -> not contested
     }
-    result = contested_cards(issues, all_card_by_url)
+    result = contested_cards(issues, all_card_by_url, {})
     assert result == {
         "100": {"https://github.com/o/r/issues/1", "https://github.com/o/r/issues/2"},
     }
@@ -46,7 +48,7 @@ def test_contested_cards_defers_idless_cards_instead_of_raising():
         "https://github.com/o/r/issues/1": {"customId": "KEY"},           # no id
         "https://github.com/o/r/issues/2": {"customId": "KEY", "id": ""},  # falsy id
     }
-    assert contested_cards(issues, all_card_by_url) == {}
+    assert contested_cards(issues, all_card_by_url, {}) == {}
 
 
 def test_contested_cards_excludes_unmatched_and_uncontested():
@@ -55,7 +57,7 @@ def test_contested_cards_excludes_unmatched_and_uncontested():
         {"url": "https://github.com/o/r/issues/2"},  # no card match at all
     ]
     all_card_by_url = {"https://github.com/o/r/issues/1": {"id": 100}}
-    assert contested_cards(issues, all_card_by_url) == {}
+    assert contested_cards(issues, all_card_by_url, {}) == {}
 
 
 def test_contested_cards_never_mutates_inputs_and_never_raises():
@@ -67,17 +69,96 @@ def test_contested_cards_never_mutates_inputs_and_never_raises():
         "https://github.com/o/r/issues/1": {"id": 100},
         "https://github.com/o/r/issues/2": {"id": 100},
     }
+    all_card_by_cid = {"OTHER": {"id": 999}}
     issues_before = copy.deepcopy(issues)
     all_card_by_url_before = copy.deepcopy(all_card_by_url)
+    all_card_by_cid_before = copy.deepcopy(all_card_by_cid)
 
-    contested_cards(issues, all_card_by_url)
+    contested_cards(issues, all_card_by_url, all_card_by_cid)
 
     assert issues == issues_before
     assert all_card_by_url == all_card_by_url_before
+    assert all_card_by_cid == all_card_by_cid_before
 
     # Malformed/empty inputs must never raise.
-    assert contested_cards([], {}) == {}
-    assert contested_cards([{"url": "missing"}], {}) == {}
+    assert contested_cards([], {}, {}) == {}
+    assert contested_cards([{"url": "missing"}], {}, {}) == {}
+
+
+# --- contested_cards: customId fallback path (issue #75) --------------------
+
+def test_contested_cards_detects_a_pure_customid_collision():
+    """Two issues with ZERO url claims -- both resolve only via the customId fallback onto the
+    same card -- must be fenced exactly like a URL collision. Claimant identity is still each
+    issue's OWN url, even though the URL match path never fired for either."""
+    issues = [
+        {"url": "https://github.com/o/r/issues/1", "title": "[KEY] one", "number": 1},
+        {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2},
+    ]
+    all_card_by_cid = {"KEY": {"id": 300}}
+    result = contested_cards(issues, {}, all_card_by_cid)
+    assert result == {
+        "300": {"https://github.com/o/r/issues/1", "https://github.com/o/r/issues/2"},
+    }
+
+
+def test_contested_cards_detects_a_mixed_url_and_customid_collision():
+    """One issue claims the card via its own url; a second, distinct issue claims the SAME card id
+    only via the customId fallback. Any-path fencing must merge these onto one contested entry."""
+    issues = [
+        {"url": "https://github.com/o/r/issues/1", "title": "url-matched", "number": 1},
+        {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2},
+    ]
+    all_card_by_url = {"https://github.com/o/r/issues/1": {"id": 400}}
+    all_card_by_cid = {"KEY": {"id": 400}}
+    result = contested_cards(issues, all_card_by_url, all_card_by_cid)
+    assert result == {
+        "400": {"https://github.com/o/r/issues/1", "https://github.com/o/r/issues/2"},
+    }
+
+
+def test_contested_cards_url_match_takes_precedence_over_customid_fallback():
+    """An issue whose own url resolves to card A must claim ONLY card A, even when its customId
+    would separately resolve to a different card B -- the customId fallback must never be
+    consulted once the url path already resolved. So card B, claimed only by a second issue's
+    customId fallback, stays a single (uncontested) claimant."""
+    first = {"url": "https://github.com/o/r/issues/1", "title": "[OTHERKEY] one", "number": 1}
+    second = {"url": "https://github.com/o/r/issues/2", "title": "[OTHERKEY] two", "number": 2}
+    all_card_by_url = {"https://github.com/o/r/issues/1": {"id": 500}}  # only `first`'s url matches
+    all_card_by_cid = {"OTHERKEY": {"id": 600}}  # would collide with `first` if url didn't take precedence
+
+    result = contested_cards([first, second], all_card_by_url, all_card_by_cid)
+
+    assert result == {}, (
+        "card 500 (first's URL claim) and card 600 (second's customId claim) each have exactly "
+        "one claimant -- they must not be merged just because they share a customId string")
+
+
+def test_contested_cards_defers_idless_card_reached_via_customid():
+    issues = [
+        {"url": "https://github.com/o/r/issues/1", "title": "[KEY] one", "number": 1},
+        {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2},
+    ]
+    all_card_by_cid = {"KEY": {"customId": "KEY"}}  # no "id" key at all
+    assert contested_cards(issues, {}, all_card_by_cid) == {}
+
+
+def test_contested_cards_omits_a_single_claimant_reached_via_customid():
+    issues = [{"url": "https://github.com/o/r/issues/1", "title": "[KEY] one", "number": 1}]
+    all_card_by_cid = {"KEY": {"id": 700}}
+    assert contested_cards(issues, {}, all_card_by_cid) == {}
+
+
+def test_contested_cards_never_raises_on_minimal_issue_dicts_through_customid_path():
+    """An issue dict lacking 'title'/'number' (as used by this module's other never-raises tests)
+    must never reach issue_custom_id() -- it has no customId claim, treated as no claim at all,
+    never a KeyError."""
+    issues = [
+        {"url": "https://github.com/o/r/issues/1"},
+        {"url": "https://github.com/o/r/issues/2"},
+    ]
+    all_card_by_cid = {"KEY": {"id": 800}}  # unreachable: neither issue carries title/number
+    assert contested_cards(issues, {}, all_card_by_cid) == {}
 
 
 # --- lane_conflict -----------------------------------------------------------

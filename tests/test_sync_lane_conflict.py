@@ -1,20 +1,20 @@
-"""Integration tests for issue #70 Layer 2 wiring: queue() poisoning + flush skip in sync.main().
+"""Integration tests for issue #70 Layer 2 wiring, revisited for issue #75.
 
-card_coherence.lane_conflict() itself is pure and unit-tested in test_card_coherence.py. These tests
-instead exercise the REAL main() (every I/O boundary mocked: ghkit, ghproject, agileplace) to pin
-that a card reached by two or more queue() calls carrying conflicting `/laneId` values gets poisoned
-and its flush PATCH is skipped -- while same-value repeated `/laneId` ops never poison an entry, and
-poisoning never resets back to False once set within a single run.
+card_coherence.lane_conflict() itself is pure and unit-tested in test_card_coherence.py. This file
+originally exercised the REAL main() (every I/O boundary mocked: ghkit, ghproject, agileplace) to
+pin that a card reached by two or more queue() calls carrying conflicting `/laneId` values gets
+poisoned and its flush PATCH is skipped.
 
-The duplicate-`[KEY]`-title-prefix shape is used deliberately: two distinct GitHub issues (distinct
-numbers/URLs) share a title prefix, so `issue_custom_id()` returns the same key for both, and both
-resolve to the SAME existing AgilePlace card via the customId match path (`card_by_cid`), each with
-its own stage-derived target lane. This is NOT the two-URL-contested shape Layer 1 already excludes
-(that shape never reaches queue() at all -- see test_sync_contested_cards.py); a naive first draft
-tried to force this via `_reconciled_custom_id_index`'s URL-correction path instead, but that path
-only fires for a URL-matched issue reclaiming a *previously-unclaimed* customId, which requires a URL
-match in the first place and doesn't produce two issues racing the same customId entry -- the
-duplicate-title-prefix shape above is the one actually verified to reach queue() twice.
+Issue #75 widened Layer 1 (card_coherence.contested_cards()) to fence a card claimed by >= 2
+distinct issues via EITHER match path -- URL or customId fallback -- not just URL. The
+duplicate-`[KEY]`-title-prefix shape these tests use (two distinct GitHub issues, distinct
+numbers/URLs, sharing a title prefix so `issue_custom_id()` returns the same key for both, both
+resolving to the SAME existing AgilePlace card via the customId match path with ZERO url claims of
+their own) is now caught by the widened Layer 1 fence BEFORE either issue ever reaches queue() --
+Layer 2's lane-conflict poisoning never fires for this shape any more, because the card is excluded
+from every match/queue path this run (same "WARN card N claimed by K issue URLs, deferring" path
+exercised directly in test_sync_contested_cards.py). This is issue #75's intended effect ("any-path
+fence supersedes Layer 2 for that shape"), not a bug -- these tests now pin THAT outcome instead.
 
 Run: pytest -q
 """
@@ -62,7 +62,8 @@ def _config(tmp_path) -> dict:
 
 def _card_with_customid(card_id: str, custom_id: str, *, lane_id: str = "L-ELSEWHERE") -> dict:
     """One AgilePlace card matched only by customId (no externalLinks) -- so two distinct issues
-    sharing that title-key customId both resolve to this SAME card via the customId path."""
+    sharing that title-key customId both resolve to this SAME card via the customId path, with
+    zero URL claims of their own -- exactly the shape issue #75's widened Layer 1 now fences."""
     return {
         "id": card_id,
         "version": 1,
@@ -80,8 +81,7 @@ _LANES = [
     {"id": "L-REVIEW", "title": "In Review", "cardStatus": "started"},
 ]
 
-# A third lane, used only by the three-distinct-values test below to exercise a second conflicting
-# call (rather than a second call that merely re-poisons the same already-seen value).
+# A third lane, used only by the three-distinct-values test below.
 _LANES_WITH_DONE = _LANES + [{"id": "L-DONE", "title": "Done", "cardStatus": "finished"}]
 
 
@@ -111,12 +111,13 @@ def _run_main(tmp_path, monkeypatch, raw_issues, card, *, open_pr_numbers: froze
     return create_card, patch_card
 
 
-def test_conflicting_laneid_ops_poison_the_card_and_skip_its_flush(tmp_path, monkeypatch, capsys):
-    """Two distinct issues (distinct URLs), same title-key customId, resolving to the SAME card via
-    the customId match path, whose stages diverge to different target lanes: the card must be
-    poisoned (WARN'd once) and NEVER reach patch_card at flush -- and never create_card either, since
-    both issues match an EXISTING card, not a new one."""
-    in_progress_issue = _issue(1, "KEY", assignees=("dev",))     # -> stage "In progress" -> L-PROG
+def test_customid_collision_with_divergent_lanes_is_fenced_by_layer1_not_poisoned(
+        tmp_path, monkeypatch, capsys):
+    """Two distinct issues (distinct URLs), same title-key customId, whose stages diverge to
+    different target lanes: under issue #75's widened Layer 1, both are deferred by the
+    contested-card fence before either reaches queue() -- no Layer 2 poisoning WARN fires, and
+    the card never reaches create_card or patch_card."""
+    in_progress_issue = _issue(1, "KEY", assignees=("dev",))     # -> stage "In progress"
     in_review_issue = _issue(2, "KEY")                            # has_open_pr below -> "In review"
     card = _card_with_customid("500", "KEY")
 
@@ -125,60 +126,67 @@ def test_conflicting_laneid_ops_poison_the_card_and_skip_its_flush(tmp_path, mon
         open_pr_numbers=frozenset({2}))
 
     out = capsys.readouterr().out
-    poison_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 poisoned")]
-    assert len(poison_lines) == 1, "exactly one poisoning WARN for the card, not one per op"
-    assert "'L-REVIEW'" in poison_lines[0], (
-        "WARN must name the actual conflicting /laneId value, not a placeholder")
-    assert "new value" not in poison_lines[0]
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 claimed by")]
+    assert len(warn_lines) == 1, "exactly one Layer 1 WARN for the contested card"
+    assert "2 issue URLs" in warn_lines[0]
+    assert "poisoned" not in out, "Layer 1 excludes the card before Layer 2 ever sees it"
 
     create_card.assert_not_called()
     patch_card.assert_not_called()
 
 
-def test_same_value_repeated_laneid_ops_never_poison_the_entry(tmp_path, monkeypatch, capsys):
+def test_customid_collision_with_convergent_lanes_is_still_fenced_by_layer1(
+        tmp_path, monkeypatch, capsys):
     """Two distinct issues sharing a title-key customId that both resolve to the SAME target lane
-    must NOT poison the card: repeated agreement is not conflict, and the flush PATCH still fires."""
-    first = _issue(1, "KEY", assignees=("dev",))   # -> stage "In progress" -> L-PROG
-    second = _issue(2, "KEY", assignees=("dev",))  # -> stage "In progress" -> L-PROG (same target)
+    are STILL fenced by the widened Layer 1 -- unlike the pre-#75 world, agreement on the lane
+    value doesn't rescue the pair, because Layer 1 fences on claimant COUNT alone, before any lane
+    value is even considered."""
+    first = _issue(1, "KEY", assignees=("dev",))   # -> stage "In progress"
+    second = _issue(2, "KEY", assignees=("dev",))  # -> stage "In progress" (same target as first)
     card = _card_with_customid("500", "KEY")
 
     create_card, patch_card = _run_main(tmp_path, monkeypatch, [first, second], card)
 
     out = capsys.readouterr().out
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 claimed by")]
+    assert len(warn_lines) == 1
     assert "poisoned" not in out
 
     create_card.assert_not_called()
-    patch_card.assert_called_once()
-    patched_card = patch_card.call_args.args[2]
-    assert patched_card.get("id") == "500"
+    patch_card.assert_not_called()
 
 
-def test_poisoning_is_monotonic_within_a_run(tmp_path, monkeypatch, capsys):
-    """A third, later queue() call whose value matches the frozen (pre-conflict) lane id must NOT
-    un-poison an already-poisoned entry: poisoning is monotonic for the life of the run. Order:
-    L-PROG (adopted) -> L-REVIEW (conflicts, poisons, freezes at L-PROG) -> L-PROG (agrees with the
-    frozen value, but must not reset poisoned back to False)."""
-    first = _issue(1, "KEY", assignees=("dev",))    # -> "In progress" -> L-PROG (adopted)
-    second = _issue(2, "KEY")                        # has_open_pr below -> "In review" -> L-REVIEW (conflict)
-    third = _issue(3, "KEY", assignees=("dev",))     # -> "In progress" -> L-PROG (matches frozen value)
+def test_three_issue_customid_collision_is_fenced_once_regardless_of_lane_agreement(
+        tmp_path, monkeypatch, capsys):
+    """Three issues racing the same customId (one pair agreeing on a lane, one diverging) are all
+    deferred together by a SINGLE Layer 1 WARN naming all three claiming URLs -- Layer 2 poisoning
+    never fires because none of the three ever reaches queue()."""
+    first = _issue(1, "KEY", assignees=("dev",))    # -> "In progress"
+    second = _issue(2, "KEY")                        # has_open_pr below -> "In review"
+    third = _issue(3, "KEY", assignees=("dev",))     # -> "In progress" (agrees with first)
     card = _card_with_customid("500", "KEY")
 
     create_card, patch_card = _run_main(
         tmp_path, monkeypatch, [first, second, third], card, open_pr_numbers=frozenset({2}))
 
     out = capsys.readouterr().out
-    poison_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 poisoned")]
-    assert len(poison_lines) == 1, "poisoning WARN fires once, on the conflicting call only"
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 claimed by")]
+    assert len(warn_lines) == 1, "one WARN for the card, not one per issue"
+    assert "3 issue URLs" in warn_lines[0]
+    assert "poisoned" not in out
+
+    create_card.assert_not_called()
+    patch_card.assert_not_called()
 
 
-def test_each_distinct_conflicting_value_gets_its_own_warn_line(tmp_path, monkeypatch, capsys):
-    """Three distinct /laneId values (not just two) must print a WARN for EVERY conflicting call
-    after the first-seen value, not just the first: L-PROG (adopted) -> L-REVIEW (conflicts vs the
-    frozen L-PROG, WARN #1) -> L-DONE (also conflicts vs the still-frozen L-PROG, WARN #2), each
-    naming its own conflicting value."""
-    first = _issue(1, "KEY", assignees=("dev",))          # -> "In progress" -> L-PROG (adopted)
-    second = _issue(2, "KEY")                              # has_open_pr -> "In review" -> L-REVIEW (conflict #1)
-    third = _issue(3, "KEY", state="CLOSED")               # -> "Done" -> L-DONE (conflict #2)
+def test_three_distinct_lane_values_still_collapse_to_a_single_layer1_warn(
+        tmp_path, monkeypatch, capsys):
+    """Three distinct /laneId targets (not just two) racing the same customId still produce exactly
+    ONE Layer 1 WARN for the card -- Layer 1 excludes by claimant identity, not by counting distinct
+    conflicting values, so a third divergent lane doesn't add a second warning."""
+    first = _issue(1, "KEY", assignees=("dev",))          # -> "In progress"
+    second = _issue(2, "KEY")                              # has_open_pr -> "In review"
+    third = _issue(3, "KEY", state="CLOSED")               # -> "Done"
     card = _card_with_customid("500", "KEY")
 
     create_card, patch_card = _run_main(
@@ -186,10 +194,10 @@ def test_each_distinct_conflicting_value_gets_its_own_warn_line(tmp_path, monkey
         open_pr_numbers=frozenset({2}), lanes=_LANES_WITH_DONE)
 
     out = capsys.readouterr().out
-    poison_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 poisoned")]
-    assert len(poison_lines) == 2, "a fresh WARN for every conflicting call, not just the first"
-    assert "'L-REVIEW'" in poison_lines[0]
-    assert "'L-DONE'" in poison_lines[1]
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 claimed by")]
+    assert len(warn_lines) == 1, "a single Layer 1 WARN regardless of how many distinct lane values raced"
+    assert "3 issue URLs" in warn_lines[0]
+    assert "poisoned" not in out
 
     create_card.assert_not_called()
     patch_card.assert_not_called()

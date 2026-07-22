@@ -658,11 +658,11 @@ def main() -> None:
         if cid:
             all_card_by_cid[cid] = card
 
-    # Issue #70 Layer 1: before any card is touched, detect this run's issue URLs that don't
-    # resolve 1:1 onto AgilePlace cards (>= 2 distinct issue URLs claiming the same card id) and
-    # exclude those cards from every match/queue path this run, rather than risk one issue's sync
-    # clobbering another's.
-    contested = contested_cards(active_issues + retired_issues, all_card_by_url)
+    # Issue #70/#75 Layer 1: before any card is touched, detect this run's issues that don't
+    # resolve 1:1 onto AgilePlace cards (>= 2 distinct issues claiming the same card id, via
+    # either the URL or the customId fallback match path) and exclude those cards from every
+    # match/queue path this run, rather than risk one issue's sync clobbering another's.
+    contested = contested_cards(active_issues + retired_issues, all_card_by_url, all_card_by_cid)
     contested_urls = {u for urls in contested.values() for u in urls}
     for cid, urls in sorted(contested.items()):
         print(f"WARN  card {cid} claimed by {len(urls)} issue URLs, deferring: {sorted(urls)}")

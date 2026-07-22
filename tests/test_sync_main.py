@@ -439,6 +439,19 @@ def test_url_and_custom_id_matching_different_cards_fails_before_writes(tmp_path
 
 
 def test_same_run_key_reuse_defers_creation_until_rename_repair_is_applied(tmp_path, capsys):
+    """Pre-#75, `reused_key_issue`'s customId ("ABC") colliding with `renamed_card`'s CURRENT
+    (not-yet-repaired) customId was invisible to a URL-only Layer 1: `renamed_issue` matched
+    `renamed_card` by URL, `reused_key_issue` matched it only via the customId fallback, and
+    `_reconciled_custom_id_index`'s rename-repair path deferred `reused_key_issue`'s creation
+    with its own "deferring card [ABC] until the renamed customId is released" WARN, while
+    `renamed_issue` still got its customId-repair PATCH.
+
+    Post-#75, contested_cards() fences customId claims too: `renamed_card` is now claimed by BOTH
+    `renamed_issue` (via URL) and `reused_key_issue` (via the customId fallback, since
+    `all_card_by_cid` still shows the card's un-repaired customId "ABC" at Layer 1 time) -- two
+    distinct claiming issues, so the widened Layer 1 fence excludes the card wholesale before the
+    rename-repair mechanism ever runs. Neither issue is synced this run; the older per-issue
+    rename-repair WARN never fires."""
     renamed_issue = {**_issue(), "title": "[XYZ] renamed widget"}
     reused_key_issue = {
         **_issue(),
@@ -462,12 +475,15 @@ def test_same_run_key_reuse_defers_creation_until_rename_repair_is_applied(tmp_p
          patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
+    out = capsys.readouterr().out
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN  card C1 claimed by")]
+    assert len(warn_lines) == 1
+    assert "2 issue URLs" in warn_lines[0]
+    assert "deferring card [ABC] until the renamed customId is released" not in out, (
+        "the widened Layer 1 fence excludes the card before the rename-repair mechanism ever runs")
+
     create_card_mock.assert_not_called()
-    patch_card_mock.assert_called_once()
-    assert patch_card_mock.call_args.args[3] == [
-        {"op": "replace", "path": "/customId", "value": "XYZ"},
-    ]
-    assert "deferring card [ABC] until the renamed customId is released" in capsys.readouterr().out
+    patch_card_mock.assert_not_called()
 
 
 def test_reused_key_is_created_after_rename_repair_is_visible(tmp_path):

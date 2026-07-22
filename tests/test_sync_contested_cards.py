@@ -165,19 +165,35 @@ def test_card_by_cid_filter_checks_the_cards_own_id_not_the_customid_loop_variab
     """Regression guard for the spike-caught naming trap: card_by_cid's comprehension binds `cid` to
     each card's customId, NOT its id -- `contested` is keyed by card id, so the filter predicate must
     test the card's own id (`str(card["id"]) not in contested`), never the bare loop variable `cid`.
-    A buggy `cid not in contested` compares a customId string against a set of numeric-id strings,
-    which never collides, so it would silently keep the contested card in card_by_cid and let an
-    unrelated issue that only matches by customId bind onto it instead of getting its own new card."""
+    A buggy `cid not in contested` compares a customId string against a set of numeric-id strings.
+
+    Issue #75 widened contested_cards() to fence customId-only claims too, so an issue sharing the
+    CONTESTED card's own customId is no longer a safe way to build an 'unrelated' fixture for this
+    guard -- it now genuinely becomes a third claimant of the contested card (see
+    test_sync_card_coherence.py's Invariant 3), which would invert this test's premise. This
+    fixture instead uses a coincidental string collision between a SEPARATE, uncontested card's own
+    customId and the contested card's id -- exactly the value the loop-var bug would wrongly
+    compare against `contested`'s keys -- while staying entirely unrelated to the contested card's
+    own customId ('ABC'), so issue #75's widened claim never reaches it."""
     issue1 = _issue(1, "widget one")
     issue2 = _issue(2, "widget two")
     contested_card = _card_with_urls("100", "ABC", [issue1["url"], issue2["url"]])
-    issue3 = _issue(3, "[ABC] fix the thing")  # customId "ABC" matches contested_card's customId
+    # unrelated_card's OWN customId ("100") coincidentally equals contested_card's id string -- the
+    # loop-var bug would compare this against `contested`'s keys -- but has nothing to do with the
+    # contested card's own customId ("ABC"), and claims no URL of its own.
+    unrelated_card = _card_with_urls("999", "100", [], lane_id="L-ELSEWHERE")
+    issue3 = _issue(3, "[100] fix the thing")  # customId "100" matches unrelated_card's customId
+    backlog_lane = {"id": "L-BACKLOG", "title": "Backlog", "cardStatus": "notStarted"}
 
     create_card, patch_card = _run_main(
-        tmp_path, monkeypatch, [issue1, issue2, issue3], cards=[contested_card])
+        tmp_path, monkeypatch, [issue1, issue2, issue3],
+        cards=[contested_card, unrelated_card], lanes=[backlog_lane])
 
-    create_card.assert_called_once()
-    # create_card(cfg, apply, title, custom_id, external_url, lane_id) -- the un-contested issue3
-    # must get its OWN new card, not silently bind onto the excluded contested card.
-    assert create_card.call_args.args[3] == "ABC"
+    # issue3 must bind onto the existing unrelated card (999) via the customId fallback -- never
+    # create a new card (which a loop-var bug excluding 999 from card_by_cid would force), and
+    # never touch the contested card (100).
+    create_card.assert_not_called()
+    assert any(call.args[2].get("id") == "999" for call in patch_card.call_args_list), (
+        "issue3 must match the existing unrelated card (999) via customId, not be starved into "
+        "creating a new one by a loop-var bug that wrongly excludes it from card_by_cid")
     assert not any(call.args[2].get("id") == "100" for call in patch_card.call_args_list)
