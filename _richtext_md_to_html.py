@@ -258,6 +258,28 @@ def _find_balanced_close(text: str, start: int, open_char: str, close_char: str)
     return -1
 
 
+def _unescape_href_text(href: str) -> str:
+    """Strip a backslash immediately preceding ANY character in a raw link-href slice, leaving
+    that character literal. This mirrors _find_balanced_close's escape handling for link syntax
+    (used to find the href's closing paren): that scan treats a backslash before *any* character --
+    not just _UNESCAPABLE_CHARS -- as a non-structural escape pair so a literal '(' or ')' can be
+    embedded in a URL without prematurely closing the link. Applying the narrower
+    _unescape_markdown_text here would leave such a backslash (e.g. before ')') in the emitted
+    href, corrupting the link target -- so this generic inverse is used instead, scoped to hrefs
+    only."""
+    out: list[str] = []
+    i = 0
+    n = len(href)
+    while i < n:
+        if href[i] == "\\" and i + 1 < n:
+            out.append(href[i + 1])
+            i += 2
+            continue
+        out.append(href[i])
+        i += 1
+    return "".join(out)
+
+
 def _try_parse_link(text: str, pos: int, depth: int) -> tuple[str, int] | None:
     """If ``text[pos]`` opens a well-formed ``[text](href)`` link, render it -- recursing into the
     link text at ``depth + 1`` so nested formatting inside link text still works -- and return
@@ -272,7 +294,8 @@ def _try_parse_link(text: str, pos: int, depth: int) -> tuple[str, int] | None:
     if close_paren == -1:
         return None
     link_text = text[pos + 1:close_bracket]
-    href = _sanitize_href(text[close_bracket + 2:close_paren])
+    raw_href = text[close_bracket + 2:close_paren]
+    href = _sanitize_href(_unescape_href_text(raw_href))
     inner_html = _render_inline_run(link_text, depth + 1)
     if href is None:
         return inner_html, close_paren + 1
@@ -377,11 +400,21 @@ def _render_list_item(block: _Block, list_stack: list[_ListFrame]) -> tuple[str,
     html_parts: list[str] = []
     stack = list(list_stack)
 
-    while len(stack) > block.level:
+    # Clamp the target depth to at most one level deeper than what's currently open. A block.level
+    # more than one deeper than the stack (a Markdown indent that jumps several levels at once,
+    # e.g. a first item that starts already indented, or a stray deep indent mid-list) would
+    # otherwise make the "open new deeper levels" branch below open one container per skipped
+    # level while only ever emitting a matching <li> for the final (deepest) one -- every
+    # intermediate container's frame still gets a </li> from _close_list_frame_html when it later
+    # closes, producing unbalanced HTML. Treating any such jump as "one level deeper than the
+    # parent" keeps every opened container paired with exactly one <li>.
+    target_level = min(block.level, len(stack) + 1)
+
+    while len(stack) > target_level:
         html_parts.append(_close_list_frame_html(stack[-1]))
         stack = stack[:-1]
 
-    if len(stack) == block.level and stack:
+    if len(stack) == target_level and stack:
         top = stack[-1]
         html_parts.append("</li>")
         if top.ordered != block.ordered:
@@ -390,7 +423,7 @@ def _render_list_item(block: _Block, list_stack: list[_ListFrame]) -> tuple[str,
             top = _ListFrame(ordered=block.ordered, index=0)
         stack = stack[:-1] + [top._replace(index=top.index + 1)]
     else:
-        while len(stack) < block.level:
+        while len(stack) < target_level:
             html_parts.append(_open_list_container_html(block.ordered))
             stack = stack + [_ListFrame(ordered=block.ordered, index=1)]
 
