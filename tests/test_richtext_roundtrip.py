@@ -76,6 +76,40 @@ def test_directly_adjacent_nested_inline_formats_round_trip_without_delimiter_co
 
 
 @pytest.mark.parametrize(
+    "html, code_texts",
+    [
+        # two directly-adjacent <code> spans, no separating text -- the first span's closing
+        # fence and the second's opening fence would otherwise concatenate into one longer run of
+        # live backtick characters on reparse, merging both spans' content into one and losing the
+        # element boundary between them entirely.
+        ("<p><code>a</code><code>b</code></p>", ["a", "b"]),
+        # same collision with a leading word first, so the pair never lands at true line start
+        # (kept clear of the separate, pre-existing, documented fenced-code-BLOCK collision that
+        # only fires for a 3+ backtick run at true line start -- see
+        # test_code_span_needing_a_three_plus_backtick_fence_round_trips_when_not_at_true_line_start).
+        ("<p>Inline <code>a</code><code>b</code> spans.</p>", ["a", "b"]),
+        # three-way chain of adjacent spans -- the collision must not just be fixed pairwise.
+        ("<p><code>a</code><code>b</code><code>c</code></p>", ["a", "b", "c"]),
+    ],
+)
+def test_directly_adjacent_code_spans_preserve_distinct_boundaries_and_content(html, code_texts):
+    # Markdown has no escape syntax that can separate two touching backtick runs (see
+    # _chunk_ends_in_live_backtick's docstring), so a perfectly byte-identical round trip is not
+    # achievable here -- the documented degrade is an invisible zero-width-space inserted between
+    # the two spans (never inside either one). Each span's own content is conserved exactly and
+    # the element boundary survives; that invisible separator is the one unavoidable difference,
+    # analogous to this module's other documented, honest degrades (e.g. the empty-<code> case).
+    md1 = leankit_html_to_markdown(html)
+    html2 = markdown_to_leankit_html(md1)
+    for text in code_texts:
+        assert f"<code>{text}</code>" in html2
+    # Idempotent: re-translating the already-degraded HTML must not add another layer of
+    # separators or otherwise keep drifting.
+    md2 = leankit_html_to_markdown(html2)
+    assert md2 == md1
+
+
+@pytest.mark.parametrize(
     "html, markdown",
     [
         # an ordered sublist nested inside a bullet item's <li> -- and the inverse (a bullet
@@ -420,10 +454,12 @@ def test_both_public_functions_reject_none_int_and_bytes_identically(bad_input):
 # --- file-size budget: hard-cap regression guard, soft-target overage explicitly flagged -----------
 
 # House style: 200-400 lines typical, 800 hard cap -- split before exceeding it, never add to a
-# file already over budget. richtext.py's translation logic is split across three modules so no
+# file already over budget. richtext.py's translation logic is split across four modules (shared
+# structs/sanitizers, HTML->MD, MD->HTML, and code-span fencing/matching -- pulled into its own
+# _richtext_code_spans.py since it's a self-contained concern used by both directions) so no
 # single file need approach the hard cap; this test is the regression guard for that split staying
 # intact. _richtext_md_to_html.py sits at 476 lines -- over the 400 soft target but well under the
-# 800 hard cap. It is deliberately NOT split into a fourth module: the block-folding renderer
+# 800 hard cap. It is deliberately NOT split further: the block-folding renderer
 # (_render_block_html) and the inline renderer (_render_inline_html) are two halves of one cohesive
 # concern (a block's raw text always flows through the inline renderer before it's HTML-safe), and
 # the two share fixed-precedence/protected-region invariants that would either duplicate across
@@ -438,6 +474,7 @@ _KNOWN_SOFT_TARGET_OVERAGES = frozenset({"_richtext_md_to_html.py"})
 _RICHTEXT_MODULE_FILENAMES = (
     "richtext.py",
     "_richtext_shared.py",
+    "_richtext_code_spans.py",
     "_richtext_html_to_md.py",
     "_richtext_md_to_html.py",
 )

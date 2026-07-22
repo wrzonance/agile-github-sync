@@ -7,6 +7,11 @@ from __future__ import annotations
 import re
 from html.parser import HTMLParser
 
+from _richtext_code_spans import (
+    _ADJACENT_FENCE_SEPARATOR,
+    _chunk_ends_in_live_backtick,
+    _render_code_span,
+)
 from _richtext_shared import (
     _INLINE_AMBIGUOUS_CHARS,
     _LIST_INDENT_UNIT,
@@ -56,48 +61,6 @@ _STAR_MARKER_VARIANTS: dict[str, tuple[str, str]] = {
 # Consecutive newlines beyond a single blank line collapse to the documented one-blank-line
 # block-separator convention.
 _BLANK_LINE_RUN = re.compile(r"\n{3,}")
-
-
-def _longest_backtick_run(content: str) -> int:
-    """Length of the longest run of consecutive backticks in ``content`` (0 if none). A fence one
-    longer than this can never be confused with a run inside the content itself."""
-    longest = 0
-    current = 0
-    for ch in content:
-        if ch == "`":
-            current += 1
-            longest = max(longest, current)
-        else:
-            current = 0
-    return longest
-
-
-def _pad_code_span_content(content: str) -> str:
-    """Pad ``content`` with a symmetric leading/trailing space when either edge would otherwise
-    merge with the fence on re-parsing: an edge backtick (read as part of the fence's own run), or
-    both edges space with at least one non-space char (MD->HTML's GFM strip rule would otherwise
-    misread that as unpadded whitespace and strip it for real). Padding is never applied to only
-    one edge, since that strip rule only fires when BOTH ends are space. All-space ``content`` is
-    left untouched -- GFM's strip rule excludes that case, so padding it would corrupt round-trip."""
-    if not content:
-        return content
-    edge_is_backtick = content[0] == "`" or content[-1] == "`"
-    edge_is_space = content[0] == " " and content[-1] == " " and content.strip(" ")
-    if edge_is_backtick or edge_is_space:
-        return f" {content} "
-    return content
-
-
-def _render_code_span(content: str) -> str:
-    """Render ``content`` as a GFM code span: a fence one backtick longer than its longest
-    internal run (_longest_backtick_run), wrapping edge-padded content (_pad_code_span_content).
-    Empty ``content`` renders as "" -- the documented ``<code></code>`` degrade: even the
-    shortest fence pair would produce a bare "``" that MD->HTML reads back as literal text, not
-    an empty code element, so emitting nothing is the more honest choice."""
-    if not content:
-        return ""
-    fence = "`" * (_longest_backtick_run(content) + 1)
-    return f"{fence}{_pad_code_span_content(content)}{fence}"
 
 
 def _digit_run_end(text: str, start: int) -> int:
@@ -174,6 +137,10 @@ class _MarkdownWalker(HTMLParser):
         self.code_span_buffer: list[str] = []
         self.in_code = False
         self.in_pre = False
+        # Counts nested (non-<pre>) <code> opens. Markdown has no nested code-span syntax, so a
+        # directly-nested <code> (malformed input) is not a new span -- it just keeps adding to
+        # the same one. Only a 0->1 transition resets code_span_buffer; see _open_code.
+        self.code_depth = 0
         self.suppress_text = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -290,30 +257,49 @@ class _MarkdownWalker(HTMLParser):
         self._close_format(marker)
 
     def _open_code(self) -> None:
-        self.in_code = True
-        if not self.in_pre:
+        if self.in_pre:
+            # Still inside <pre> -- content goes straight to self.buffer via handle_data,
+            # unbuffered; code_depth is irrelevant here.
+            self.in_code = True
+            return
+        if self.code_depth == 0:
             # Start collecting this span's content fresh -- the fence/padding it needs can only
-            # be chosen once the whole span is known, at close time.
+            # be chosen once the whole span is known, at close time. A directly-nested <code>
+            # (code_depth already > 0, malformed input -- Markdown has no nested code-span
+            # syntax) skips this reset, so text already captured for the outer span survives
+            # rather than being silently overwritten.
             self.code_span_buffer = []
-        # else: inside <pre> -- content goes straight to self.buffer via handle_data, unbuffered.
+        self.in_code = True
+        self.code_depth += 1
 
     def _close_code(self) -> None:
         if self.in_pre:
             # Still inside <pre> -- the fence itself closes on </pre>, not here.
             self.in_code = False
-        else:
+            return
+        self.code_depth = max(0, self.code_depth - 1)
+        if self.code_depth == 0:
             self._flush_code_span()
+        # else: this closed an inner nested <code> -- still buffering for the outer span, which
+        # is still open.
 
     def _flush_code_span(self) -> None:
         """Render the buffered ``<code>`` span's content as a GFM code span (_render_code_span)
         and append it to the buffer, then reset code-span state. An empty span renders to ""
         (see _render_code_span's documented degrade) and is not appended -- it leaves no trace in
-        the Markdown output rather than a bare, meaningless "``"."""
+        the Markdown output rather than a bare, meaningless "``". If the buffer's last emitted
+        chunk already ends in a live (unescaped) backtick -- another code span's closing fence, or
+        a <pre> block's closing fence, immediately touching this one with no separating text --
+        a zero-width separator is inserted first so the two fences can never merge into one longer
+        run on reparse (see _chunk_ends_in_live_backtick)."""
         rendered = _render_code_span("".join(self.code_span_buffer))
         if rendered:
+            if self.buffer and _chunk_ends_in_live_backtick(self.buffer[-1]):
+                self.buffer.append(_ADJACENT_FENCE_SEPARATOR)
             self.buffer.append(rendered)
         self.code_span_buffer = []
         self.in_code = False
+        self.code_depth = 0
 
     def _close_pre(self) -> None:
         if self.buffer and not self.buffer[-1].endswith("\n"):

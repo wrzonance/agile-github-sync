@@ -371,3 +371,17 @@ def test_unclosed_code_span_with_internal_backtick_run_still_picks_a_safe_fence_
 def test_malformed_or_nested_unclosed_code_tags_never_raise(html):
     result = leankit_html_to_markdown(html)
     assert isinstance(result, str)
+
+
+# --- invariant: a directly-nested <code> (malformed input -- Markdown has no nested code-span
+# syntax) never drops text captured before it reopens; all captured text merges into the one
+# enclosing span rather than the outer text being silently discarded --------------------------
+
+def test_nested_code_tag_preserves_text_captured_before_it_reopens():
+    html = "<p><code>outer<code>inner</code>tail</code></p>"
+    assert leankit_html_to_markdown(html) == "`outerinnertail`"
+
+
+def test_doubly_nested_unclosed_code_tag_preserves_all_captured_text_at_eof():
+    html = "<code>a<code>b<code>c"
+    assert leankit_html_to_markdown(html) == "`abc`"
