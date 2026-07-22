@@ -20,6 +20,7 @@ from richtext import (  # noqa: E402
     _escape_markdown_text,
     _sanitize_href,
     _unescape_markdown_text,
+    leankit_html_to_markdown,
 )
 
 
@@ -190,3 +191,118 @@ def test_sanitize_href_rejects_unsafe_or_missing_urls(url):
 def test_sanitize_href_returns_trimmed_original_not_the_control_char_purged_copy():
     result = _sanitize_href("  https://example.com/a b  ")
     assert result == "https://example.com/a b"
+
+
+# =====================================================================================
+# leankit_html_to_markdown -- HTML->MD walker, captured devtools vocabulary:
+# p, br, strong, em, u, code, pre>code
+# =====================================================================================
+
+# --- invariant: content conservation -----------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "html, expected_markdown",
+    [
+        ("<p>Hello <strong>world</strong></p>", "Hello **world**"),
+        ("<p>Some <em>italic</em> text.</p>", "Some *italic* text."),
+        ("<p>Inline <code>code()</code> span.</p>", "Inline `code()` span."),
+        ("<u>underlined</u> stays as plain text", "underlined stays as plain text"),
+        ("<p>Line one<br>Line two</p>", "Line one\nLine two"),
+        ("<p>First</p><p>Second</p>", "First\n\nSecond"),
+        (
+            "<p>Bold <strong>and <em>nested</em> italic</strong> together</p>",
+            "Bold **and *nested* italic** together",
+        ),
+        ("plain text with no tags at all", "plain text with no tags at all"),
+    ],
+)
+def test_content_is_conserved_across_supported_vocabulary(html, expected_markdown):
+    assert leankit_html_to_markdown(html) == expected_markdown
+
+
+def test_pre_code_block_preserves_literal_newlines_exactly():
+    html = "<pre><code>def f():\n    return 1\n</code></pre>"
+    assert leankit_html_to_markdown(html) == "```\ndef f():\n    return 1\n```"
+
+
+def test_unsupported_tag_degrades_by_dropping_the_tag_but_keeping_its_content():
+    html = '<div class="widget">payload text</div>'
+    assert leankit_html_to_markdown(html) == "payload text"
+
+
+def test_unclosed_strong_is_force_closed_rather_than_left_dangling():
+    html = "<p>Unclosed <strong>bold"
+    assert leankit_html_to_markdown(html) == "Unclosed **bold**"
+
+
+# --- invariant: total over content (never raises) -----------------------------------------------
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "",
+        "<p>Unclosed <strong>bold <em>and italic",
+        "<strong><em><strong><em>deeply nested, never closed",
+        "<script>alert(1)</script>survivor text",
+        "<pre><code>unclosed code fence",
+        "<u><u><u>triple nested u with no closers",
+        "&amp;" * 10_000,
+        ALL_PRINTABLE * 20,
+        UNICODE_SAMPLE,
+        "<notatag attr='x'>&&&<<<>>>",
+    ],
+)
+def test_leankit_html_to_markdown_never_raises_over_arbitrary_or_malformed_html(html):
+    result = leankit_html_to_markdown(html)
+    assert isinstance(result, str)
+
+
+@pytest.mark.parametrize("bad_input", [None, 123, 3.14, [], {}, b"bytes"])
+def test_leankit_html_to_markdown_raises_typeerror_at_the_str_boundary(bad_input):
+    with pytest.raises(TypeError, match="expected str, got"):
+        leankit_html_to_markdown(bad_input)
+
+
+# --- invariant: whitelist closure (Markdown output only uses the supported subset) --------------
+
+@pytest.mark.parametrize(
+    "html, leaked_tag_syntax",
+    [
+        ('<div class="x">payload</div>', "<div"),
+        ("<script>evil()</script>harmless", "<script"),
+        ("<iframe src=x></iframe>remainder", "<iframe"),
+        ("<img src=x onerror=alert(1)>caption", "<img"),
+        ("<style>body{color:red}</style>plain", "<style"),
+    ],
+)
+def test_unsupported_tag_syntax_never_leaks_into_markdown_output(html, leaked_tag_syntax):
+    result = leankit_html_to_markdown(html)
+    assert leaked_tag_syntax not in result
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<p>Unclosed <strong>bold</p>",
+        "<p><em>Unclosed italic and text after</p>",
+        "<p><code>unclosed inline code</p>",
+    ],
+)
+def test_force_closed_format_markers_are_always_balanced(html):
+    # A single mismatched tag type per case, with trailing text, so the appended closer never
+    # sits directly adjacent to another marker -- isolates the balance guarantee from Markdown's
+    # separate (and inherent, not this module's concern) delimiter-adjacency ambiguity when
+    # several unclosed spans all flush back-to-back at end of input.
+    result = leankit_html_to_markdown(html)
+    for marker in ("**", "*", "`"):
+        scan = result.replace("**", "") if marker == "*" else result
+        assert scan.count(marker) % 2 == 0
+
+
+def test_script_and_style_content_is_suppressed_not_leaked_as_text():
+    html = "<p>before</p><script>var x = 1;</script><style>.a{}</style><p>after</p>"
+    result = leankit_html_to_markdown(html)
+    assert "var x = 1" not in result
+    assert ".a{}" not in result
+    assert "before" in result
+    assert "after" in result

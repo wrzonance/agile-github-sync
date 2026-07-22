@@ -28,6 +28,9 @@ Degradation table (asymmetries -- never a crash, never unsanitized passthrough)
 """
 from __future__ import annotations
 
+import re
+from html.parser import HTMLParser
+
 # Characters that are ambiguous Markdown syntax in ANY position within a line -- always
 # backslash-escaped wherever they appear in text content.
 _INLINE_AMBIGUOUS_CHARS: frozenset[str] = frozenset({"*", "_", "~", "`", "[", "]", "\\"})
@@ -43,6 +46,19 @@ _UNESCAPABLE_CHARS: frozenset[str] = _INLINE_AMBIGUOUS_CHARS | _STRUCTURAL_LINE_
 # Href schemes considered safe to emit; anything else (javascript:, data:, bare relative paths,
 # schemeless strings) degrades to link text with no href.
 _ALLOWED_HREF_SCHEMES: frozenset[str] = frozenset({"http", "https", "mailto"})
+
+# HTML tags the HTML->Markdown walker currently translates (grows as later vocabulary --
+# headings, lists, links, strikethrough -- is added). Anything outside this set, including
+# ``<u>`` (no Markdown equivalent), degrades via the unified no-op path: the tag is dropped but
+# its text content is kept.
+_SUPPORTED_TAGS: frozenset[str] = frozenset({"p", "br", "strong", "em", "code", "pre"})
+
+# Tags that open/close a symmetric Markdown inline-format span with a single marker string.
+_FORMAT_MARKERS: dict[str, str] = {"strong": "**", "em": "*"}
+
+# Consecutive newlines beyond a single blank line collapse to the documented one-blank-line
+# block-separator convention.
+_BLANK_LINE_RUN = re.compile(r"\n{3,}")
 
 
 def _escape_html_text(text: str) -> str:
@@ -145,3 +161,119 @@ def _sanitize_href(url: str | None) -> str | None:
     if not sep or scheme.lower() not in _ALLOWED_HREF_SCHEMES:
         return None
     return trimmed
+
+
+class _MarkdownWalker(HTMLParser):
+    """Streams AgilePlace HTML through stdlib's tolerant tokenizer and accumulates the
+    equivalent Markdown. Tags outside ``_SUPPORTED_TAGS`` (including ``<u>``) take the unified
+    degrade path: the tag itself is dropped but ``handle_data`` still fires, so their text
+    content survives. ``<script>``/``<style>`` are the one exception -- their content is not
+    meant to be read as prose, so it is suppressed entirely rather than degraded to text."""
+
+    def __init__(self) -> None:
+        # convert_charrefs=True decodes entities (e.g. &amp;) before handle_data sees them, so
+        # this module never has to parse entities itself -- and rules out entity-bomb
+        # amplification structurally, since decoding happens once during tokenization.
+        super().__init__(convert_charrefs=True)
+        self.buffer: list[str] = []
+        self.format_stack: list[str] = []
+        self.in_code = False
+        self.in_pre = False
+        self.suppress_text = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "p":
+            self._ensure_block_separator()
+        elif tag == "br":
+            self.buffer.append("\n")
+        elif tag == "pre":
+            self._ensure_block_separator()
+            self.in_pre = True
+            self.buffer.append("```\n")
+        elif tag == "code":
+            self._open_code()
+        elif tag in _FORMAT_MARKERS:
+            self._open_format(_FORMAT_MARKERS[tag])
+        elif tag in ("script", "style"):
+            self.suppress_text = True
+        # else: unsupported tag (including "u") -- unified degrade, no markdown emitted for the
+        # tag itself; handle_data still runs so its content is kept.
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "pre":
+            self._close_pre()
+        elif tag == "code":
+            self._close_code()
+        elif tag in _FORMAT_MARKERS:
+            self._close_format(_FORMAT_MARKERS[tag])
+        elif tag in ("script", "style"):
+            self.suppress_text = False
+        # else: "p"/"br"/degraded tags -- nothing to close.
+
+    def handle_data(self, data: str) -> None:
+        # handle_data can fire multiple times for one logical run of text -- always append,
+        # never overwrite the buffer.
+        if self.suppress_text or not data:
+            return
+        if self.in_pre or self.in_code:
+            # Code content is literal Markdown (backtick/fence spans don't reinterpret syntax
+            # inside them), so it bypasses _escape_markdown_text entirely.
+            self.buffer.append(data)
+            return
+        self.buffer.append(_escape_markdown_text(data, at_line_start=self._at_line_start()))
+
+    def get_markdown(self) -> str:
+        """Flush any still-open inline-format markers (an unclosed ``<strong>`` degrades to a
+        balanced ``**word**`` instead of a dangling ``**word``), join the buffer, and collapse
+        blank-line runs to the documented single-blank-line block-separator convention."""
+        while self.format_stack:
+            self.buffer.append(self.format_stack.pop())
+        text = _BLANK_LINE_RUN.sub("\n\n", "".join(self.buffer))
+        return text.strip("\n")
+
+    def _open_format(self, marker: str) -> None:
+        self.buffer.append(marker)
+        self.format_stack.append(marker)
+
+    def _close_format(self, marker: str) -> None:
+        if self.format_stack and self.format_stack[-1] == marker:
+            self.format_stack.pop()
+        self.buffer.append(marker)
+
+    def _open_code(self) -> None:
+        self.in_code = True
+        if not self.in_pre:
+            self._open_format("`")
+
+    def _close_code(self) -> None:
+        self.in_code = False
+        if not self.in_pre:
+            self._close_format("`")
+        # else: still inside <pre> -- the fence itself closes on </pre>, not here.
+
+    def _close_pre(self) -> None:
+        if self.buffer and not self.buffer[-1].endswith("\n"):
+            self.buffer.append("\n")
+        self.buffer.append("```")
+        self.in_pre = False
+        self.in_code = False
+
+    def _ensure_block_separator(self) -> None:
+        if self.buffer and not self.buffer[-1].endswith("\n\n"):
+            self.buffer.append("\n\n")
+
+    def _at_line_start(self) -> bool:
+        return not self.buffer or self.buffer[-1].endswith("\n")
+
+
+def leankit_html_to_markdown(html: str) -> str:
+    """Translate AgilePlace's HTML subset into GitHub-flavored Markdown. Raises TypeError if
+    ``html`` isn't a str; otherwise never raises -- HTMLParser tolerates malformed/unclosed
+    markup, and any tag outside the supported set degrades to its text content rather than
+    crashing or leaking raw tag syntax into the output."""
+    if not isinstance(html, str):
+        raise TypeError(f"leankit_html_to_markdown: expected str, got {type(html).__name__}")
+    walker = _MarkdownWalker()
+    walker.feed(html)
+    walker.close()
+    return walker.get_markdown()
