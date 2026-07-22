@@ -56,6 +56,24 @@ _ALLOWED_HREF_SCHEMES: frozenset[str] = frozenset({"http", "https", "mailto"})
 # the HTML->MD walker to emit indent and by MD->HTML's block parser to measure it back out.
 _LIST_INDENT_UNIT = "  "
 
+# Characters that must be backslash-escaped in an href before it is spliced into `](href)` link
+# syntax. MD->HTML's _find_balanced_close scans forward from the opening '(' tracking nested
+# '('/')' depth to find the link's closing paren, treating a backslash before ANY character as a
+# non-structural escape pair (see _unescape_href_text) -- so a literal '(' or ')' in the href would
+# otherwise shift or hide that closing paren, and a literal '\' would itself be swallowed as an
+# escape marker. Scoped separately from _INLINE_AMBIGUOUS_CHARS/_STRUCTURAL_LINE_START_CHARS: an
+# href is never treated as ordinary text, and _unescape_href_text's inverse strips a backslash
+# before ANY character, not just these -- so escaping exactly this set is both necessary and
+# sufficient for a href to round-trip through Markdown link syntax.
+_HREF_ESCAPE_CHARS: frozenset[str] = frozenset({"\\", "(", ")"})
+
+
+def _escape_href_for_markdown(href: str) -> str:
+    """Backslash-escape '\\', '(', and ')' in ``href`` so splicing it into ``](href)`` can't have
+    a literal paren misread as the link's closing paren (or a literal backslash swallowed as an
+    escape marker) by MD->HTML's _find_balanced_close / _unescape_href_text pairing."""
+    return "".join(f"\\{ch}" if ch in _HREF_ESCAPE_CHARS else ch for ch in href)
+
 
 def _sanitize_href(url: str | None) -> str | None:
     """Validate ``url`` as a safe href, or return None if it's missing/unsafe (caller then

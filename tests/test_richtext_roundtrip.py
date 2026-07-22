@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from richtext import leankit_html_to_markdown, markdown_to_leankit_html  # noqa: E402
+from richtext import _sanitize_href, leankit_html_to_markdown, markdown_to_leankit_html  # noqa: E402
 
 # =====================================================================================
 # Round-trip fixed point -- combined document (heading + nested list + link + code +
@@ -99,6 +99,44 @@ def test_mixed_type_nested_list_round_trips_to_an_exact_known_value_both_directi
 
 
 @pytest.mark.parametrize(
+    "html",
+    [
+        # An href with an unmatched literal '(' would otherwise make MD->HTML's balanced-paren
+        # scan for the link's closing paren run past the intended end of the href (or fail to
+        # find one at all within the scan window), corrupting or dropping the link on the way
+        # back to HTML. Wrapped in <p> -- matching the module's existing "bare inline content at
+        # document root round-trips wrapped in a paragraph" convention (see the directly-adjacent-
+        # nested-format tests above) -- so this pins the link-escaping fix, not that pre-existing,
+        # unrelated wrapping asymmetry.
+        '<p><a href="https://example.com/(unclosed">text</a></p>',
+        '<p><a href="https://example.com/a(b)c(d">text</a></p>',
+        '<p><a href="https://example.com/)stray">text</a></p>',
+        '<p><a href="https://example.com/back\\slash">text</a></p>',
+    ],
+)
+def test_href_with_unbalanced_paren_or_backslash_round_trips_through_markdown_link_syntax(html):
+    md = leankit_html_to_markdown(html)
+    assert markdown_to_leankit_html(md) == html
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<ul><li>line one<br>line two</li></ul>",
+        "<ol><li>line one<br>line two</li><li>next item</li></ol>",
+        "<ul><li>parent<br>continued<ul><li>child</li></ul></li></ul>",
+    ],
+)
+def test_br_inside_list_item_round_trips_through_markdown_and_reaches_a_fixed_point(html):
+    md1 = leankit_html_to_markdown(html)
+    assert markdown_to_leankit_html(md1) == html
+    # Second pass must reach the same fixed point -- the continuation line must not detach into
+    # a sibling block on a repeated translation.
+    md2 = leankit_html_to_markdown(markdown_to_leankit_html(md1))
+    assert md1 == md2
+
+
+@pytest.mark.parametrize(
     "markdown",
     [
         # irregular 3-space list continuation indent under a numbered marker, and headings glued
@@ -147,6 +185,19 @@ def _assert_html_output_uses_only_whitelisted_tags(html: str) -> None:
     assert tag_names <= _SUPPORTED_HTML_TAG_NAMES, f"leaked non-whitelisted tag(s): {tag_names - _SUPPORTED_HTML_TAG_NAMES}"
 
 
+# Every ``href="..."`` attribute value that ever reaches markdown_to_leankit_html's HTML output
+# must be one _sanitize_href itself would accept unchanged -- <a> is a legitimately whitelisted
+# tag, so tag-name closure alone (above) can't catch a regression in _sanitize_href's scheme
+# allowlist/comparison (e.g. a scheme accidentally added to _ALLOWED_HREF_SCHEMES, or the check
+# becoming case-sensitive) that lets a live "javascript:"-style href slip through untouched.
+_HREF_ATTR_RE = re.compile(r'href="([^"]*)"')
+
+
+def _assert_html_output_hrefs_are_all_sanitizer_accepted(html: str) -> None:
+    for href in _HREF_ATTR_RE.findall(html):
+        assert _sanitize_href(href) == href, f"href attribute not accepted by _sanitize_href: {href!r}"
+
+
 _DANGEROUS_MARKDOWN_HTML_BATTERY = [
     "<ScRiPt>alert(1)</sCriPt>",  # mixed-case tag name
     "<svg onload=alert(1)>",
@@ -172,7 +223,9 @@ _DANGEROUS_MARKDOWN_HTML_BATTERY = [
 
 @pytest.mark.parametrize("markdown", _DANGEROUS_MARKDOWN_HTML_BATTERY)
 def test_html_output_whitelist_closure_over_adversarial_markdown_battery(markdown):
-    _assert_html_output_uses_only_whitelisted_tags(markdown_to_leankit_html(markdown))
+    html = markdown_to_leankit_html(markdown)
+    _assert_html_output_uses_only_whitelisted_tags(html)
+    _assert_html_output_hrefs_are_all_sanitizer_accepted(html)
 
 
 # --- invariant: whitelist closure (Markdown output) -- systematic raw-'<' absence ------------------

@@ -161,6 +161,23 @@ def test_script_and_style_content_is_suppressed_not_leaked_as_text():
         ('<a href="https://example.com">click</a>', "[click](https://example.com)"),
         ('<a href="javascript:alert(1)">bad</a>', "bad"),
         ("<a>no href</a>", "no href"),
+        # An href with an unmatched literal '(' (no closing ')') must be escaped before splicing
+        # into `](href)` -- otherwise MD->HTML's balanced-paren scan for the link's closing paren
+        # never finds one and the link fails to parse back. Also covers a lone ')' and a literal
+        # backslash, both of which would otherwise be misread (or swallowed) by MD->HTML's
+        # backslash-escape-aware closing-paren scan.
+        (
+            '<a href="https://example.com/(unclosed">text</a>',
+            "[text](https://example.com/\\(unclosed)",
+        ),
+        (
+            '<a href="https://example.com/)stray">text</a>',
+            "[text](https://example.com/\\)stray)",
+        ),
+        (
+            '<a href="https://example.com/back\\slash">text</a>',
+            "[text](https://example.com/back\\\\slash)",
+        ),
         (
             '<a href="https://x.com"><strong>bold link</strong></a>',
             "[**bold link**](https://x.com)",
@@ -173,6 +190,8 @@ def test_script_and_style_content_is_suppressed_not_leaked_as_text():
         ),
         ("<ul><li>item</li></ul><p>after</p>", "- item\n\nafter"),
         ("<p>before</p><ul><li>item</li></ul>", "before\n\n- item"),
+        ("<ul><li>line one<br>line two</li></ul>", "- line one\nline two"),
+        ("<ol><li>line one<br>line two</li><li>next item</li></ol>", "1. line one\nline two\n2. next item"),
     ],
 )
 def test_content_is_conserved_across_headings_lists_links_strikethrough(html, expected_markdown):

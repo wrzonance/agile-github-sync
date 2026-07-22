@@ -88,6 +88,25 @@ def test_switching_list_type_at_same_depth_closes_and_reopens_the_container():
     assert result == "<ul><li>bullet</li></ul><ol><li>ordered</li></ol>"
 
 
+def test_lazy_continuation_line_after_list_item_folds_into_the_same_item_as_a_br():
+    # A physical line immediately following a list item, with no blank-line separator and no
+    # list/heading/code-fence marker of its own, is a hard-line-break continuation of that same
+    # item (mirroring how a bare '\n' inside a <p> already becomes '<br>') -- it must not detach
+    # into a sibling paragraph, which would also prematurely close the open list.
+    markdown = "- line one\nline two"
+    result = markdown_to_leankit_html(markdown)
+    assert result == "<ul><li>line one<br>line two</li></ul>"
+
+
+def test_lazy_continuation_line_does_not_reset_ordered_list_numbering():
+    # Regression pin: if the continuation line instead detached into its own paragraph, the list
+    # would close early and the next real list item would start a brand new <ol> at 1.
+    markdown = "1. line one\nline two\n2. next item"
+    result = markdown_to_leankit_html(markdown)
+    assert result == "<ol><li>line one<br>line two</li><li>next item</li></ol>"
+    assert result.count("<ol>") == 1
+
+
 def test_per_block_isolation_would_flatten_nesting_but_folding_does_not():
     # Regression pin for the spike's failure mode: rendering each list_item block against an
     # empty/local list_stack (instead of folding against the running stack) turns every item

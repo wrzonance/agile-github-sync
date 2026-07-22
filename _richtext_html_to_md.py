@@ -11,6 +11,7 @@ from _richtext_shared import (
     _INLINE_AMBIGUOUS_CHARS,
     _LIST_INDENT_UNIT,
     _STRUCTURAL_LINE_START_CHARS,
+    _escape_href_for_markdown,
     _ListFrame,
     _sanitize_href,
 )
@@ -305,7 +306,7 @@ class _MarkdownWalker(HTMLParser):
     def _close_link(self) -> None:
         href = self.href_stack.pop() if self.href_stack else None
         if href:
-            self.buffer.append(f"]({href})")
+            self.buffer.append(f"]({_escape_href_for_markdown(href)})")
         # else: degraded open (or a stray, unmatched close tag) -- nothing to emit.
 
 

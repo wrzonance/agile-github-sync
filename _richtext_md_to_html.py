@@ -108,6 +108,15 @@ def _parse_blocks(md: str) -> list[_Block]:
             blocks.append(_Block(kind="blank", level=0, ordered=False, text=""))
             i += 1
             continue
+        if blocks and blocks[-1].kind == "list_item" and not paragraph_lines:
+            # Lazy continuation: a line right after a list item, with no blank-line separator and
+            # no structural marker of its own, is a hard-line-break continuation of that same item
+            # (mirroring how a bare '\n' inside a paragraph already becomes '<br>' -- see
+            # _render_lines_with_br) -- fold it into the item's own text instead of starting a new
+            # top-level paragraph, which would also prematurely close the still-open list.
+            blocks[-1] = blocks[-1]._replace(text=f"{blocks[-1].text}\n{line}")
+            i += 1
+            continue
         paragraph_lines = paragraph_lines + [line]
         i += 1
     _flush_paragraph(paragraph_lines, blocks)
@@ -427,8 +436,15 @@ def _render_list_item(block: _Block, list_stack: list[_ListFrame]) -> tuple[str,
             html_parts.append(_open_list_container_html(block.ordered))
             stack = stack + [_ListFrame(ordered=block.ordered, index=1)]
 
-    html_parts.append(f"<li>{_render_inline_html(block.text)}")
+    html_parts.append(f"<li>{_render_lines_with_br(block.text)}")
     return "".join(html_parts), stack
+
+
+def _render_lines_with_br(text: str) -> str:
+    """Render each '\\n'-joined physical line of ``text`` through the inline renderer and rejoin
+    with '<br>' -- the block-internal hard-line-break encoding shared by paragraph and list-item
+    blocks (a '\\n' that's a line break within the block, not a boundary between blocks)."""
+    return "<br>".join(_render_inline_html(line) for line in text.split("\n"))
 
 
 def _render_non_list_block(block: _Block) -> str:
@@ -440,8 +456,7 @@ def _render_non_list_block(block: _Block) -> str:
         # escaped directly rather than routed through _render_inline_html.
         return f"<pre><code>{_escape_html_text(block.text)}\n</code></pre>"
     if block.kind == "paragraph":
-        content = "<br>".join(_render_inline_html(line) for line in block.text.split("\n"))
-        return f"<p>{content}</p>"
+        return f"<p>{_render_lines_with_br(block.text)}</p>"
     # kind == "blank": a pure block separator -- nothing to emit.
     return ""
 
