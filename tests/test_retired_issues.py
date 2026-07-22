@@ -207,6 +207,19 @@ def test_retirement_refuses_custom_id_only_match(tmp_path, monkeypatch, capsys):
 
 def test_active_issue_cannot_claim_url_owned_retired_card_by_custom_id(
         tmp_path, monkeypatch, capsys):
+    """This is issue #60's asymmetric-ownership shape: an active issue's customId collides with a
+    retired card that a DIFFERENT (retired) issue owns by URL. Pre-#75, contested_cards() was
+    URL-only, so this customId collision was invisible to Layer 1 -- the retired card kept sole
+    ownership via its URL claim, and the active issue was individually deferred by the
+    retirement-reservation check ("customId is held by retired card") while the retired card still
+    retired normally.
+
+    Post-#75, contested_cards() fences customId claims too: the retired card is now claimed by
+    BOTH the retired issue's own URL and the active issue's customId fallback, so it becomes
+    contested (2 distinct claiming issues) and BOTH issues are deferred together by the widened
+    Layer 1 fence -- the retired card no longer retires this run either. This is the accepted cost
+    issue #75's design explicitly calls out: a legit URL owner can lose a sync cycle to a
+    customId-colliding active issue, in exchange for never risking a clobber either way."""
     active = {
         **_github_issue(20, ""),
         "title": "[ABC] active replacement",
@@ -231,12 +244,13 @@ def test_active_issue_cannot_claim_url_owned_retired_card_by_custom_id(
     )
 
     out = capsys.readouterr().out
-    assert "deferring active card [ABC]: customId is held by retired card C10" in out
+    assert "WARN  card C10 claimed by 2 issue URLs, deferring:" in out
+    assert "deferring active card [ABC]: customId is held by retired card C10" not in out, (
+        "the widened Layer 1 fence defers both issues together -- the older per-issue "
+        "customId-reservation WARN never fires once the card is already contested")
     create_card.assert_not_called()
     edit_label.assert_not_called()
-    assert patch_card.call_args.args[3] == [
-        {"op": "replace", "path": "/laneId", "value": "L5"},
-    ]
+    patch_card.assert_not_called()
 
 
 def test_retirement_leaves_blocked_flag_and_reason_to_humans(tmp_path, monkeypatch):

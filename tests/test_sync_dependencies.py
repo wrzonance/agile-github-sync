@@ -53,7 +53,7 @@ def _harness(cards):
     return lambda issue: cards.get(issue["number"])
 
 
-def _run(issues, blocked_by, cards, managed, reads, blocker_cards=None):
+def _run(issues, blocked_by, cards, managed, reads, blocker_cards=None, poisoned=frozenset()):
     """Run sync_dependencies with agileplace fully faked; return recorded write calls.
     blocker_cards defaults to every issue's card (the _blocker_cards contract); pass it
     explicitly to model retired blockers that resolve outside the active-issue set."""
@@ -74,7 +74,8 @@ def _run(issues, blocked_by, cards, managed, reads, blocker_cards=None):
                side_effect=lambda cfg, apply, cid, ids: calls["create"].append((cid, sorted(ids)))), \
          patch("sync.agileplace.delete_dependencies",
                side_effect=lambda cfg, apply, cid, ids: calls["delete"].append((cid, sorted(ids)))):
-        sync_dependencies({}, True, issues, blocked_by, blocker_cards, _harness(cards), managed)
+        sync_dependencies({}, True, issues, blocked_by, blocker_cards, _harness(cards), managed,
+                          poisoned)
     return calls
 
 
@@ -119,6 +120,48 @@ def test_blocker_without_a_card_is_excluded_from_desired():
     calls = _run(issues, {1: [2]}, cards, {"C1"}, reads={"C1": []})
     assert calls["create"] == []
     assert calls["delete"] == []
+
+
+# --- Issue #75 task 4: the poison guard skips a poisoned card's own dependency sync -----------
+
+def test_poisoned_own_card_never_reads_or_writes_dependencies(capsys):
+    """A card marked poisoned (Layer 2 lane-conflict) must have its dependency sync skipped
+    entirely -- not even a read is attempted, since the card's own state this run was already
+    refused persistence at flush; reading its dependencies to compute an add/remove would still
+    write against a card whose PATCH never landed."""
+    issues = [_issue(1, "A"), _issue(2, "B")]
+    cards = {1: {"id": "C1"}, 2: {"id": "C2"}}
+    calls = _run(issues, {1: [2]}, cards, {"C1", "C2"}, reads={"C1": [], "C2": []},
+                poisoned=frozenset({"C1"}))
+    assert calls["create"] == []
+    assert calls["delete"] == []
+    assert "C1" not in calls["reads"], "a poisoned card's dependencies must never even be read"
+    assert "WARN" in capsys.readouterr().out
+
+
+def test_poisoned_desired_blocker_card_is_never_added():
+    """A poisoned card that is someone ELSE's desired blocker must be filtered out of the
+    already-computed `adds`, not pre-filtered out of `desired` -- pre-filtering would only
+    change which set membership check drops it, not the observable behavior here, but keeps the
+    filter logic exercised against the same post-computation list sync.py actually filters."""
+    issues = [_issue(1, "A")]
+    cards = {1: {"id": "C1"}}
+    blocker_cards = {1: {"id": "C1"}, 9: {"id": "C9"}}
+    calls = _run(issues, {1: [9]}, cards, {"C1", "C9"}, reads={"C1": []},
+                blocker_cards=blocker_cards, poisoned=frozenset({"C9"}))
+    assert calls["create"] == [], "C9 is desired but poisoned -- never created"
+
+
+def test_poisoned_stale_blocker_card_is_never_removed():
+    """A poisoned card that is a stale (no-longer-desired) dependency must be filtered out of the
+    already-computed `removes` -- never pre-filtered out of `desired`, since `desired` never
+    contained it in the first place; pre-filtering would have no lever here at all, which is
+    exactly why the guard must operate on `removes` post-`_dependency_changes`."""
+    issues = [_issue(1, "A")]
+    cards = {1: {"id": "C1"}}
+    reads = {"C1": [{"direction": "incoming", "cardId": "C9"}]}  # stale edge, not desired
+    calls = _run(issues, {1: []}, cards, {"C1", "C9"}, reads, poisoned=frozenset({"C9"}))
+    assert calls["delete"] == [], "C9 is stale but poisoned -- never deleted"
 
 
 def test_edge_to_retired_done_blocker_is_preserved_not_deleted():

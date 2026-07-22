@@ -8,29 +8,29 @@ card_coherence.contested_cards() and card_coherence.lane_conflict() are themselv
 unit-tested directly in test_card_coherence.py. These tests instead pin the invariants at the
 sync.main() boundary:
 
-  Invariant 1 -- for any card claimed by >= 2 distinct issue URLs (active or retired), that card is
-    excluded from every match/queue path this run, and exactly one WARN line is emitted per
-    contested card id, regardless of how many URLs claim it.
+  Invariant 1 -- for any card claimed by >= 2 distinct issues (active or retired, via EITHER the
+    URL or the customId fallback match path -- issue #75), that card is excluded from every
+    match/queue path this run, and exactly one WARN line is emitted per contested card id,
+    regardless of how many issues claim it.
   Invariant 2 -- contested-card exclusion is total and consistent across the active and retired
-    paths at once (a card contested between one active and one retired issue URL is excluded from
+    paths at once (a card contested between one active and one retired issue is excluded from
     both), and stays local to the contested card: an unrelated card retiring normally in the same
     run is unaffected.
-  Invariant 3 -- queue()'s lane-conflict poisoning is monotonic within a run (a later call that
-    happens to agree with the frozen, pre-conflict lane id can never un-poison an entry); same-value
-    repeated /laneId ops never poison an entry (repeated agreement is not conflict); and a poisoned
-    entry stays local to its own card -- an unrelated card/issue pair still syncs normally in the
-    same run.
+  Invariant 3 -- a card reached by >= 2 issues ONLY via the customId fallback (zero URL claims of
+    their own) is fenced by the SAME Layer 1 mechanism as Invariant 1/2, not by queue()'s Layer 2
+    lane-conflict poisoning: issue #75 widened contested_cards() to cover this path too, so it now
+    supersedes Layer 2 for this exact shape (Layer 2's pure logic itself is still fully covered by
+    test_card_coherence.py -- these tests instead pin that the widened Layer 1 fence excludes the
+    card before either issue ever reaches queue()), and a poisoned/fenced card stays local to
+    itself -- an unrelated card/issue pair still syncs normally in the same run.
 
-Invariant 3's fixtures deliberately use a duplicate-`[KEY]`-title-prefix construction (two distinct
-GitHub issues, distinct numbers/URLs, sharing a title prefix so `issue_custom_id()` returns the same
-key for both) rather than the two-URL-contested shape Invariant 1/2 exercise: two URLs claiming one
-card is Layer 1's shape and never reaches queue() at all (Layer 1 excludes it first). A
-customId-fallback collision has zero URL claims, so it sails past Layer 1 and both issues resolve to
-the SAME existing card via the customId match path (`card_by_cid`) -- exactly the shape Layer 2
-exists to catch. A naive first draft tried to force this via `_reconciled_custom_id_index`'s
-URL-correction path instead, but that path only fires for a URL-matched issue reclaiming a
-*previously-unclaimed* customId -- it requires a URL match in the first place, so it can never
-produce two issues racing the same customId entry.
+Invariant 1/2's fixtures use a two-URL-claiming-one-card construction (each issue's own url
+resolves to the shared card). Invariant 3's fixtures instead use a duplicate-`[KEY]`-title-prefix
+construction with ZERO url claims (two or three distinct GitHub issues, distinct numbers/URLs,
+sharing a title prefix so `issue_custom_id()` returns the same key for all of them, each resolving
+to the SAME existing card only via the customId fallback, `all_card_by_cid`) -- pre-#75 this shape
+sailed past a URL-only Layer 1 straight into Layer 2's lane-conflict poisoning; post-#75 it is
+fenced by Layer 1 itself, before queue() is ever called for the card.
 
 Run: pytest -q
 """
@@ -39,7 +39,7 @@ from __future__ import annotations
 import sys
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -194,54 +194,59 @@ def test_active_and_retired_urls_on_one_card_are_excluded_without_affecting_unre
     assert "retire [3]" in out
 
 
-# --- Invariant 3: queue() lane-conflict poisoning on a duplicate-[KEY] customId collision ---------
+# --- Invariant 3: widened Layer 1 fences a duplicate-[KEY] customId collision -----------------
 
 def test_poisoning_is_monotonic_within_a_run(tmp_path, capsys):
-    """Three queue() calls against the same customId-collided card: L-PROG (adopted) -> L-REVIEW
-    (conflicts, poisons, freezes at L-PROG) -> L-PROG (agrees with the now-frozen value). The third,
-    non-conflicting call must NOT un-poison the entry -- poisoning is monotonic for the life of a
-    run, so the card's flush PATCH stays skipped regardless of what a later call agrees with."""
-    first = _issue(1, "[KEY] issue one", assignees=("dev",))     # -> "In progress" -> L-PROG (adopted)
-    second = _issue(2, "[KEY] issue two", labels=("agent:in-review",))  # -> "In review" -> L-REVIEW (conflict)
-    third = _issue(3, "[KEY] issue three", assignees=("dev",))   # -> "In progress" -> L-PROG (matches frozen)
+    """Three issues racing the same customId, with zero URL claims of their own: pre-#75 this
+    reached queue() three times and exercised Layer 2's monotonic poisoning; post-#75 the widened
+    Layer 1 fence excludes the card entirely (a single 'claimed by 3 issue URLs' WARN) before any
+    of the three ever reaches queue() -- no Layer 2 poisoning WARN fires at all."""
+    first = _issue(1, "[KEY] issue one", assignees=("dev",))     # -> "In progress"
+    second = _issue(2, "[KEY] issue two", labels=("agent:in-review",))  # -> "In review"
+    third = _issue(3, "[KEY] issue three", assignees=("dev",))   # -> "In progress" (agrees with first)
     card = _card("500", "KEY", [])  # zero URL claims -> matched only via the customId fallback
 
     create_card_mock, patch_card_mock = _run_main_once(
         tmp_path, [first, second, third], [card], lanes=(_PROG_LANE, _REVIEW_LANE))
 
     out = capsys.readouterr().out
-    poison_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 poisoned")]
-    assert len(poison_lines) == 1, "poisoning WARN fires once, on the conflicting call only"
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 claimed by")]
+    assert len(warn_lines) == 1, "one Layer 1 WARN for the card, not one per issue"
+    assert "3 issue URLs" in warn_lines[0]
+    assert "poisoned" not in out, "Layer 1 excludes the card before Layer 2 ever sees it"
 
     create_card_mock.assert_not_called()
     patch_card_mock.assert_not_called()
 
 
 def test_same_value_repeated_laneid_ops_never_poison_the_entry(tmp_path, capsys):
-    """Two distinct issues sharing a `[KEY]` customId that both resolve to the SAME target lane must
-    NOT poison the card: repeated agreement is not conflict, and the flush PATCH still fires."""
-    first = _issue(1, "[KEY] issue one", assignees=("dev",))    # -> "In progress" -> L-PROG
-    second = _issue(2, "[KEY] issue two", assignees=("dev",))   # -> "In progress" -> L-PROG (same target)
+    """Two distinct issues sharing a `[KEY]` customId that both resolve to the SAME target lane are
+    STILL fenced by the widened Layer 1 -- unlike the pre-#75 world, lane-value agreement doesn't
+    rescue the pair, because Layer 1 fences on claimant count alone, before any lane value is
+    considered. Neither issue is synced this run."""
+    first = _issue(1, "[KEY] issue one", assignees=("dev",))    # -> "In progress"
+    second = _issue(2, "[KEY] issue two", assignees=("dev",))   # -> "In progress" (same target)
     card = _card("500", "KEY", [])
 
     create_card_mock, patch_card_mock = _run_main_once(
         tmp_path, [first, second], [card], lanes=(_PROG_LANE, _REVIEW_LANE))
 
     out = capsys.readouterr().out
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 claimed by")]
+    assert len(warn_lines) == 1
     assert "poisoned" not in out
 
     create_card_mock.assert_not_called()
-    patch_card_mock.assert_called_once()
-    assert patch_card_mock.call_args.args[2].get("id") == "500"
+    patch_card_mock.assert_not_called()
 
 
 def test_unrelated_card_and_issue_are_unaffected_by_a_poisoned_card(tmp_path, capsys):
-    """A card poisoned by a customId collision must stay local to itself: an unrelated issue/card
+    """A card fenced by a customId collision must stay local to itself: an unrelated issue/card
     pair -- matched normally by URL, no customId collision -- still gets its ordinary lane-move
     PATCH in the very same run."""
     in_progress_issue = _issue(1, "[KEY] issue one", assignees=("dev",))               # -> L-PROG
-    in_review_issue = _issue(2, "[KEY] issue two", labels=("agent:in-review",))        # -> L-REVIEW (conflict)
-    poisoned_card = _card("500", "KEY", [])
+    in_review_issue = _issue(2, "[KEY] issue two", labels=("agent:in-review",))        # -> L-REVIEW
+    fenced_card = _card("500", "KEY", [])
 
     unrelated_issue = _issue(3, "widget three", assignees=("dev",))        # -> "In progress" -> L-PROG
     unrelated_card = _card("600", "3", [unrelated_issue["url"]], lane_id="L-ELSEWHERE")
@@ -249,17 +254,18 @@ def test_unrelated_card_and_issue_are_unaffected_by_a_poisoned_card(tmp_path, ca
     create_card_mock, patch_card_mock = _run_main_once(
         tmp_path,
         [in_progress_issue, in_review_issue, unrelated_issue],
-        [poisoned_card, unrelated_card],
+        [fenced_card, unrelated_card],
         lanes=(_PROG_LANE, _REVIEW_LANE),
     )
 
     out = capsys.readouterr().out
-    poison_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 poisoned")]
-    assert len(poison_lines) == 1
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 claimed by")]
+    assert len(warn_lines) == 1
+    assert "poisoned" not in out
 
     patched_ids = [call.args[2].get("id") for call in patch_card_mock.call_args_list]
-    assert "500" not in patched_ids, "the poisoned card must never reach patch_card"
-    assert "600" in patched_ids, "an unrelated card must sync normally despite the poisoned card"
+    assert "500" not in patched_ids, "the fenced card must never reach patch_card"
+    assert "600" in patched_ids, "an unrelated card must sync normally despite the fenced card"
     create_card_mock.assert_not_called()
 
 
@@ -284,14 +290,22 @@ def test_idless_card_in_snapshot_does_not_abort_the_run(tmp_path, capsys):
     assert "600" in patched_ids, "the id-less card must not abort an unrelated card's sync"
 
 
-# --- Codex P1#2: a poisoned run must not persist merge bases for writes it deliberately skipped ----
+# --- Codex P1#2: a fenced run must not persist advanced merge bases for writes it never attempted ----
 
 def test_poisoned_run_does_not_persist_advanced_merge_bases(tmp_path):
-    """When a lane conflict poisons a card, its AgilePlace PATCH is skipped -- but sync_metadata has
-    already advanced this run's label merge base in apply mode. Persisting that base records a tag
-    write that never reached AgilePlace: on the NEXT run the unchanged AgilePlace card reads as a
-    fresh external delete, and the sync destructively removes the GitHub label to match. Across two
-    identical runs of a persistently-poisoned card, no GitHub label may ever be removed."""
+    """Originally: a Layer 2 lane conflict poisoned a card, its AgilePlace PATCH was skipped, but
+    sync_metadata had already advanced this run's label merge base in apply mode -- persisting that
+    base recorded a tag write that never reached AgilePlace, so the NEXT run's unchanged AgilePlace
+    card read as a fresh external delete and destructively removed the GitHub label to match.
+
+    Post-#75, this exact customId-collision shape (zero URL claims) is instead excluded wholesale by
+    the widened Layer 1 fence before either issue ever reaches sync_metadata/queue() at all -- which
+    would make this fixture unable to reach Layer 2 at all, and the merge-base-hold invariant it's
+    meant to pin would go completely unexercised. So, mirroring the sibling Layer 2 tests below, this
+    test forces `contested_cards` to report nothing (simulating a collision shape Layer 1 doesn't
+    catch) to reach a GENUINE Layer 2 lane-conflict poisoning and exercise the actual merge-base-hold
+    guard end to end. Across two runs of a persistently Layer-2-poisoned card, no GitHub label may
+    ever be removed."""
     first = _issue(1, "[KEY] one", assignees=("dev",), labels=("feature",))   # In progress -> L-PROG
     second = _issue(2, "[KEY] two", labels=("agent:in-review",))              # In review -> L-REVIEW (conflict)
     card = _card("500", "KEY", [], lane_id="L-ELSEWHERE")
@@ -304,7 +318,8 @@ def test_poisoned_run_does_not_persist_advanced_merge_bases(tmp_path):
 
     for _ in range(2):  # same collision twice; state from run 1 feeds run 2
         stack, _create, _patch = _mock_io([first, second], [card], lanes=(_PROG_LANE, _REVIEW_LANE))
-        with stack, patch("ghkit.edit_label", side_effect=_capture_edit_label), \
+        with stack, patch("sync.contested_cards", return_value={}), \
+                patch("ghkit.edit_label", side_effect=_capture_edit_label), \
                 patch("sync.env_config", return_value=_cfg(tmp_path)), \
                 patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
                 patch("sys.argv", ["sync.py", "--apply"]):
@@ -313,3 +328,229 @@ def test_poisoned_run_does_not_persist_advanced_merge_bases(tmp_path):
     assert removals == [], (
         "a poisoned card's skipped AgilePlace tag write must not advance the persisted merge base; "
         f"doing so caused a phantom next-run GitHub label removal: {removals}")
+
+
+# --- Review follow-up (issue #75): fencing must be a per-run defer, not a permanent blacklist -------
+
+def test_fenced_card_syncs_normally_once_the_customid_collision_resolves(tmp_path, capsys):
+    """A card excluded by the widened Layer 1 fence must be retried, not permanently poisoned: once
+    the customId collision that caused the exclusion is resolved (here, by the second issue losing
+    its shared `[KEY]` prefix), the previously-deferred issue must get its ordinary card sync on the
+    very next run. Guards against a regression that persists the fenced id (e.g. into state) or an
+    off-by-one in the exclusion set that survives across runs."""
+    first = _issue(1, "[KEY] issue one", assignees=("dev",))              # -> In progress -> L-PROG
+    second = _issue(2, "[KEY] issue two", labels=("agent:in-review",))    # -> In review (collision)
+    card = _card("500", "KEY", [], lane_id="L-ELSEWHERE")
+
+    # Run 1: zero URL claims, shared "[KEY]" customId -> fenced by Layer 1, card never touched.
+    create_card_mock, patch_card_mock = _run_main_once(
+        tmp_path, [first, second], [card], lanes=(_PROG_LANE, _REVIEW_LANE))
+    out = capsys.readouterr().out
+    assert any(line.startswith("WARN  card 500 claimed by") for line in out.splitlines())
+    patch_card_mock.assert_not_called()
+    create_card_mock.assert_not_called()
+
+    # Run 2: the collision is resolved -- issue 2 renamed off the shared "[KEY]" prefix, so its
+    # customId ("2") no longer collides with issue 1's ("KEY"). Issue 1's claim on card 500 is now
+    # unique, and it must sync normally: no more fence WARN, and its overdue lane move fires.
+    second_resolved = _issue(2, "unrelated issue two", labels=("agent:in-review",))
+    _create_card_mock2, patch_card_mock2 = _run_main_once(
+        tmp_path, [first, second_resolved], [card], lanes=(_PROG_LANE, _REVIEW_LANE))
+    out2 = capsys.readouterr().out
+    assert not any(line.startswith("WARN  card 500 claimed by") for line in out2.splitlines()), (
+        "a resolved collision must not still be fenced on the next run")
+    patched_ids = [call.args[2].get("id") for call in patch_card_mock2.call_args_list]
+    assert "500" in patched_ids, (
+        "the previously-fenced card must sync normally once its collision resolves")
+
+
+# --- Issue #75 task 3: the step-3 parent/child guard skips a Layer-2-poisoned parent card --------
+
+def test_layer2_poisoned_epic_card_gets_no_connect_or_disconnect_calls(tmp_path, capsys):
+    """Post-#75, a customId collision between two ordinary issues is fenced wholesale by the
+    widened Layer 1 fence before either ever reaches queue() -- so this test forces `contested_cards`
+    to report nothing (simulating a shape Layer 1 doesn't catch) in order to reach a genuine Layer 2
+    lane-conflict poisoning for a card that is ALSO an epic's matched parent card, with a real child
+    task to connect. Without the step-3 poison guard, the epics loop would call
+    `agileplace.connect_children` for the poisoned card despite its flush PATCH already being
+    skipped; the guard must keep BOTH sync surfaces consistent for a poisoned card."""
+    epic_a = _issue(1, "[KEY] epic one", assignees=("dev",), labels=("type:epic",))       # In progress
+    epic_b = _issue(2, "[KEY] epic two", labels=("type:epic", "agent:in-review"))         # In review (conflict)
+    task = _issue(3, "task three")
+    epic_card = _card("500", "KEY", [])  # zero URL claims -- matched only via the customId fallback
+    task_card = _card("600", "3", [task["url"]], lane_id="L-ELSEWHERE")
+
+    connect_children_mock = Mock()
+    disconnect_children_mock = Mock()
+
+    stack, create_card_mock, patch_card_mock = _mock_io(
+        [epic_a, epic_b, task], [epic_card, task_card], lanes=(_PROG_LANE, _REVIEW_LANE))
+    with stack, \
+            patch("sync.contested_cards", return_value={}), \
+            patch("ghkit.sub_issue_numbers", return_value=[task["number"]]), \
+            patch("agileplace.card_child_ids", return_value=frozenset()), \
+            patch("agileplace.connect_children", connect_children_mock), \
+            patch("agileplace.disconnect_children", disconnect_children_mock), \
+            patch("sync.env_config", return_value=_cfg(tmp_path)), \
+            patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+            patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    out = capsys.readouterr().out
+    assert "poisoned: conflicting /laneId ops" in out, "the fixture must genuinely reach Layer 2"
+    assert any("skipping child connections" in line and "500" in line
+               for line in out.splitlines()), "the poisoned parent must be named in a skip WARN"
+
+    connect_children_mock.assert_not_called()
+    disconnect_children_mock.assert_not_called()
+
+    # The pre-existing Layer 2 flush skip still holds: no patch for the poisoned card.
+    patched_ids = [call.args[2].get("id") for call in patch_card_mock.call_args_list]
+    assert "500" not in patched_ids
+    create_card_mock.assert_not_called()
+
+
+# --- Issue #75 task 5: a satisfied-in-place claim + a differing customId claim is fenced, not
+#     silently overwritten ---------------------------------------------------------------------
+
+def test_satisfied_in_place_claim_plus_differing_lane_claim_is_fenced_not_silently_overwritten(
+        tmp_path, capsys):
+    """The concrete bug this issue exists to close: issue1's own desired lane already matches the
+    card's CURRENT lane, so its lane-move body queues NO op at all (`_apply_lane_move` only calls
+    `queue()` when `current not in acceptable`) -- while issue2, sharing the same `[KEY]` customId
+    with zero URL claims of its own, wants a genuinely different lane and so queues exactly one op.
+
+    Pre-#75 this was worse than a Layer-2 lane conflict: Layer 1 (URL-only) never saw either claim,
+    and Layer 2's queue() conflict check needs >= 2 *competing* ops on the same card id to fire --
+    with only ONE op ever queued (issue1 contributes none), queue() sees no conflict at all, so the
+    card would be silently PATCHed to issue2's target lane as if issue1 never claimed it, with no
+    WARN anywhere. Post-#75 the widened Layer 1 fence excludes the card on claimant count alone,
+    before either issue ever reaches queue() -- regardless of whether their ops would collide.
+
+    Fencing must be a *defer*, not a poison: an unrelated card syncs normally in the same run, and
+    the run still reaches save_state so `.sync-state.json` persists for the rest of the run."""
+    in_place_issue = _issue(1, "[KEY] issue one", assignees=("dev",))              # -> In progress
+    moving_issue = _issue(2, "[KEY] issue two", labels=("agent:in-review",))       # -> In review
+    # Card already sits in L-PROG: in_place_issue's own lane move queues no op (already acceptable);
+    # only moving_issue's op would ever reach queue() pre-#75. Zero URL claims -> customId-only match.
+    fenced_card = _card("500", "KEY", [], lane_id="L-PROG")
+
+    unrelated_issue = _issue(3, "widget three", assignees=("dev",))               # -> In progress -> L-PROG
+    unrelated_card = _card("600", "3", [unrelated_issue["url"]], lane_id="L-ELSEWHERE")
+
+    create_card_mock, patch_card_mock = _run_main_once(
+        tmp_path,
+        [in_place_issue, moving_issue, unrelated_issue],
+        [fenced_card, unrelated_card],
+        lanes=(_PROG_LANE, _REVIEW_LANE),
+    )
+
+    out = capsys.readouterr().out
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 claimed by")]
+    assert len(warn_lines) == 1, "the fence must fire even though only one of the two issues has an op"
+    assert "2 issue URLs" in warn_lines[0]
+    assert in_place_issue["url"] in warn_lines[0] and moving_issue["url"] in warn_lines[0]
+
+    # The fenced card is never touched -- no silent overwrite to moving_issue's target lane.
+    patched_ids = [call.args[2].get("id") for call in patch_card_mock.call_args_list]
+    assert "500" not in patched_ids, "a satisfied-in-place claim must not let the other claim win silently"
+    create_card_mock.assert_not_called()
+
+    # Fencing stays local: the unrelated card still gets its ordinary lane-move PATCH this run.
+    assert "600" in patched_ids, "an unrelated card must sync normally despite the fenced card"
+
+    # Fencing is a defer, not a poison: the run completes and persists state for the rest of the run.
+    assert (tmp_path / ".sync-state.json").exists(), \
+        "a fenced card must not abort save_state for the rest of the run"
+
+
+# --- Issue #75 task 3 (sibling case): a clean parent's poisoned CHILD card is dropped, not
+#     just a poisoned parent -----------------------------------------------------------------------
+
+def test_layer2_poisoned_child_card_is_dropped_from_connect_children(tmp_path, capsys):
+    """The epic's own card (500) is clean -- URL-matched, no lane conflict of its own -- but its
+    desired child card (700) is poisoned by a genuine Layer 2 lane conflict between two OTHER
+    issues (task1/task2) that collide on the same customId with zero URL claims of their own.
+    Without the child-poison filter in the epics loop, connect_children would still be called with
+    the poisoned child id included, because the parent-poisoned guard above never fires for this
+    shape (the parent card 500 is never poisoned at all)."""
+    epic = _issue(1, "epic one", labels=("type:epic",))
+    task1 = _issue(2, "[KEY] task one", assignees=("dev",))              # -> In progress
+    task2 = _issue(3, "[KEY] task two", labels=("agent:in-review",))     # -> In review (conflict)
+    epic_card = _card("500", "1", [epic["url"]], lane_id="L-ELSEWHERE")
+    poisoned_task_card = _card("700", "KEY", [])  # zero URL claims -- matched only via customId
+
+    connect_children_mock = Mock()
+    disconnect_children_mock = Mock()
+
+    stack, create_card_mock, patch_card_mock = _mock_io(
+        [epic, task1, task2], [epic_card, poisoned_task_card], lanes=(_PROG_LANE, _REVIEW_LANE))
+    with stack, \
+            patch("sync.contested_cards", return_value={}), \
+            patch("ghkit.sub_issue_numbers", return_value=[task1["number"], task2["number"]]), \
+            patch("agileplace.card_child_ids", return_value=frozenset()), \
+            patch("agileplace.connect_children", connect_children_mock), \
+            patch("agileplace.disconnect_children", disconnect_children_mock), \
+            patch("sync.env_config", return_value=_cfg(tmp_path)), \
+            patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+            patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    out = capsys.readouterr().out
+    assert "poisoned: conflicting /laneId ops" in out, "the fixture must genuinely reach Layer 2"
+    assert any("dropping poisoned child card id(s)" in line for line in out.splitlines()), (
+        "the poisoned child id must be dropped from connect/disconnect even though the parent "
+        "card is clean")
+
+    connect_children_mock.assert_not_called()
+    disconnect_children_mock.assert_not_called()
+
+    # The poisoned child card never reaches patch_card either (pre-existing Layer 2 flush skip),
+    # while the epic's own clean card is untouched by this invariant.
+    patched_ids = [call.args[2].get("id") for call in patch_card_mock.call_args_list]
+    assert "700" not in patched_ids
+    create_card_mock.assert_not_called()
+
+
+# --- Issue #75 task 4: the step-4 dependency guard skips a Layer-2-poisoned card ------------------
+
+def test_layer2_poisoned_card_gets_no_dependency_writes(tmp_path, capsys):
+    """Post-#75, a card poisoned by Layer 2's lane-conflict check must also skip step 4's
+    dependency sync entirely -- not just step 3's child connections (task 3) and step 5's flush
+    PATCH. Forces `contested_cards` to report nothing (Layer 1 doesn't catch this shape) to reach
+    a genuine Layer 2 poisoning on card 500, which is ALSO blocked-by a real GitHub edge onto task
+    card 600 -- without the step-4 poison guard, sync_dependencies would still call
+    agileplace.create_dependencies for the poisoned card's desired edge."""
+    first = _issue(1, "[KEY] issue one", assignees=("dev",))            # -> In progress
+    second = _issue(2, "[KEY] issue two", labels=("agent:in-review",))  # -> In review (conflict)
+    task = _issue(3, "task three")
+    poisoned_card = _card("500", "KEY", [])  # zero URL claims -- matched only via the customId fallback
+    task_card = _card("600", "3", [task["url"]], lane_id="L-ELSEWHERE")
+
+    create_dependencies_mock = Mock()
+    delete_dependencies_mock = Mock()
+
+    stack, create_card_mock, patch_card_mock = _mock_io(
+        [first, second, task], [poisoned_card, task_card], lanes=(_PROG_LANE, _REVIEW_LANE))
+    with stack, \
+            patch("sync.contested_cards", return_value={}), \
+            patch("ghkit.blocked_by_map", return_value={1: [3]}), \
+            patch("agileplace.create_dependencies", create_dependencies_mock), \
+            patch("agileplace.delete_dependencies", delete_dependencies_mock), \
+            patch("sync.env_config", return_value=_cfg(tmp_path)), \
+            patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+            patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    out = capsys.readouterr().out
+    assert "poisoned: conflicting /laneId ops" in out, "the fixture must genuinely reach Layer 2"
+    assert any("skipping dependency sync" in line and "500" in line
+               for line in out.splitlines()), "the poisoned card must be named in a skip WARN"
+
+    create_dependencies_mock.assert_not_called()
+    delete_dependencies_mock.assert_not_called()
+
+    # The pre-existing Layer 2 flush skip still holds: no patch for the poisoned card.
+    patched_ids = [call.args[2].get("id") for call in patch_card_mock.call_args_list]
+    assert "500" not in patched_ids
+    create_card_mock.assert_not_called()

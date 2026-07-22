@@ -138,7 +138,7 @@ def test_additions_are_unaffected_by_a_narrowed_removal_authority_set():
                side_effect=lambda cfg, apply, cid, ids: calls["delete"].append((cid, sorted(ids)))):
         # removal_authority_card_ids excludes C2 entirely -- the add must still happen.
         sync_dependencies({}, True, issues, {1: [2]}, cards, lambda i: cards.get(i["number"]),
-                          removal_authority_card_ids={"C1"})
+                          removal_authority_card_ids={"C1"}, poisoned=frozenset())
 
     assert calls["create"] == [("C1", ["C2"])]
     assert calls["delete"] == []

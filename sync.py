@@ -19,13 +19,15 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping
+from typing import NamedTuple
 
 import agileplace
 import ghkit
 import ghproject
 import intake
 import vetting_latch
-from card_coherence import contested_cards, laneid_op_value, lane_conflict
+from card_coherence import (contested_cards, fence_run_indices, filter_poisoned_edges,
+                            laneid_op_value, lane_conflict, poisoned_card_ids, same_card)
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
 from stages import (epic_key_for_task, is_retired_issue, issue_custom_id,
@@ -72,6 +74,59 @@ def save_state(state: dict) -> None:
             os.unlink(tmp)
 
 
+class ProjectV2Status(NamedTuple):
+    """One run's GitHub Projects v2 read, already resolved to the tri-state main() needs."""
+    project_items: dict
+    project_status: dict
+    field_meta: dict | None
+    project_read_failed: bool
+    move_lanes: bool
+
+
+def _resolve_project_v2_status(cfg: dict) -> ProjectV2Status:
+    """Projects v2: tri-state. A configured-but-FAILED read must not silently fall back and
+    mass-move lanes -- and neither may a technically-successful read that yields zero recognized
+    statuses despite the Project actually having issue-linked items (misspelled
+    GH_PROJECT_STATUS_FIELD, or a gh output-shape change): that is the same mass-move reached
+    through a different door (issue #5). Prints the one summary/WARN line this run's read earned;
+    not pure, but self-contained (reads only `cfg` via `ghproject`, mutates nothing)."""
+    if ghproject.configured(cfg):
+        pit = ghproject.items(cfg)
+        call_failed = pit is None
+        project_items = pit or {}
+    else:
+        call_failed, project_items = False, {}
+    project_status = {u: v["status"] for u, v in project_items.items() if v.get("status")}
+    zero_status_despite_items = (ghproject.configured(cfg) and not call_failed
+                                  and bool(project_items) and not project_status)
+    project_read_failed = call_failed or zero_status_despite_items
+    field_meta = ghproject.field_meta(cfg) if (ghproject.configured(cfg) and not project_read_failed) else None
+    if field_meta and not (field_meta.get("start_field_id") or field_meta.get("target_field_id")):
+        field_meta = None
+    date_read_failed = False
+    if field_meta:
+        dated_items = ghproject.hydrate_item_dates(cfg, project_items, field_meta)
+        if dated_items is None:
+            date_read_failed = True
+            field_meta = None
+        else:
+            project_items = dated_items
+    if zero_status_despite_items:
+        print(f"WARN  Projects v2 has {len(project_items)} issue item(s) but none carry a recognized "
+              f"'{cfg['gh_project']['status_field']}' Status -- check GH_PROJECT_STATUS_FIELD; "
+              f"leaving active-issue lanes untouched this run")
+    elif project_read_failed:
+        print("WARN  Projects v2 read FAILED -- leaving active-issue lanes untouched this run "
+              "(Status is the source of truth)")
+    elif ghproject.configured(cfg):
+        print(f"projects v2: {len(project_status)} items carry Status{'; dates enabled' if field_meta else ''}")
+    if date_read_failed:
+        print("WARN  Projects v2 date field-value read FAILED -- skipping all date sync this run")
+    return ProjectV2Status(project_items=project_items, project_status=project_status,
+                           field_meta=field_meta, project_read_failed=project_read_failed,
+                           move_lanes=not project_read_failed)
+
+
 def _epic_task_resolution(cfg: dict, epic: dict, by_key: dict) -> tuple[list[int], bool]:
     """Return ``(numbers, authoritative)`` for an epic's tasks.
 
@@ -109,6 +164,54 @@ def _child_connection_changes(desired: set[str], existing: set[str], managed: se
     adds = sorted(desired - existing)
     removes = sorted((existing & managed) - desired) if authoritative else []
     return adds, removes
+
+
+def sync_child_connections(cfg: dict, apply: bool, epics: list[dict], card_for, by_key: dict,
+                           by_number: dict, poisoned: frozenset[str],
+                           managed_card_ids: set[str]) -> None:
+    """Mirror GitHub sub-issues as native AgilePlace parent/child card connections (step 3):
+    authoritative native reads reconcile exactly (additions and removals); the [KEY] title-key
+    fallback is add-only, because a heuristic must never authorize destructive reconciliation.
+
+    Issue #75: a parent card poisoned by Layer 2's lane-conflict check (queue()) already has its
+    flush PATCH skipped -- child connections must stay consistent with that, never writing native
+    connect/disconnect calls against a card whose own state this run refused to persist. A poisoned
+    CHILD card must never be connected/disconnected either -- filter the already-computed
+    adds/removes (see filter_poisoned_edges) rather than pre-filtering `desired`, so a
+    still-linked-but-poisoned child never gets misread as a stale edge and queued for removal."""
+    for epic in epics:
+        parent = card_for(epic)
+        if not parent or not parent.get("id"):
+            continue
+        key = issue_custom_id(epic)
+        if str(parent["id"]) in poisoned:
+            print(f"WARN  [{key}] skipping child connections -- parent card {parent['id']} is poisoned")
+            continue
+        task_numbers, authoritative = _epic_task_resolution(cfg, epic, by_key)
+        task_issues = [by_number[number] for number in task_numbers if number in by_number]
+        desired = {str(card["id"])
+                   for issue in task_issues
+                   if (card := card_for(issue)) and card.get("id")}
+        # A plan-only parent has not reached AgilePlace yet, so its authoritative server-side child
+        # set is empty. Never send its synthetic identity across a real read boundary.
+        existing_snapshot = (
+            frozenset()
+            if parent.get("_planOnly")
+            else agileplace.card_child_ids(cfg, str(parent["id"]))
+        )
+        existing = set(existing_snapshot or ())
+        adds, removes = _child_connection_changes(
+            desired, existing, managed_card_ids,
+            authoritative=authoritative and existing_snapshot is not None)
+        adds, removes, dropped = filter_poisoned_edges(adds, removes, poisoned)
+        if dropped:
+            print(f"WARN  [{key}] dropping poisoned child card id(s) from connect/disconnect")
+        if adds:
+            agileplace.connect_children(cfg, apply, str(parent["id"]), adds)
+            print(f"{'link ' if apply else 'DRY  '} [{key}] +{len(adds)} child card(s)")
+        if removes:
+            agileplace.disconnect_children(cfg, apply, str(parent["id"]), removes)
+            print(f"{'unlink' if apply else 'DRY  '} [{key}] -{len(removes)} child card(s)")
 
 
 def _dependency_changes(desired: set[str], current: set[str],
@@ -167,7 +270,8 @@ def _removal_authority_card_ids(syncable_issues: list[dict], card_by_url: dict[s
 
 def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by: dict,
                       blocker_card_by_number: dict, card_for,
-                      removal_authority_card_ids: set[str]) -> None:
+                      removal_authority_card_ids: set[str],
+                      poisoned: frozenset[str]) -> None:
     """Mirror GitHub blocked-by edges as native AgilePlace dependencies (issue #57).
 
     EVERY edge is mirrored, including edges whose blocker is Done -- the edge is structural, and
@@ -177,16 +281,24 @@ def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by:
     behavior is unconfirmed live, so nothing is ever re-created against unknown state.
 
     Dependency REMOVALS additionally require the target card to carry strong (URL-matched)
-    identity -- a customId-only match never confers removal authority (issue #60)."""
+    identity -- a customId-only match never confers removal authority (issue #60).
+
+    Issue #75: a card poisoned by Layer 2's lane-conflict check (queue()) never gets its own
+    dependency edges touched, and a poisoned BLOCKER card is filtered out of the already-computed
+    adds/removes (never pre-filtered out of `desired` -- doing so would make a still-linked-but-
+    poisoned blocker look like a stale edge and get queued into `removes`)."""
     for issue in syncable_issues:
         card = card_for(issue)
         if not card or not card.get("id"):
             continue
+        cid = str(card["id"])
+        key = issue_custom_id(issue)
+        if cid in poisoned:
+            print(f"WARN  [{key}] skipping dependency sync -- card {cid} is poisoned")
+            continue
         desired = {str(blocker_card_by_number[number]["id"])
                    for number in blocked_by.get(issue["number"], [])
                    if number in blocker_card_by_number}
-        cid = str(card["id"])
-        key = issue_custom_id(issue)
         if card.get("_planOnly"):
             current = set()  # a fresh card has no server-side dependencies; never read a plan-only id
         else:
@@ -196,6 +308,9 @@ def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by:
                 continue
             current = agileplace.incoming_dependency_ids(entries)
         adds, removes = _dependency_changes(desired, current, removal_authority_card_ids)
+        adds, removes, dropped = filter_poisoned_edges(adds, removes, poisoned)
+        if dropped:
+            print(f"WARN  [{key}] dropping poisoned card id(s) from dependency writes")
         if adds:
             agileplace.create_dependencies(cfg, apply, cid, adds)
             print(f"{'dep   ' if apply else 'DRY  '} [{key}] +{len(adds)} dependency(ies)")
@@ -212,16 +327,6 @@ def issue_card_title(issue: dict) -> str:
     return t
 
 
-def _same_card(left: dict | None, right: dict | None) -> bool:
-    if not left or not right:
-        return False
-    if left is right:
-        return True
-    left_id = str(left.get("id") or "")
-    right_id = str(right.get("id") or "")
-    return bool(left_id) and left_id == right_id
-
-
 def _matching_card(issue: dict, card_by_url: dict, card_by_cid: dict) -> dict | None:
     """Match by URL first, then customId, refusing an ambiguous cross-card match."""
     custom_id = issue_custom_id(issue)
@@ -230,7 +335,7 @@ def _matching_card(issue: dict, card_by_url: dict, card_by_cid: dict) -> dict | 
     if url_match and custom_id_match:
         url_card_id = str(url_match.get("id") or "")
         custom_id_card_id = str(custom_id_match.get("id") or "")
-        if not _same_card(url_match, custom_id_match):
+        if not same_card(url_match, custom_id_match):
             raise SystemExit(
                 f"ERROR: GitHub issue {issue['url']} matches AgilePlace card {url_card_id or '<unknown>'} "
                 f"by URL but card {custom_id_card_id or '<unknown>'} by customId {custom_id!r}. "
@@ -256,7 +361,7 @@ def _reconciled_custom_id_index(issues: list[dict], card_by_url: dict,
         _matching_card(issue, card_by_url, reconciled)
         desired_custom_id = issue_custom_id(issue)
         current_custom_id = agileplace.custom_id_value(url_match)
-        if current_custom_id and _same_card(reconciled.get(current_custom_id), url_match):
+        if current_custom_id and same_card(reconciled.get(current_custom_id), url_match):
             del reconciled[current_custom_id]
             if current_custom_id != desired_custom_id:
                 released.add(current_custom_id)
@@ -359,6 +464,31 @@ def _retire_card(issue: dict, card: dict, lanes: list, stage_map: dict | None,
         queue(card, ops, f"retire:{reason}")
     action = "; ".join(actions) or "no card changes available"
     print(f"{'retire' if apply else 'DRY   retire'} [{key}] {action} ({reason})")
+
+
+def _retire_matched_issues(retired_issues: list[dict], retired_card_by_url: dict[str, dict],
+                           all_card_by_cid: dict[str, dict], contested: dict[str, set[str]],
+                           contested_urls: frozenset[str], lanes: list, stage_map: dict | None,
+                           apply: bool, queue) -> None:
+    """Retired issues are dependency facts, not active work. Existing cards are matched by their
+    authoritative GitHub URL only: a customId may have been reused and must never make us retire
+    another issue's card. Retirement is independent of Projects/open-PR read health because the
+    CLOSED reason itself is the authoritative signal.
+
+    Issue #70/#75 Layer 1: a contested card is deferred wholesale here too, never partially
+    retired -- and a customId match against an already-contested card is not a distinct finding
+    (Layer 1 already printed the "card N claimed by K issue URLs" WARN for that card id), so this
+    never warns twice for the same card."""
+    for issue in retired_issues:
+        if issue["url"] in contested_urls:
+            continue
+        card = retired_card_by_url.get(issue["url"])
+        cid_card = all_card_by_cid.get(issue_custom_id(issue))
+        if card:
+            _retire_card(issue, card, lanes, stage_map, apply, queue)
+        elif cid_card and str(cid_card.get("id") or "") not in contested:
+            print(f"WARN  [{issue_custom_id(issue)}] retired issue has only a customId card match; "
+                  "refusing to retire without the GitHub external-link URL")
 
 
 def _label_set(labels, ignore: frozenset) -> set[str]:
@@ -538,6 +668,44 @@ def _created_card_snapshot(cfg: dict, created: Mapping) -> Mapping:
     return fresh
 
 
+def _ensure_cards_for_syncable_issues(cfg: dict, apply: bool, syncable_issues: list[dict], card_for,
+                                      pending_custom_id_releases: frozenset[str], project_status: dict,
+                                      project_items: dict, project_read_failed: bool, lanes: list,
+                                      stage_map: dict | None, card_by_url: dict[str, dict],
+                                      card_by_cid: dict[str, dict]) -> None:
+    """Step 1: ensure a card exists for every syncable active issue that doesn't have one yet.
+
+    Mutates `card_by_url`/`card_by_cid` IN PLACE to register each freshly created card under its
+    issue's url/customId, the same run-scoped accumulator convention `queue()` uses for `card_ops` --
+    steps 2-4 close over these SAME dict objects via `card_for()`, so a card created here is visible
+    to them immediately, with no second index-rebuild pass. Dry-run creates carry an obvious
+    plan-only id that is indexed the same way; dry-run state is never saved, so that identity can't
+    escape this run."""
+    for issue in syncable_issues:
+        if card_for(issue):
+            continue
+        key = issue_custom_id(issue)
+        if key in pending_custom_id_releases:
+            print(f"WARN  deferring card [{key}] until the renamed customId is released by a prior run")
+            continue
+        # informational only when the read failed
+        stage = resolve_issue_stage(issue, project_status, project_items, stage_map)
+        lane = None
+        if not project_read_failed:
+            lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", stage_map)
+        created = agileplace.create_card(cfg, apply, issue_card_title(issue), key, issue["url"],
+                                         lane["id"] if lane else None)
+        if apply and created.get("id"):
+            created = _created_card_snapshot(cfg, created)
+        if created.get("id"):
+            card_by_url[issue["url"]] = created
+            if key:
+                card_by_cid[key] = created
+        lane_note = (f" lane={agileplace.lane_title(lane)}" if lane
+                     else " lane=deferred (Projects v2 read failed)" if project_read_failed else "")
+        print(f"{'made ' if apply else 'DRY  '} card [{key}] stage={stage}{lane_note}")
+
+
 def _run_intake_promotion(cfg: dict, apply: bool, cards: list, lanes: list, stage_map: dict | None,
                           issues: list[dict], card_by_url: dict, card_by_cid: dict
                           ) -> intake.IntakeSummary:
@@ -608,43 +776,9 @@ def main() -> None:
     state = load_state(target, str(cfg["board_id"])) if online else {"issues": {}}
     issues_state = state.setdefault("issues", {})
 
-    # Projects v2: tri-state. A configured-but-FAILED read must not silently fall back and mass-move
-    # lanes -- and neither may a technically-successful read that yields zero recognized statuses
-    # despite the Project actually having issue-linked items (misspelled GH_PROJECT_STATUS_FIELD, or a
-    # gh output-shape change): that is the same mass-move reached through a different door (issue #5).
-    if ghproject.configured(cfg):
-        pit = ghproject.items(cfg)
-        call_failed = pit is None
-        project_items = pit or {}
-    else:
-        call_failed, project_items = False, {}
-    project_status = {u: v["status"] for u, v in project_items.items() if v.get("status")}
-    zero_status_despite_items = (ghproject.configured(cfg) and not call_failed
-                                  and bool(project_items) and not project_status)
-    project_read_failed = call_failed or zero_status_despite_items
-    field_meta = ghproject.field_meta(cfg) if (ghproject.configured(cfg) and not project_read_failed) else None
-    if field_meta and not (field_meta.get("start_field_id") or field_meta.get("target_field_id")):
-        field_meta = None
-    date_read_failed = False
-    if field_meta:
-        dated_items = ghproject.hydrate_item_dates(cfg, project_items, field_meta)
-        if dated_items is None:
-            date_read_failed = True
-            field_meta = None
-        else:
-            project_items = dated_items
-    move_lanes = not project_read_failed
-    if zero_status_despite_items:
-        print(f"WARN  Projects v2 has {len(project_items)} issue item(s) but none carry a recognized "
-              f"'{cfg['gh_project']['status_field']}' Status -- check GH_PROJECT_STATUS_FIELD; "
-              f"leaving active-issue lanes untouched this run")
-    elif project_read_failed:
-        print("WARN  Projects v2 read FAILED -- leaving active-issue lanes untouched this run "
-              "(Status is the source of truth)")
-    elif ghproject.configured(cfg):
-        print(f"projects v2: {len(project_status)} items carry Status{'; dates enabled' if field_meta else ''}")
-    if date_read_failed:
-        print("WARN  Projects v2 date field-value read FAILED -- skipping all date sync this run")
+    pv2 = _resolve_project_v2_status(cfg)
+    project_items, project_status = pv2.project_items, pv2.project_status
+    field_meta, project_read_failed, move_lanes = pv2.field_meta, pv2.project_read_failed, pv2.move_lanes
 
     lanes = agileplace.board_layout(cfg) if online else []
     cards = agileplace.list_cards(cfg) if online else []
@@ -658,69 +792,24 @@ def main() -> None:
         if cid:
             all_card_by_cid[cid] = card
 
-    # Issue #70 Layer 1: before any card is touched, detect this run's issue URLs that don't
-    # resolve 1:1 onto AgilePlace cards (>= 2 distinct issue URLs claiming the same card id) and
-    # exclude those cards from every match/queue path this run, rather than risk one issue's sync
-    # clobbering another's.
-    contested = contested_cards(active_issues + retired_issues, all_card_by_url)
-    contested_urls = {u for urls in contested.values() for u in urls}
-    for cid, urls in sorted(contested.items()):
-        print(f"WARN  card {cid} claimed by {len(urls)} issue URLs, deferring: {sorted(urls)}")
-
-    retired_card_by_url = {
-        issue["url"]: all_card_by_url[issue["url"]]
-        for issue in retired_issues
-        if issue["url"] in all_card_by_url and issue["url"] not in contested_urls
-    }
-    retired_cards = tuple(retired_card_by_url.values())
-
-    def reserved_for_retirement(card):
-        return any(card is retired or _same_card(card, retired) for retired in retired_cards)
-
-    retired_card_by_cid = {
-        agileplace.custom_id_value(card): card
-        for card in retired_cards if agileplace.custom_id_value(card)
-    }
-    card_by_url = {
-        url: card for url, card in all_card_by_url.items()
-        if not reserved_for_retirement(card) and url not in contested_urls
-    }
-    card_by_cid = {
-        # `cid` here is the card's customId (the comprehension's loop var), NOT its id -- `contested`
-        # is keyed by card id, so the predicate must test the card's own id, never the loop var.
-        # `card.get("id") or ""` (not `card["id"]`): a partial, id-less payload is never a contested
-        # id ("" is never a `contested` key), so it survives the filter and is deferred by the
-        # downstream `card.get("id")` guards rather than KeyError-ing the whole run.
-        cid: card for cid, card in all_card_by_cid.items()
-        if not reserved_for_retirement(card) and str(card.get("id") or "") not in contested
-    }
-
-    def retirement_reservation(issue):
-        url_card = all_card_by_url.get(issue["url"])
-        if url_card and reserved_for_retirement(url_card):
-            return "external-link URL", url_card
-        custom_id_card = retired_card_by_cid.get(issue_custom_id(issue))
-        if custom_id_card:
-            return "customId", custom_id_card
-        return None
-
-    active_reservations = {
-        issue["url"]: reservation
-        for issue in active_issues if (reservation := retirement_reservation(issue))
-    }
-    syncable_issues = [
-        issue for issue in active_issues
-        if issue["url"] not in active_reservations and issue["url"] not in contested_urls
-    ]
-    for issue in active_issues:
-        reservation = active_reservations.get(issue["url"])
-        if reservation:
-            kind, card = reservation
-            print(f"WARN  deferring active card [{issue_custom_id(issue)}]: {kind} is held by "
-                  f"retired card {card.get('id') or '<unknown>'}")
+    # Issue #70/#75 Layer 1: before any card is touched, detect this run's issues that don't
+    # resolve 1:1 onto AgilePlace cards (>= 2 distinct issues claiming the same card id, via
+    # either the URL or the customId fallback match path) and exclude those cards from every
+    # match/queue path this run, rather than risk one issue's sync clobbering another's. The
+    # call-site wiring built on top of `contested` lives in card_coherence.fence_run_indices --
+    # see that module's docstring for why (and why `contested_cards` is still called here, not
+    # there).
+    contested = contested_cards(active_issues + retired_issues, all_card_by_url, all_card_by_cid)
+    fenced = fence_run_indices(contested, active_issues, retired_issues, all_card_by_url, all_card_by_cid)
+    for line in fenced.warnings:
+        print(line)
+    contested_urls = fenced.contested_urls
+    retired_card_by_url = fenced.retired_card_by_url
+    card_by_url = fenced.card_by_url
+    syncable_issues = fenced.syncable_issues
 
     card_by_cid, pending_custom_id_releases = _reconciled_custom_id_index(
-        syncable_issues, card_by_url, card_by_cid)
+        syncable_issues, card_by_url, fenced.card_by_cid)
 
     _run_intake_promotion(cfg, apply, cards, lanes, smap, issues, card_by_url, card_by_cid)
 
@@ -751,51 +840,14 @@ def main() -> None:
         entry["ops"].extend(ops)
         entry["notes"].append(note)
 
-    # Retired issues are dependency facts, not active work. Existing cards are matched by their
-    # authoritative GitHub URL only: a customId may have been reused and must never make us retire
-    # another issue's card. Retirement is independent of Projects/open-PR read health because the
-    # CLOSED reason itself is the authoritative signal.
-    for issue in retired_issues:
-        if issue["url"] in contested_urls:
-            continue  # Layer 1: contested cards are deferred wholesale, not partially retired
-        card = retired_card_by_url.get(issue["url"])
-        cid_card = all_card_by_cid.get(issue_custom_id(issue))
-        if card:
-            _retire_card(issue, card, lanes, smap, apply, queue)
-        elif cid_card and str(cid_card.get("id") or "") not in contested:
-            # A customId match against an already-contested card is not a distinct finding --
-            # Layer 1 already printed the "card N claimed by K issue URLs" WARN for that card id;
-            # warning again here under a different message would duplicate it for the same card.
-            print(f"WARN  [{issue_custom_id(issue)}] retired issue has only a customId card match; "
-                  "refusing to retire without the GitHub external-link URL")
+    # Retired issues (see _retire_matched_issues for the full contract).
+    _retire_matched_issues(retired_issues, retired_card_by_url, all_card_by_cid, contested,
+                           contested_urls, lanes, smap, apply, queue)
 
-    # 1) ensure a card per active issue
-    for issue in syncable_issues:
-        if card_for(issue):
-            continue
-        key = issue_custom_id(issue)
-        if key in pending_custom_id_releases:
-            print(f"WARN  deferring card [{key}] until the renamed customId is released by a prior run")
-            continue
-        # informational only when the read failed
-        stage = resolve_issue_stage(issue, project_status, project_items, smap)
-        lane = None
-        if not project_read_failed:
-            lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", smap)
-        created = agileplace.create_card(cfg, apply, issue_card_title(issue), key, issue["url"],
-                                         lane["id"] if lane else None)
-        if apply and created.get("id"):
-            created = _created_card_snapshot(cfg, created)
-        # Real creates carry a server id; dry creates carry an obvious plan-only id. Index either
-        # snapshot so metadata, hierarchy, dependency, and batched patch planning stay in parity.
-        # Dry-run state is never saved, so the plan-only identity cannot escape this run.
-        if created.get("id"):
-            card_by_url[issue["url"]] = created
-            if key:
-                card_by_cid[key] = created
-        lane_note = (f" lane={agileplace.lane_title(lane)}" if lane
-                     else " lane=deferred (Projects v2 read failed)" if project_read_failed else "")
-        print(f"{'made ' if apply else 'DRY  '} card [{key}] stage={stage}{lane_note}")
+    # 1) ensure a card per active issue (see _ensure_cards_for_syncable_issues).
+    _ensure_cards_for_syncable_issues(cfg, apply, syncable_issues, card_for,
+                                      pending_custom_id_releases, project_status, project_items,
+                                      project_read_failed, lanes, smap, card_by_url, card_by_cid)
 
     # 2) per active issue: base reset if card changed; lane; metadata; dates
     for issue in syncable_issues:
@@ -837,36 +889,10 @@ def main() -> None:
         if field_meta:
             sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue)
 
-    # 3) parent/child connections: authoritative native reads reconcile exactly; title-key fallback
-    # is add-only because a heuristic must never authorize destructive reconciliation.
+    # 3) parent/child connections (see sync_child_connections for the full contract).
+    poisoned = poisoned_card_ids(card_ops)
     managed_card_ids = _managed_card_ids(syncable_issues, card_for, retired_card_by_url)
-    for epic in epics:
-        parent = card_for(epic)
-        if not parent or not parent.get("id"):
-            continue
-        key = issue_custom_id(epic)
-        task_numbers, authoritative = _epic_task_resolution(cfg, epic, by_key)
-        task_issues = [by_number[number] for number in task_numbers if number in by_number]
-        desired = {str(card["id"])
-                   for issue in task_issues
-                   if (card := card_for(issue)) and card.get("id")}
-        # A plan-only parent has not reached AgilePlace yet, so its authoritative server-side child
-        # set is empty. Never send its synthetic identity across a real read boundary.
-        existing_snapshot = (
-            frozenset()
-            if parent.get("_planOnly")
-            else agileplace.card_child_ids(cfg, str(parent["id"]))
-        )
-        existing = set(existing_snapshot or ())
-        adds, removes = _child_connection_changes(
-            desired, existing, managed_card_ids,
-            authoritative=authoritative and existing_snapshot is not None)
-        if adds:
-            agileplace.connect_children(cfg, apply, str(parent["id"]), adds)
-            print(f"{'link ' if apply else 'DRY  '} [{key}] +{len(adds)} child card(s)")
-        if removes:
-            agileplace.disconnect_children(cfg, apply, str(parent["id"]), removes)
-            print(f"{'unlink' if apply else 'DRY  '} [{key}] -{len(removes)} child card(s)")
+    sync_child_connections(cfg, apply, epics, card_for, by_key, by_number, poisoned, managed_card_ids)
 
     # 4) GitHub blocked-by edges -> native card dependencies (issue #57) -- all edges, managed
     # pairs only, retired Done blockers resolving through their URL-owned cards. Skip entirely
@@ -884,7 +910,8 @@ def main() -> None:
         sync_dependencies(cfg, apply, syncable_issues, blocked_by,
                           _blocker_cards(by_number, card_for, retired_issues, retired_card_by_url),
                           card_for,
-                          _removal_authority_card_ids(syncable_issues, card_by_url, retired_card_by_url))
+                          _removal_authority_card_ids(syncable_issues, card_by_url, retired_card_by_url),
+                          poisoned)
 
     # 5) flush: ONE versioned PATCH per card (optimistic concurrency)
     for entry in card_ops.values():
