@@ -685,3 +685,82 @@ def test_render_inline_html_reinsert_never_raises_on_out_of_range_placeholder_pa
     # how contrived the input.
     result = _render_inline_html("\x009\x00 no real code span here")
     assert isinstance(result, str)
+
+
+# =====================================================================================
+# Round-trip fixed point -- combined document (heading + nested list + link + code +
+# bold/italic/strike) in both directions. This is the spike's highest-risk item: individual
+# vocabulary items round-trip in isolation, but nothing so far has pinned that they still do once
+# combined into one realistic document, or that adjacent (not separated-by-text) nested inline
+# spans don't collide into an ambiguous run of delimiter characters.
+# =====================================================================================
+
+_COMBINED_HTML_DOCUMENT = (
+    "<h1>Title</h1>"
+    "<p>Intro <strong>bold</strong> and <em>italic</em> and <s>strike</s> text with "
+    '<code>code()</code> and a <a href="https://example.com">link</a>.</p>'
+    "<ul><li>parent<ul><li>child <strong>bold child</strong></li></ul></li>"
+    "<li>second top item</li></ul>"
+    "<pre><code>def f():\n    return 1\n</code></pre>"
+    "<p>Outro paragraph.</p>"
+)
+
+
+def test_combined_document_html_to_markdown_to_html_round_trip_is_the_identity():
+    md = leankit_html_to_markdown(_COMBINED_HTML_DOCUMENT)
+    assert markdown_to_leankit_html(md) == _COMBINED_HTML_DOCUMENT
+
+
+def test_combined_document_markdown_round_trip_reaches_a_fixed_point_after_one_pass():
+    # A second HTML->MD->HTML pass over the already-round-tripped Markdown must reproduce the
+    # exact same Markdown -- the fixed point the spike's design doc calls out by name.
+    md1 = leankit_html_to_markdown(_COMBINED_HTML_DOCUMENT)
+    html2 = markdown_to_leankit_html(md1)
+    md2 = leankit_html_to_markdown(html2)
+    assert md1 == md2
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        # strong directly wrapping em with zero separating text -- opening markers "**" + "*"
+        # collapse into one run of three literal '*' characters ("***"), and closing markers
+        # "*" + "**" collapse the same way. A naive nearest-delimiter-match parser mis-splits
+        # this run and drops content or leaves a stray asterisk outside the tag.
+        "<p><strong><em>bold italic</em></strong></p>",
+        # three levels stacked directly adjacent: strong(em(s(text))).
+        "<p><strong><em><s>all three</s></em></strong></p>",
+        # the same triple nesting with a link immediately following, no separating text.
+        (
+            "<p><strong><em><s>all three</s></em></strong> and "
+            '<a href="https://example.com"><strong><em>bold italic link</em></strong></a></p>'
+        ),
+    ],
+)
+def test_directly_adjacent_nested_inline_formats_round_trip_without_delimiter_collision(html):
+    md = leankit_html_to_markdown(html)
+    assert markdown_to_leankit_html(md) == html
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        # irregular 3-space list continuation indent under a numbered marker, and headings glued
+        # directly to the following block with no blank line -- both normalize on the first pass
+        # (canonical 2-space indent, an inserted blank-line separator) rather than round-tripping
+        # byte-for-byte, but the *normalized* form must itself be a genuine fixed point.
+        "# Title\n\nIntro **bold** and *italic* and ~~strike~~ text with `code()` and a "
+        "[link](https://example.com).\n\n- parent\n  - child **bold child**\n"
+        "- second top item\n\n1. first\n2. second\n   - nested bullet inside ordered\n3. third"
+        "\n\n```\ndef f():\n    return 1\n```\n\nOutro paragraph.",
+        "## Sub\n### SubSub\n\n- a\n- b\n  1. nested ordered\n  2. two\n- c",
+        "# H1\n## H2\n- item1\n- item2",
+    ],
+)
+def test_markdown_authored_document_stabilizes_after_one_normalization_pass(markdown):
+    html1 = markdown_to_leankit_html(markdown)
+    md_normalized = leankit_html_to_markdown(html1)
+    html2 = markdown_to_leankit_html(md_normalized)
+    md_refixed = leankit_html_to_markdown(html2)
+    assert md_normalized == md_refixed
+    assert html1 == html2
