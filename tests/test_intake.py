@@ -19,13 +19,17 @@ Run: pytest -q tests/test_intake.py
 from __future__ import annotations
 
 import copy
+import json
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import agileplace  # noqa: E402
+import ghkit  # noqa: E402
 import intake  # noqa: E402
 
 
@@ -278,3 +282,263 @@ def test_issue_body_never_raises_for_minimal_card():
     body = intake._issue_body({"id": "card-8"}, {})
     assert isinstance(body, str)
     assert body.strip() != ""
+
+
+# ================================================================================
+# Task 5/8: marker resume, writeback, promote() orchestration
+#
+# These tests pin the boundary invariants:
+#   (1) Marker resume (_find_marked_issue) is idempotent and state-order-independent.
+#   (2) Writeback ordering is fixed: the external link is written before the customId, as two
+#       separate patch_card calls.
+#   (3) Promotion never queues a lane-move op for any candidate card.
+#   (4) Dry-run performs zero writes at the low-level transport boundary (ghkit.run /
+#       agileplace.mutate) while still reporting an accurate plan.
+#   (5) prescan_failed is True iff ghkit.list_issue_bodies() returns None.
+# ================================================================================
+
+def _issue_with_body(number, url, body, state="OPEN"):
+    return {"number": number, "url": url, "state": state, "body": body}
+
+
+# --- invariant 1: marker resume is idempotent and order-independent ----------
+
+def test_find_marked_issue_returns_none_when_no_issue_carries_the_marker():
+    issues = [_issue_with_body(1, "u1", "no marker here")]
+    assert intake._find_marked_issue("card-1", issues) is None
+
+
+def test_find_marked_issue_finds_the_issue_carrying_the_marker():
+    marker = intake.marker_for_card("card-1")
+    issues = [
+        _issue_with_body(1, "u1", "unrelated body"),
+        _issue_with_body(2, "u2", f"provenance\n\n{marker}"),
+    ]
+    found = intake._find_marked_issue("card-1", issues)
+    assert found is not None and found["number"] == 2
+
+
+def test_find_marked_issue_is_independent_of_list_order():
+    marker = intake.marker_for_card("card-9")
+    a = _issue_with_body(1, "u1", "unrelated")
+    b = _issue_with_body(2, "u2", marker)
+    assert intake._find_marked_issue("card-9", [a, b])["number"] == 2
+    assert intake._find_marked_issue("card-9", [b, a])["number"] == 2
+
+
+def test_find_marked_issue_is_idempotent_across_repeated_calls():
+    marker = intake.marker_for_card("card-1")
+    issues = [_issue_with_body(1, "u1", marker)]
+    assert intake._find_marked_issue("card-1", issues) == intake._find_marked_issue("card-1", issues)
+
+
+def test_find_marked_issue_never_matches_a_different_cards_marker():
+    issues = [_issue_with_body(1, "u1", intake.marker_for_card("card-OTHER"))]
+    assert intake._find_marked_issue("card-1", issues) is None
+
+
+# --- _writeback_key ------------------------------------------------------------
+
+def test_writeback_key_uses_bracketed_title_prefix_when_present():
+    assert intake._writeback_key("[EP-0C] Some card", 42) == "EP-0C"
+
+
+def test_writeback_key_falls_back_to_issue_number_without_bracket_prefix():
+    assert intake._writeback_key("Plain title, no bracket", 42) == "42"
+
+
+def test_writeback_key_is_sourced_from_the_cards_own_title_not_a_fetch():
+    assert intake._writeback_key("[EP-01] A", 5) != intake._writeback_key("[EP-02] B", 5)
+
+
+# --- invariant 2: writeback ordering is fixed ---------------------------------
+
+def test_writeback_writes_link_before_custom_id_in_two_separate_calls(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agileplace, "patch_card",
+                         lambda cfg, apply, card, ops, **k: calls.append(ops[0]))
+    card = {"id": "card-1", "title": "Card 1"}
+    issue = {"number": 7, "url": "https://github.com/o/r/issues/7"}
+
+    intake._writeback({}, False, card, issue)
+
+    assert len(calls) == 2
+    assert calls[0]["path"] == "/externalLink"
+    assert calls[1]["path"] == "/customId"
+
+
+def test_writeback_customid_matches_writeback_key(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agileplace, "patch_card",
+                         lambda cfg, apply, card, ops, **k: calls.append(ops[0]))
+    card = {"id": "card-1", "title": "[EP-0C] Card"}
+    issue = {"number": 7, "url": "https://github.com/o/r/issues/7"}
+
+    intake._writeback({}, False, card, issue)
+
+    assert calls[1]["value"] == "EP-0C"
+
+
+def test_writeback_skips_link_write_and_warns_for_array_shaped_external_links(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(agileplace, "patch_card",
+                         lambda cfg, apply, card, ops, **k: calls.append(ops[0]))
+    card = {"id": "card-1", "title": "Card 1", "externalLinks": []}
+    issue = {"number": 7, "url": "https://github.com/o/r/issues/7"}
+
+    intake._writeback({}, False, card, issue)
+
+    assert len(calls) == 1
+    assert calls[0]["path"] == "/customId"
+    assert "WARN" in capsys.readouterr().out
+
+
+# --- promote(): candidates / prescan_failed / resume / create ----------------
+
+def test_promote_returns_zero_summary_and_makes_no_gh_calls_when_no_candidates(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_bodies",
+                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be called")))
+
+    result = intake.promote({}, False, [], _lanes(), _stage_map(), _issues())
+
+    assert result == intake.IntakeSummary(candidates=0, prescan_failed=False, resumed=0, created=0)
+
+
+def test_promote_sets_prescan_failed_when_list_issue_bodies_returns_none(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: None)
+    cards = [_card("card-1")]
+
+    result = intake.promote({}, False, cards, _lanes(), _stage_map(), _issues())
+
+    assert result.prescan_failed is True
+    assert result.candidates == 1
+    assert result.resumed == 0
+    assert result.created == 0
+
+
+def test_promote_prescan_failed_is_false_on_a_genuinely_empty_body_snapshot(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
+    monkeypatch.setattr(ghkit, "create_issue", lambda *a, **k: None)  # dry-run plan only
+    cards = [_card("card-1")]
+
+    result = intake.promote({}, False, cards, _lanes(), _stage_map(), _issues())
+
+    assert result.prescan_failed is False
+
+
+def test_promote_resumes_a_card_whose_issue_already_carries_the_marker(monkeypatch):
+    marker = intake.marker_for_card("card-1")
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [
+        _issue_with_body(7, "https://github.com/o/r/issues/7", marker),
+    ])
+    writeback_calls = []
+    monkeypatch.setattr(intake, "_writeback",
+                         lambda cfg, apply, card, issue: writeback_calls.append((card["id"], issue)))
+    cards = [_card("card-1")]
+
+    result = intake.promote({}, False, cards, _lanes(), _stage_map(), _issues())
+
+    assert result.resumed == 1
+    assert result.created == 0
+    assert writeback_calls == [("card-1", {
+        "number": 7, "url": "https://github.com/o/r/issues/7", "state": "OPEN", "body": marker,
+    })]
+
+
+def test_promote_creates_a_new_issue_when_no_marker_found(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
+    created_issue = {"number": 99, "url": "https://github.com/o/r/issues/99"}
+    monkeypatch.setattr(ghkit, "create_issue", lambda *a, **k: created_issue)
+    writeback_calls = []
+    monkeypatch.setattr(intake, "_writeback",
+                         lambda cfg, apply, card, issue: writeback_calls.append((card["id"], issue)))
+    cards = [_card("card-1")]
+
+    result = intake.promote({}, True, cards, _lanes(), _stage_map(), _issues())
+
+    assert result.created == 1
+    assert result.resumed == 0
+    assert writeback_calls == [("card-1", created_issue)]
+
+
+def test_promote_dry_run_create_plan_attempts_no_writeback(monkeypatch, capsys):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
+    monkeypatch.setattr(ghkit, "create_issue", lambda *a, **k: None)  # dry-run gate
+    monkeypatch.setattr(intake, "_writeback",
+                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not writeback")))
+    cards = [_card("card-1")]
+
+    result = intake.promote({}, False, cards, _lanes(), _stage_map(), _issues())
+
+    assert result.created == 0
+    assert result.resumed == 0
+    assert "DRY" in capsys.readouterr().out
+
+
+# --- invariant 3: promotion never moves a card's lane -------------------------
+
+def test_promote_never_queues_a_lane_move_op(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
+    monkeypatch.setattr(ghkit, "create_issue",
+                         lambda *a, **k: {"number": 5, "url": "https://github.com/o/r/issues/5"})
+    ops_seen = []
+    monkeypatch.setattr(agileplace, "patch_card",
+                         lambda cfg, apply, card, ops, **k: ops_seen.extend(ops))
+    cards = [_card("card-1")]
+
+    intake.promote({}, True, cards, _lanes(), _stage_map(), _issues())
+
+    assert all(op.get("path") != "/laneId" for op in ops_seen)
+
+
+# --- invariant 4: dry-run never reaches the low-level transport boundary -----
+
+def test_promote_dry_run_never_reaches_the_transport_write_boundary(monkeypatch, capsys):
+    """A resumed candidate under apply=False must still complete the full plan (marker read,
+    writeback attempt) while never letting a real write reach ghkit.run or agileplace.mutate --
+    the low-level transport boundary, matching
+    test_edit_label_dry_run_still_works_for_safe_labels's own monkeypatch altitude (never the
+    higher-level ghkit.create_issue/agileplace.patch_card wrappers, which must still be called and
+    self-gate)."""
+    marker = intake.marker_for_card("card-1")
+    run_calls = []
+
+    def fake_run(cfg, args, **k):
+        run_calls.append(args)
+        assert args[:2] == ["issue", "list"], "dry-run must never call gh issue create"
+        return Mock(stdout=json.dumps([
+            {"number": 7, "url": "https://github.com/o/r/issues/7", "state": "OPEN", "body": marker},
+        ]))
+
+    mutate_calls = []
+
+    def fake_mutate(cfg, apply, method, path, body=None, headers=None, *, note=""):
+        mutate_calls.append((apply, method, path))
+        assert apply is False, "dry-run must never call mutate with apply=True"
+        print(f"DRY   {method} /io/{path} {note}")
+        return {}
+
+    monkeypatch.setattr(ghkit, "run", fake_run)
+    monkeypatch.setattr(agileplace, "mutate", fake_mutate)
+    cards = [_card("card-1")]
+
+    result = intake.promote({}, False, cards, _lanes(), _stage_map(), _issues())
+
+    assert len(run_calls) == 1
+    assert len(mutate_calls) == 2  # link + customId, both dry-run
+    assert result.resumed == 1
+    assert "DRY" in capsys.readouterr().out
+
+
+# --- invariant 5: prescan_failed iff list_issue_bodies() returns None --------
+
+@pytest.mark.parametrize(("bodies_result", "expected_prescan_failed"), [(None, True), ([], False)])
+def test_prescan_failed_matches_list_issue_bodies_tri_state(monkeypatch, bodies_result,
+                                                             expected_prescan_failed):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: bodies_result)
+    monkeypatch.setattr(ghkit, "create_issue", lambda *a, **k: None)
+    cards = [_card("card-1")]
+
+    result = intake.promote({}, False, cards, _lanes(), _stage_map(), _issues())
+
+    assert result.prescan_failed is expected_prescan_failed

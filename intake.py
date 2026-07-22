@@ -15,7 +15,10 @@ repo entirely) or a stale/unrecognized customId never disqualifies a card by its
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import agileplace
+import ghkit
 from stages import issue_custom_id
 
 # Embedded verbatim in every promoted issue's body so a create-then-writeback crash can be resumed
@@ -144,3 +147,102 @@ def _issue_body(card: dict, cfg: dict) -> str:
         marker_for_card(card.get("id")),
     ]
     return "\n".join(lines)
+
+
+class IntakeSummary(NamedTuple):
+    """Outcome of one promote() run -- both the caller's summary print and what tests assert on.
+
+    candidates: how many cards intake_candidates() selected this run.
+    prescan_failed: True iff ghkit.list_issue_bodies() returned None -- the marker-resume snapshot
+        was unusable, so every write for the run was skipped; the candidates remain candidates
+        again next run (nothing here is persisted as "handled").
+    resumed: candidates whose promoted issue already existed (found via its resume marker) and
+        only needed writeback -- recovery from a prior run that crashed between create and writeback.
+    created: candidates for which a brand-new GitHub issue was actually created (apply=True only --
+        a dry-run "would create" plan never increments this, since nothing was actually created).
+    """
+    candidates: int
+    prescan_failed: bool
+    resumed: int
+    created: int
+
+
+def _find_marked_issue(card_id, issues_with_bodies: list[dict]) -> dict | None:
+    """The first issue (in the given order -- no dedicated index; scale here doesn't justify one)
+    whose body already carries this card's resume marker, for crash recovery between a prior run's
+    create_issue and its writeback. None when no issue carries it."""
+    marker = marker_for_card(card_id)
+    return next((issue for issue in issues_with_bodies if marker in issue.get("body", "")), None)
+
+
+def _writeback_key(card_title: str, issue_number: int) -> str:
+    """The customId written back onto a promoted card, via the SAME [KEY]-prefix convention every
+    other customId in this codebase uses (stages.issue_custom_id) -- computed from the CARD's own
+    title, never fetched back from GitHub."""
+    return issue_custom_id({"title": card_title, "number": issue_number})
+
+
+def _writeback(cfg: dict, apply: bool, card: dict, issue: dict) -> None:
+    """Write a promoted issue's link and customId back onto its AgilePlace card, as two SEPARATE
+    patch_card calls -- never batched into one PATCH -- so a link-write failure can never block the
+    customId write.
+
+    The link write is skipped (with a WARN) when `card` already carries the plural, array-shaped
+    `externalLinks` field: agileplace._card_value_for_patch_path has no case for the singular
+    `/externalLink` path this feature writes, so a 409/428 conflict on that write can never retry --
+    it unconditionally re-raises (see API-VALIDATION.md). This is safe/fails-closed by design
+    (marker-resume recovers it next run), but is a real, intentional asymmetry against the customId
+    write's normal one-retry support. The customId write always proceeds either way."""
+    card_id = card.get("id")
+    if "externalLinks" in card:
+        print(f"WARN  card {card_id}: has array-shaped externalLinks -- skipping intake link "
+              "writeback (unsupported shape); customId writeback still proceeds")
+    else:
+        link_op = op_external_link(f"GitHub #{issue['number']}", issue["url"])
+        agileplace.patch_card(cfg, apply, card, [link_op], note=f"intake link -> {issue['url']}")
+    key = _writeback_key(card.get("title", ""), issue["number"])
+    agileplace.patch_card(cfg, apply, card, [agileplace.op_custom_id(key)],
+                          note=f"intake customId -> {key}")
+
+
+def _resume_or_create(cfg: dict, apply: bool, card: dict,
+                      issues_with_bodies: list[dict]) -> tuple[dict | None, bool]:
+    """One candidate's issue: (issue_or_None, resumed). `issue` is None only for a dry-run plan with
+    no prior marker match -- create_issue's own dry-run gate returns None without writing anything."""
+    marked = _find_marked_issue(card.get("id"), issues_with_bodies)
+    if marked is not None:
+        return marked, True
+    created = ghkit.create_issue(cfg, apply, card.get("title", ""), _issue_body(card, cfg))
+    return created, False
+
+
+def promote(cfg: dict, apply: bool, cards: list[dict], lanes: list, stage_map: dict | None,
+           issues: list[dict]) -> IntakeSummary:
+    """Promote every Intake candidate into a GitHub issue (or resume one already created by a prior,
+    interrupted run), then write the link/customId back so the ordinary one-way sync adopts it next
+    cycle. Never moves a card's lane -- that stays the ordinary sync's job.
+
+    Zero AgilePlace/GitHub calls when there are no candidates. Any create_issue/patch_card failure
+    propagates uncaught -- no in-run retry; recovery is the next cycle's marker-based resume scan."""
+    candidates = intake_candidates(cards, lanes, stage_map, issues)
+    if not candidates:
+        return IntakeSummary(candidates=0, prescan_failed=False, resumed=0, created=0)
+    issues_with_bodies = ghkit.list_issue_bodies(cfg)
+    if issues_with_bodies is None:
+        print("WARN  intake: could not read issue bodies for marker-resume scan -- skipping "
+              f"all {len(candidates)} candidate(s) this run")
+        return IntakeSummary(candidates=len(candidates), prescan_failed=True, resumed=0, created=0)
+    resumed = created = 0
+    for card in candidates:
+        issue, was_resumed = _resume_or_create(cfg, apply, card, issues_with_bodies)
+        if issue is None:
+            print(f"DRY   intake: would create issue for card {card.get('id')} "
+                  f"({card.get('title', '')!r})")
+            continue
+        if was_resumed:
+            resumed += 1
+        else:
+            created += 1
+        _writeback(cfg, apply, card, issue)
+    return IntakeSummary(candidates=len(candidates), prescan_failed=False,
+                         resumed=resumed, created=created)
