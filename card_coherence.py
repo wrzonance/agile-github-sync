@@ -27,9 +27,23 @@ themselves.
 filter_poisoned_edges: the shared "drop poisoned ids out of an already-computed adds/removes pair"
 step both the child-connection loop and sync_dependencies() need -- extracted here (rather than
 duplicated inline in sync.py, as it briefly was) so the two call sites can't drift apart.
+
+same_card / fence_run_indices (review follow-up on issue #75): sync.py was still 937 lines (further
+over the 800-line hard cap) even after the above extraction, because Layer 1's call-site wiring --
+the card-index filtering, retirement-reservation bookkeeping, and syncable-issues derivation built
+on top of contested_cards()'s result -- stayed inline in main(). That wiring has no I/O of its own
+(the WARN prints are reported as data, not printed here) and no dependency on main()'s mutable
+per-run accumulators (card_ops/queue), so it moves out wholesale as one more pure boundary: same_card
+(card identity, needed by both `sync._matching_card` and this module) and fence_run_indices (the
+index-filtering/reservation wiring itself). `contested_cards(...)` is still CALLED from sync.py's
+main() (not from here) so tests that patch `sync.contested_cards` to force a genuine Layer 2 path
+keep working unchanged -- fence_run_indices only ever CONSUMES an already-computed `contested` dict.
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
+import agileplace
 from stages import issue_custom_id
 
 
@@ -128,6 +142,111 @@ def filter_poisoned_edges(adds: list[str], removes: list[str],
     filtered_removes = [r for r in removes if r not in poisoned]
     dropped = len(filtered_adds) != len(adds) or len(filtered_removes) != len(removes)
     return filtered_adds, filtered_removes, dropped
+
+
+def same_card(left: dict | None, right: dict | None) -> bool:
+    """Whether `left` and `right` denote the same AgilePlace card: identical object, or matching
+    non-empty string ids. Either side falsy (None, {}) -> False. Two distinct id-less dicts are
+    never considered the same card (an empty id never matches another empty id).
+
+    Pure: never mutates either argument; never raises."""
+    if not left or not right:
+        return False
+    if left is right:
+        return True
+    left_id = str(left.get("id") or "")
+    right_id = str(right.get("id") or "")
+    return bool(left_id) and left_id == right_id
+
+
+class FencedIndices(NamedTuple):
+    """One run's card-matching indices with Layer 1 fencing already applied, plus every WARN line
+    fence_run_indices would have printed itself if it weren't pure (see module docstring) -- the
+    caller prints `warnings` verbatim, in order."""
+    card_by_url: dict[str, dict]
+    card_by_cid: dict[str, dict]
+    syncable_issues: list[dict]
+    retired_card_by_url: dict[str, dict]
+    contested_urls: frozenset[str]
+    warnings: tuple[str, ...]
+
+
+def fence_run_indices(contested: dict[str, set[str]], active_issues: list[dict],
+                      retired_issues: list[dict], all_card_by_url: dict[str, dict],
+                      all_card_by_cid: dict[str, dict]) -> FencedIndices:
+    """Apply Layer 1 fencing (the caller's already-computed `contested_cards()` result) to one run's
+    raw card indices: exclude every contested card from both match indices and from retirement, then
+    derive `syncable_issues` -- every active issue EXCEPT one whose own card is contested, OR whose
+    external-link URL or customId is currently held by a DIFFERENT issue's retiring card (a
+    'retirement reservation': retiring cards are matched by URL only, so a customId-only overlap
+    with a retiring card must still defer the active issue, rather than let it adopt a card that's
+    about to move to Done out from under it).
+
+    Pure: never mutates `contested`, `active_issues`, `retired_issues`, `all_card_by_url`, or
+    `all_card_by_cid`; never raises; no I/O -- every decision that would otherwise print is instead
+    appended to the returned `warnings` tuple, in the same order sync.py's main() used to print them
+    (contested-card WARNs first, sorted by card id; then one deferred-active-card WARN per
+    reservation, in `active_issues` order)."""
+    contested_urls = frozenset(u for urls in contested.values() for u in urls)
+    warnings = [f"WARN  card {cid} claimed by {len(urls)} issue URLs, deferring: {sorted(urls)}"
+                for cid, urls in sorted(contested.items())]
+
+    retired_card_by_url = {
+        issue["url"]: all_card_by_url[issue["url"]]
+        for issue in retired_issues
+        if issue["url"] in all_card_by_url and issue["url"] not in contested_urls
+    }
+    retired_cards = tuple(retired_card_by_url.values())
+
+    def reserved_for_retirement(card):
+        return any(card is retired or same_card(card, retired) for retired in retired_cards)
+
+    retired_card_by_cid = {
+        agileplace.custom_id_value(card): card
+        for card in retired_cards if agileplace.custom_id_value(card)
+    }
+    card_by_url = {
+        url: card for url, card in all_card_by_url.items()
+        if not reserved_for_retirement(card) and url not in contested_urls
+    }
+    card_by_cid = {
+        # `cid` here is the card's customId (the comprehension's loop var), NOT its id -- `contested`
+        # is keyed by card id, so the predicate must test the card's own id, never the loop var.
+        # `card.get("id") or ""` (not `card["id"]`): a partial, id-less payload is never a contested
+        # id ("" is never a `contested` key), so it survives the filter and is deferred by the
+        # downstream `card.get("id")` guards rather than KeyError-ing the whole run.
+        cid: card for cid, card in all_card_by_cid.items()
+        if not reserved_for_retirement(card) and str(card.get("id") or "") not in contested
+    }
+
+    def retirement_reservation(issue):
+        url_card = all_card_by_url.get(issue["url"])
+        if url_card and reserved_for_retirement(url_card):
+            return "external-link URL", url_card
+        custom_id_card = retired_card_by_cid.get(issue_custom_id(issue))
+        if custom_id_card:
+            return "customId", custom_id_card
+        return None
+
+    active_reservations = {
+        issue["url"]: reservation
+        for issue in active_issues if (reservation := retirement_reservation(issue))
+    }
+    syncable_issues = [
+        issue for issue in active_issues
+        if issue["url"] not in active_reservations and issue["url"] not in contested_urls
+    ]
+    for issue in active_issues:
+        reservation = active_reservations.get(issue["url"])
+        if reservation:
+            kind, card = reservation
+            warnings.append(
+                f"WARN  deferring active card [{issue_custom_id(issue)}]: {kind} is held by "
+                f"retired card {card.get('id') or '<unknown>'}")
+
+    return FencedIndices(card_by_url=card_by_url, card_by_cid=card_by_cid,
+                         syncable_issues=syncable_issues, retired_card_by_url=retired_card_by_url,
+                         contested_urls=contested_urls, warnings=tuple(warnings))
 
 
 def laneid_op_value(ops: list[dict]) -> str | None:

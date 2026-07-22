@@ -298,10 +298,14 @@ def test_poisoned_run_does_not_persist_advanced_merge_bases(tmp_path):
     base recorded a tag write that never reached AgilePlace, so the NEXT run's unchanged AgilePlace
     card read as a fresh external delete and destructively removed the GitHub label to match.
 
-    Post-#75, this exact customId-collision shape is instead excluded wholesale by the widened
-    Layer 1 fence, BEFORE either issue ever reaches sync_metadata/queue() at all -- so no merge base
-    for either issue is ever touched, and the same regression can't occur via this path either.
-    Across two identical runs of a persistently-fenced card, no GitHub label may ever be removed."""
+    Post-#75, this exact customId-collision shape (zero URL claims) is instead excluded wholesale by
+    the widened Layer 1 fence before either issue ever reaches sync_metadata/queue() at all -- which
+    would make this fixture unable to reach Layer 2 at all, and the merge-base-hold invariant it's
+    meant to pin would go completely unexercised. So, mirroring the sibling Layer 2 tests below, this
+    test forces `contested_cards` to report nothing (simulating a collision shape Layer 1 doesn't
+    catch) to reach a GENUINE Layer 2 lane-conflict poisoning and exercise the actual merge-base-hold
+    guard end to end. Across two runs of a persistently Layer-2-poisoned card, no GitHub label may
+    ever be removed."""
     first = _issue(1, "[KEY] one", assignees=("dev",), labels=("feature",))   # In progress -> L-PROG
     second = _issue(2, "[KEY] two", labels=("agent:in-review",))              # In review -> L-REVIEW (conflict)
     card = _card("500", "KEY", [], lane_id="L-ELSEWHERE")
@@ -314,7 +318,8 @@ def test_poisoned_run_does_not_persist_advanced_merge_bases(tmp_path):
 
     for _ in range(2):  # same collision twice; state from run 1 feeds run 2
         stack, _create, _patch = _mock_io([first, second], [card], lanes=(_PROG_LANE, _REVIEW_LANE))
-        with stack, patch("ghkit.edit_label", side_effect=_capture_edit_label), \
+        with stack, patch("sync.contested_cards", return_value={}), \
+                patch("ghkit.edit_label", side_effect=_capture_edit_label), \
                 patch("sync.env_config", return_value=_cfg(tmp_path)), \
                 patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
                 patch("sys.argv", ["sync.py", "--apply"]):
@@ -323,6 +328,40 @@ def test_poisoned_run_does_not_persist_advanced_merge_bases(tmp_path):
     assert removals == [], (
         "a poisoned card's skipped AgilePlace tag write must not advance the persisted merge base; "
         f"doing so caused a phantom next-run GitHub label removal: {removals}")
+
+
+# --- Review follow-up (issue #75): fencing must be a per-run defer, not a permanent blacklist -------
+
+def test_fenced_card_syncs_normally_once_the_customid_collision_resolves(tmp_path, capsys):
+    """A card excluded by the widened Layer 1 fence must be retried, not permanently poisoned: once
+    the customId collision that caused the exclusion is resolved (here, by the second issue losing
+    its shared `[KEY]` prefix), the previously-deferred issue must get its ordinary card sync on the
+    very next run. Guards against a regression that persists the fenced id (e.g. into state) or an
+    off-by-one in the exclusion set that survives across runs."""
+    first = _issue(1, "[KEY] issue one", assignees=("dev",))              # -> In progress -> L-PROG
+    second = _issue(2, "[KEY] issue two", labels=("agent:in-review",))    # -> In review (collision)
+    card = _card("500", "KEY", [], lane_id="L-ELSEWHERE")
+
+    # Run 1: zero URL claims, shared "[KEY]" customId -> fenced by Layer 1, card never touched.
+    create_card_mock, patch_card_mock = _run_main_once(
+        tmp_path, [first, second], [card], lanes=(_PROG_LANE, _REVIEW_LANE))
+    out = capsys.readouterr().out
+    assert any(line.startswith("WARN  card 500 claimed by") for line in out.splitlines())
+    patch_card_mock.assert_not_called()
+    create_card_mock.assert_not_called()
+
+    # Run 2: the collision is resolved -- issue 2 renamed off the shared "[KEY]" prefix, so its
+    # customId ("2") no longer collides with issue 1's ("KEY"). Issue 1's claim on card 500 is now
+    # unique, and it must sync normally: no more fence WARN, and its overdue lane move fires.
+    second_resolved = _issue(2, "unrelated issue two", labels=("agent:in-review",))
+    create_card_mock2, patch_card_mock2 = _run_main_once(
+        tmp_path, [first, second_resolved], [card], lanes=(_PROG_LANE, _REVIEW_LANE))
+    out2 = capsys.readouterr().out
+    assert not any(line.startswith("WARN  card 500 claimed by") for line in out2.splitlines()), (
+        "a resolved collision must not still be fenced on the next run")
+    patched_ids = [call.args[2].get("id") for call in patch_card_mock2.call_args_list]
+    assert "500" in patched_ids, (
+        "the previously-fenced card must sync normally once its collision resolves")
 
 
 # --- Issue #75 task 3: the step-3 parent/child guard skips a Layer-2-poisoned parent card --------

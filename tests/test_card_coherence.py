@@ -16,10 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from card_coherence import (  # noqa: E402
     contested_cards,
+    fence_run_indices,
     filter_poisoned_edges,
     laneid_op_value,
     lane_conflict,
     poisoned_card_ids,
+    same_card,
 )
 
 
@@ -318,3 +320,114 @@ def test_filter_poisoned_edges_never_mutates_inputs_and_never_raises():
     assert adds == adds_before
     assert removes == removes_before
     assert filter_poisoned_edges([], [], frozenset()) == ([], [], False)
+
+
+# --- same_card (review follow-up on issue #75) --------------------------------
+
+def test_same_card_identical_object_is_always_the_same_card():
+    card = {"customId": "KEY"}  # no id at all -- identity alone must still be enough
+    assert same_card(card, card) is True
+
+
+def test_same_card_matching_non_empty_ids_are_the_same_card():
+    assert same_card({"id": "100"}, {"id": "100"}) is True
+    assert same_card({"id": 100}, {"id": "100"}) is True  # int vs str id, same value
+
+
+def test_same_card_differing_ids_are_not_the_same_card():
+    assert same_card({"id": "100"}, {"id": "200"}) is False
+
+
+def test_same_card_either_side_falsy_is_never_the_same_card():
+    assert same_card(None, {"id": "100"}) is False
+    assert same_card({"id": "100"}, None) is False
+    assert same_card({}, {}) is False
+
+
+def test_same_card_two_distinct_idless_dicts_are_never_the_same_card():
+    assert same_card({"customId": "A"}, {"customId": "B"}) is False
+
+
+def test_same_card_never_mutates_inputs():
+    left, right = {"id": "1"}, {"id": "1"}
+    left_before, right_before = dict(left), dict(right)
+
+    same_card(left, right)
+
+    assert left == left_before
+    assert right == right_before
+
+
+# --- fence_run_indices (review follow-up on issue #75) -------------------------
+
+def test_fence_run_indices_passes_through_cleanly_when_nothing_is_contested():
+    active = [{"url": "https://github.com/o/r/issues/1", "title": "one", "number": 1}]
+    all_card_by_url = {"https://github.com/o/r/issues/1": {"id": "100"}}
+
+    result = fence_run_indices({}, active, [], all_card_by_url, {})
+
+    assert result.card_by_url == all_card_by_url
+    assert result.syncable_issues == active
+    assert result.retired_card_by_url == {}
+    assert result.contested_urls == frozenset()
+    assert result.warnings == ()
+
+
+def test_fence_run_indices_excludes_a_contested_card_and_warns_once():
+    issue1 = {"url": "https://github.com/o/r/issues/1", "title": "one", "number": 1}
+    issue2 = {"url": "https://github.com/o/r/issues/2", "title": "two", "number": 2}
+    all_card_by_url = {
+        "https://github.com/o/r/issues/1": {"id": "100"},
+        "https://github.com/o/r/issues/2": {"id": "100"},
+    }
+    contested = {"100": {issue1["url"], issue2["url"]}}
+
+    result = fence_run_indices(contested, [issue1, issue2], [], all_card_by_url, {})
+
+    assert result.card_by_url == {}, "the contested card must be dropped from card_by_url"
+    assert result.syncable_issues == [], "both claiming issues must be deferred"
+    assert result.contested_urls == {issue1["url"], issue2["url"]}
+    assert len(result.warnings) == 1
+    assert result.warnings[0].startswith("WARN  card 100 claimed by 2 issue URLs")
+
+
+def test_fence_run_indices_defers_an_active_issue_whose_card_is_held_by_retirement():
+    """An active issue whose OWN url card is untouched by Layer 1, but whose customId is also
+    carried by a DIFFERENT issue's retiring card, must still be deferred (a retirement
+    reservation) -- and excluded from card_by_url/card_by_cid so it can't be adopted this run."""
+    active = {"url": "https://github.com/o/r/issues/1", "title": "[KEY] one", "number": 1}
+    retired = {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2,
+              "state_reason": "NOT_PLANNED"}
+    retiring_card = {"id": "200", "customId": "KEY"}
+    all_card_by_url = {retired["url"]: retiring_card}
+    all_card_by_cid = {"KEY": retiring_card}
+
+    result = fence_run_indices({}, [active], [retired], all_card_by_url, all_card_by_cid)
+
+    assert result.syncable_issues == [], "the active issue must be deferred, not adopt the retiring card"
+    assert result.card_by_url == {}, "the retiring card itself is reserved, not offered for matching"
+    assert len(result.warnings) == 1
+    assert result.warnings[0].startswith("WARN  deferring active card [KEY]: customId is held by")
+
+
+def test_fence_run_indices_never_mutates_inputs_and_never_raises():
+    active = [{"url": "https://github.com/o/r/issues/1", "title": "one", "number": 1}]
+    retired = [{"url": "https://github.com/o/r/issues/2", "title": "two", "number": 2,
+               "state_reason": "NOT_PLANNED"}]
+    all_card_by_url = {"https://github.com/o/r/issues/1": {"id": "100"},
+                       "https://github.com/o/r/issues/2": {"id": "200"}}
+    contested = {"100": {active[0]["url"], "https://github.com/o/r/issues/3"}}
+    active_before = copy.deepcopy(active)
+    retired_before = copy.deepcopy(retired)
+    all_card_by_url_before = copy.deepcopy(all_card_by_url)
+    contested_before = copy.deepcopy(contested)
+
+    fence_run_indices(contested, active, retired, all_card_by_url, {})
+
+    assert active == active_before
+    assert retired == retired_before
+    assert all_card_by_url == all_card_by_url_before
+    assert contested == contested_before
+
+    # Malformed/empty inputs must never raise.
+    assert fence_run_indices({}, [], [], {}, {}).syncable_issues == []
