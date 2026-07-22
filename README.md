@@ -130,6 +130,9 @@ The account running the schedule needs `python` and `gh` on PATH, `gh auth login
   sends at most one field-update PATCH per existing card.
 - `stages.py`: pure stage derivation and lane/title matching (unit-tested).
 - `reconcile.py`: pure three-way set and single-value merges (unit-tested).
+- `card_coherence.py`: pure per-card write-coherence checks -- contested-card detection
+  (multiple GitHub issue URLs claiming one card) and `/laneId` op conflict poisoning
+  (unit-tested).
 - `ghkit.py`: GitHub via the `gh` CLI (issues, sub-issues, open-PR and blocked-by reads,
   label/milestone writes).
 - `ghproject.py`: GitHub Projects v2 via `gh project` plus GraphQL (Status reads and field-id-keyed
