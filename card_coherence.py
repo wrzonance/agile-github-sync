@@ -17,6 +17,12 @@ Layer 2 (lane_conflict): even for uncontested cards, multiple queued ops for the
 carry conflicting `/laneId` values (e.g. duplicate `[KEY]`-prefixed issue titles matching the same
 card through different match paths within one run). Detects that and reports it so the caller can
 mark the card poisoned and skip its flush.
+
+poisoned_card_ids: a read-only extraction over the caller's `card_ops` accumulator (keyed by card
+id, each entry carrying a `'poisoned'` bool set by the Layer 2 lane-conflict check above) -- returns
+just the set of card ids marked poisoned, so callers elsewhere in the run (e.g. child-connection and
+dependency writes) can skip a poisoned card's ops without reaching into `card_ops`'s internal shape
+themselves.
 """
 from __future__ import annotations
 
@@ -89,6 +95,18 @@ def lane_conflict(ops: list[dict], current_lane_id: str | None) -> tuple[str | N
         elif value != lane_id:
             conflict = True
     return lane_id, conflict
+
+
+def poisoned_card_ids(card_ops: dict) -> frozenset[str]:
+    """Return the set of card ids whose `card_ops` entry is marked poisoned (`entry['poisoned']`
+    is truthy). A missing 'poisoned' key or a non-dict entry value is treated as not-poisoned,
+    never raised on. Empty `card_ops` -> empty frozenset.
+
+    Pure: never mutates `card_ops`; no I/O."""
+    return frozenset(
+        cid for cid, entry in card_ops.items()
+        if isinstance(entry, dict) and entry.get("poisoned")
+    )
 
 
 def laneid_op_value(ops: list[dict]) -> str | None:

@@ -4,7 +4,9 @@ These need no network or gh -- they pin what the rest of the sync run depends on
 contested_cards() and lane_conflict() never mutate their inputs and never raise, and
 contested_cards() only reports card ids claimed by >= 2 distinct issue URLs -- via EITHER
 match path (URL or customId fallback), with the URL path always taking precedence over the
-customId fallback for a given issue. Run: pytest -q
+customId fallback for a given issue. poisoned_card_ids() never mutates card_ops or raises,
+and treats a missing 'poisoned' key or a non-dict entry value as not-poisoned rather than
+an error. Run: pytest -q
 """
 import copy
 import sys
@@ -12,7 +14,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from card_coherence import contested_cards, laneid_op_value, lane_conflict  # noqa: E402
+from card_coherence import (  # noqa: E402
+    contested_cards,
+    laneid_op_value,
+    lane_conflict,
+    poisoned_card_ids,
+)
 
 
 # --- contested_cards --------------------------------------------------------
@@ -227,3 +234,41 @@ def test_laneid_op_value_never_mutates_ops_and_never_raises():
 
     assert ops == ops_before
     assert laneid_op_value([{"op": "replace", "path": "/other"}]) is None
+
+
+# --- poisoned_card_ids ---------------------------------------------------------
+
+def test_poisoned_card_ids_returns_only_the_poisoned_entries():
+    card_ops = {
+        "1": {"card": {"id": 1}, "ops": [], "notes": [], "lane_id": "a", "poisoned": True},
+        "2": {"card": {"id": 2}, "ops": [], "notes": [], "lane_id": "b", "poisoned": False},
+    }
+    assert poisoned_card_ids(card_ops) == frozenset({"1"})
+
+
+def test_poisoned_card_ids_returns_empty_frozenset_for_empty_card_ops():
+    assert poisoned_card_ids({}) == frozenset()
+
+
+def test_poisoned_card_ids_treats_missing_poisoned_key_as_not_poisoned():
+    card_ops = {"1": {"card": {"id": 1}, "ops": [], "notes": [], "lane_id": "a"}}
+    assert poisoned_card_ids(card_ops) == frozenset()
+
+
+def test_poisoned_card_ids_treats_non_dict_entry_as_not_poisoned_instead_of_raising():
+    card_ops = {
+        "1": "not-a-dict",
+        "2": {"card": {"id": 2}, "ops": [], "notes": [], "lane_id": "b", "poisoned": True},
+    }
+    assert poisoned_card_ids(card_ops) == frozenset({"2"})
+
+
+def test_poisoned_card_ids_never_mutates_card_ops():
+    card_ops = {
+        "1": {"card": {"id": 1}, "ops": [], "notes": [], "lane_id": "a", "poisoned": True},
+    }
+    card_ops_before = copy.deepcopy(card_ops)
+
+    poisoned_card_ids(card_ops)
+
+    assert card_ops == card_ops_before
