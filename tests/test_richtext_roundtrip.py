@@ -166,6 +166,84 @@ def test_markdown_authored_document_stabilizes_after_one_normalization_pass(mark
 
 
 # =====================================================================================
+# Issue #78 gate -- fixed-point round trip covering the two fixes together (variable-length
+# code-span backtick fencing + symmetric '<'/'>' escaping), combined with tag-looking prose and a
+# link in the SAME document. Individual vocabulary items are pinned in isolation by
+# test_richtext_html_to_md.py / test_richtext_md_to_html.py; this closes the spike's own
+# highest-risk gap those files call out -- that raw '<'/'>' escaping and the new run-length-N
+# backtick fencing don't destabilize each other, or the link-escaping/list/heading machinery
+# already pinned above, once all combined into one document. Code spans use the established
+# "leading word" convention (see test_code_span_needing_a_three_plus_backtick_fence_round_trips_
+# when_not_at_true_line_start) so a 3+ backtick fence never lands at true line start and collides
+# with fenced-code-BLOCK detection -- a separate, pre-existing, documented-out-of-scope layer this
+# gate is not re-litigating.
+# =====================================================================================
+
+_ANGLE_AND_CODE_SPAN_COMBINED_HTML = (
+    "<p>Compare a &lt; b and b &gt; a while reading fake tags like &lt;div&gt; and "
+    '&lt;/div&gt;. See <a href="https://example.com/a(b)c">the docs</a> for inline '
+    "<code>a``b</code> and <code>x```y</code> examples, plus a "
+    "<code>has a ` single backtick</code> case.</p>"
+)
+
+
+def test_angle_brackets_and_variable_length_code_span_fences_round_trip_together():
+    md = leankit_html_to_markdown(_ANGLE_AND_CODE_SPAN_COMBINED_HTML)
+    assert markdown_to_leankit_html(md) == _ANGLE_AND_CODE_SPAN_COMBINED_HTML
+
+
+def test_angle_brackets_and_variable_length_code_span_fences_reach_a_fixed_point_after_one_pass():
+    # A second HTML->MD->HTML pass over the already-round-tripped Markdown must reproduce the
+    # exact same Markdown -- neither the new escape chars nor the new fence-length rule may drift
+    # once combined with each other, a link, and tag-looking prose in the same document.
+    md1 = leankit_html_to_markdown(_ANGLE_AND_CODE_SPAN_COMBINED_HTML)
+    html2 = markdown_to_leankit_html(md1)
+    md2 = leankit_html_to_markdown(html2)
+    assert md1 == md2
+
+
+_ANGLE_AND_CODE_SPAN_COMBINED_MARKDOWN = (
+    "Compare a \\< b and b \\> a while reading fake tags like \\<div\\> and \\</div\\>. "
+    "See [the docs](https://example.com/a\\(b\\)c) for inline ```a``b``` and "
+    "````x```y```` examples, plus a ``has a ` single backtick`` case."
+)
+
+
+def test_markdown_authored_angle_brackets_and_code_spans_stabilize_after_one_normalization_pass():
+    # Mirrors test_markdown_authored_document_stabilizes_after_one_normalization_pass but for
+    # Markdown authored directly with the new backslash-escaped angle brackets and variable-length
+    # backtick fences, rather than Markdown produced by this module's own HTML->MD direction.
+    html1 = markdown_to_leankit_html(_ANGLE_AND_CODE_SPAN_COMBINED_MARKDOWN)
+    md_normalized = leankit_html_to_markdown(html1)
+    html2 = markdown_to_leankit_html(md_normalized)
+    md_refixed = leankit_html_to_markdown(html2)
+    assert md_normalized == md_refixed
+    assert html1 == html2
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        # unclosed backtick span colliding with unescaped-looking tag soup
+        "a < b and b > a with `unclosed backtick and <tag> soup",
+        # mismatched backtick-run lengths that can never find a valid closing fence
+        "``` broken fence `` mismatched `` more",
+        # angle brackets inside an otherwise well-formed link target
+        "[link text with < and > inside](https://example.com/<>)",
+        # unterminated <code> (HTML input) whose buffered content itself contains angle brackets
+        "<code>``unterminated code span with < and >",
+        # pre-escaped angle brackets adjacent to a run of empty-ish backtick spans
+        "\\<div\\> plus `` `` `` many empty-ish spans",
+    ],
+)
+def test_neither_direction_raises_over_malformed_angle_bracket_and_code_span_input(malformed):
+    md_result = leankit_html_to_markdown(malformed)
+    html_result = markdown_to_leankit_html(malformed)
+    assert isinstance(md_result, str)
+    assert isinstance(html_result, str)
+
+
+# =====================================================================================
 # Task 7/7 -- full safety/degradation matrix sweep, closing every remaining cell of the
 # richtext.py module docstring's degradation table with a parametrized pin, plus systematic
 # (not just ad hoc-substring) whitelist-closure checks over a large adversarial battery.
