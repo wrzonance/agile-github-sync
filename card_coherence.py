@@ -53,13 +53,16 @@ def _claimed_card_id(issue: dict, all_card_by_url: dict[str, dict],
     url match is the ONLY claim considered when it resolves -- the customId fallback is never
     even attempted in that case, even if it would separately resolve to a different card. Only
     when the url doesn't resolve is the customId fallback attempted, and only when the issue dict
-    actually carries the keys issue_custom_id() needs ('title' and 'number'); a minimal/malformed
-    issue dict is treated as having no customId claim, never as a KeyError. Returns None when
-    neither path resolves, or the resolved card's id is falsy (an id-less partial payload).
+    carries a string 'title' plus a 'number' (the shape issue_custom_id() needs); a url is only
+    looked up when it is itself a string (an unhashable value like a list is not a claim). A
+    minimal/malformed issue dict is treated as having no customId claim -- never a KeyError,
+    AttributeError, or TypeError. Returns None when neither path resolves, or the resolved card's
+    id is falsy (an id-less partial payload).
 
     Pure: never mutates any input; never raises for ANY issue dict shape."""
-    card = all_card_by_url.get(issue.get("url"))
-    if card is None and "title" in issue and "number" in issue:
+    url = issue.get("url")
+    card = all_card_by_url.get(url) if isinstance(url, str) else None
+    if card is None and isinstance(issue.get("title"), str) and "number" in issue:
         card = all_card_by_cid.get(issue_custom_id(issue))
     if card is None:
         return None

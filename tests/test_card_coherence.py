@@ -171,6 +171,19 @@ def test_contested_cards_never_raises_on_minimal_issue_dicts_through_customid_pa
     assert contested_cards(issues, {}, all_card_by_cid) == {}
 
 
+def test_contested_cards_never_raises_on_malformed_value_types():
+    """The 'never raises for ANY issue dict shape' contract must hold for malformed VALUE types,
+    not only missing keys: a non-string 'title' would blow up issue_custom_id()'s title_key(),
+    and an unhashable 'url' would blow up the url-index lookup. Both must be treated as no claim,
+    never propagated as AttributeError/TypeError."""
+    issues = [
+        {"url": "u", "title": 42, "number": 1},        # non-string title -> no customId claim
+        {"url": ["a", "b"], "title": "T", "number": 2},  # unhashable url -> no url lookup
+    ]
+    all_card_by_cid = {"T": {"id": 800}}
+    assert contested_cards(issues, {}, all_card_by_cid) == {}
+
+
 # --- lane_conflict -----------------------------------------------------------
 
 def test_lane_conflict_no_lane_op_is_a_noop():
