@@ -539,13 +539,16 @@ def _created_card_snapshot(cfg: dict, created: Mapping) -> Mapping:
 
 def _run_intake_promotion(cfg: dict, apply: bool, cards: list, lanes: list, stage_map: dict | None,
                           issues: list[dict]) -> intake.IntakeSummary:
-    """Reverse intake (issue #62): promote unmanaged Intake-lane cards into new GitHub issues before
-    the card index below is built. Uses the FULL, unfiltered cards/issues (not the retirement-
-    filtered indices main() builds next, which #70 owns) -- intake candidate selection has nothing
-    to do with retirement. A card promoted this run is never lane-moved this run either: `issues` is
-    the run's already-fetched snapshot, so the newly created issue is absent from active_issues and
-    the ordinary per-issue lane-sync loop can't reach it until next run picks it up via its
-    written-back link. Prints the one-line summary only when there was at least one candidate."""
+    """Reverse intake (issue #62): promote unmanaged Intake-lane cards into new GitHub issues. Runs
+    only AFTER _reconciled_custom_id_index's fail-closed identity check has passed, so an ambiguous
+    URL/customId board state still aborts the run BEFORE any intake write -- preserving the
+    "ambiguous identity fails before any mutation" guarantee. Uses the FULL, unfiltered cards/issues
+    (not the retirement-filtered indices main() builds, which #70 owns) -- intake candidate
+    selection has nothing to do with retirement. A card promoted this run is never lane-moved this
+    run either: `issues` is the run's already-fetched snapshot, so the newly created issue is absent
+    from active_issues and the ordinary per-issue lane-sync loop can't reach it until next run picks
+    it up via its written-back link. Prints the one-line summary only when there was at least one
+    candidate."""
     summary = intake.promote(cfg, apply, cards, lanes, stage_map, issues)
     if summary.candidates:
         print(f"intake: {summary.candidates} candidate(s) -- "
@@ -634,8 +637,6 @@ def main() -> None:
     cards = agileplace.list_cards(cfg) if online else []
     smap = cfg.get("stage_lane_map")
 
-    _run_intake_promotion(cfg, apply, cards, lanes, smap, issues)
-
     all_card_by_url, all_card_by_cid = {}, {}
     for card in cards:
         for u in agileplace.card_external_urls(card):
@@ -687,6 +688,9 @@ def main() -> None:
 
     card_by_cid, pending_custom_id_releases = _reconciled_custom_id_index(
         syncable_issues, card_by_url, card_by_cid)
+
+    _run_intake_promotion(cfg, apply, cards, lanes, smap, issues)
+
     epics = [i for i in syncable_issues if "type:epic" in i["labels"]]
 
     def card_for(issue):

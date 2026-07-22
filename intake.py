@@ -19,7 +19,7 @@ from typing import NamedTuple
 
 import agileplace
 import ghkit
-from stages import issue_custom_id
+from stages import issue_custom_id, title_key
 
 # Embedded verbatim in every promoted issue's body so a create-then-writeback crash can be resumed
 # by search: `str.format` with a single `card_id` placeholder, coerced to str before formatting.
@@ -145,9 +145,19 @@ def _is_candidate(card: dict, intake_lane_ids: set[str], target_urls: set[str],
 
 def intake_candidates(cards: list[dict], lanes: list, stage_map: dict | None,
                        issues: list[dict]) -> list[dict]:
-    """Cards eligible for promotion into a new GitHub issue, in `cards`' own order. Pure -- reads
-    `cards`, `lanes`, `stage_map`, and `issues` without mutating any of them. Returns [] outright
-    (zero AgilePlace/GitHub calls from any caller) whenever the Intake stage isn't configured.
+    """Cards eligible for promotion into a new GitHub issue, in `cards`' own order. Reads `cards`,
+    `lanes`, `stage_map`, and `issues` without mutating any of them (may emit a WARN when it drops a
+    collision candidate, below). Returns [] outright (zero AgilePlace/GitHub calls from any caller)
+    whenever the Intake stage isn't configured.
+
+    Beyond `_is_candidate`'s per-card predicate, this rejects any card whose PROSPECTIVE writeback
+    customId (`title_key` of its title -- what `_writeback_key` would derive from a `[KEY]` prefix)
+    is already claimed, either by an existing issue's `issue_custom_id` or by an earlier candidate
+    this same run. Promoting such a card would write a customId that collides with a different
+    URL-owned card, and the next sync's `_reconciled_custom_id_index` fail-closed guard would then
+    abort every sync on the ambiguity. A card whose title has no `[KEY]` prefix derives no such key
+    (its writeback falls back to the new issue's own unique number, which can never collide) and is
+    never dropped here.
 
     `issues` is the already-fetched, title-bearing ghkit.list_issues() snapshot (same one sync.py's
     main loop uses) -- not ghkit.list_issue_bodies()'s separate, tri-state, body-bearing read that
@@ -157,8 +167,21 @@ def intake_candidates(cards: list[dict], lanes: list, stage_map: dict | None,
         return []
     target_urls = {issue["url"] for issue in issues}
     managed_custom_ids = _disqualifying_custom_ids(issues)
-    return [card for card in cards
-            if _is_candidate(card, intake_lane_ids, target_urls, managed_custom_ids)]
+    claimed_keys = set(managed_custom_ids)
+    selected = []
+    for card in cards:
+        if not _is_candidate(card, intake_lane_ids, target_urls, managed_custom_ids):
+            continue
+        derived_key = title_key(card.get("title") or "")
+        if derived_key is not None and derived_key in claimed_keys:
+            print(f"WARN  intake: skipping card {card.get('id')} -- its title-derived customId "
+                  f"[{derived_key}] is already claimed by an existing issue or another candidate; "
+                  "promoting it would collide and stall the ordinary sync")
+            continue
+        if derived_key is not None:
+            claimed_keys.add(derived_key)
+        selected.append(card)
+    return selected
 
 
 def _issue_body(card: dict, cfg: dict) -> str:
@@ -223,10 +246,14 @@ def _writeback(cfg: dict, apply: bool, card: dict, issue: dict) -> None:
     permanently disqualifying it from `_is_candidate` (see the external-link check above) while its
     join key was never actually established -- stranding it with no further retry path at all.
 
-    The link write is skipped (with a WARN) when `card` already carries the plural, array-shaped
-    `externalLinks` field: agileplace._card_value_for_patch_path has no case for the singular
-    `/externalLink` path this feature writes, so a 409/428 conflict on that write can never retry --
-    it unconditionally re-raises (see API-VALIDATION.md and _card_for_link_write below).
+    The link write is skipped (with a WARN) whenever `card` already carries ANY external link --
+    either the plural, array-shaped `externalLinks` field (agileplace._card_value_for_patch_path has
+    no case for the singular `/externalLink` path this feature writes, so a 409/428 conflict on that
+    write can never retry -- it unconditionally re-raises; see API-VALIDATION.md and
+    _card_for_link_write below) OR a singular, populated `externalLink` (a candidate deliberately
+    KEEPS a foreign link -- one not matching a known target-repo issue URL -- per _is_candidate, and
+    a singular `/externalLink` `add` REPLACES an occupied property, so writing here would silently
+    destroy that foreign Jira/doc link). Only a bare, link-less card gets the intake link written.
 
     The customId write above may bump the card's server-side resource version. The link write below
     must never reuse `card`'s now-possibly-stale version for its own PATCH -- doing so would send a
@@ -237,9 +264,11 @@ def _writeback(cfg: dict, apply: bool, card: dict, issue: dict) -> None:
     key = _writeback_key(card.get("title", ""), issue["number"])
     agileplace.patch_card(cfg, apply, card, [agileplace.op_custom_id(key)],
                           note=f"intake customId -> {key}")
-    if "externalLinks" in card:
-        print(f"WARN  card {card_id}: has array-shaped externalLinks -- skipping intake link "
-              "writeback (unsupported shape); customId writeback already completed")
+    if "externalLinks" in card or card.get("externalLink"):
+        print(f"WARN  card {card_id}: already carries an external link -- skipping intake link "
+              "writeback (a singular /externalLink `add` would REPLACE an existing foreign link, "
+              "and the array externalLinks shape is unsupported here); customId writeback already "
+              "completed")
     else:
         link_op = op_external_link(f"GitHub #{issue['number']}", issue["url"])
         agileplace.patch_card(cfg, apply, _card_for_link_write(cfg, apply, card), [link_op],

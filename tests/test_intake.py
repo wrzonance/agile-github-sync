@@ -504,6 +504,47 @@ def test_find_marked_issue_resumes_regardless_of_issue_state(state):
     assert found is not None and found["state"] == state
 
 
+# --- title-derived customId collision guard (issue #62 follow-up) -------------
+#
+# _is_candidate accepts a card by its OWN (possibly blank) customId, but promotion writes back a
+# customId DERIVED FROM THE CARD'S TITLE (_writeback_key -> title_key of a [KEY] prefix). If that
+# derived key already belongs to a different URL-owned card -- an existing issue's issue_custom_id,
+# or another candidate this run -- the writeback creates a customId collision that the next sync's
+# _reconciled_custom_id_index fail-closed guard aborts on. intake_candidates must drop such cards.
+
+def test_candidate_with_title_derived_key_claimed_by_existing_issue_is_excluded():
+    # Blank own customId (so _is_candidate accepts it) but a [EP-9] title whose derived key EP-9 is
+    # already the customId of an existing issue -- promoting it would collide and stall all sync.
+    existing = [{"number": 3, "title": "[EP-9] Existing", "url": "https://github.com/o/r/issues/3",
+                 "state": "OPEN"}]
+    card = {"id": "card-1", "laneId": "lane-intake", "title": "[EP-9] Fresh request"}
+
+    result = intake.intake_candidates([card], _lanes(), _stage_map(), existing)
+
+    assert result == []
+
+
+def test_two_candidates_sharing_a_title_derived_key_promote_only_the_first():
+    cards = [
+        {"id": "card-1", "laneId": "lane-intake", "title": "[DUP-1] First"},
+        {"id": "card-2", "laneId": "lane-intake", "title": "[DUP-1] Second"},
+    ]
+
+    result = intake.intake_candidates(cards, _lanes(), _stage_map(), _issues())
+
+    assert [c["id"] for c in result] == ["card-1"]
+
+
+def test_candidate_with_an_unclaimed_title_derived_key_is_still_kept():
+    """The guard drops only genuine collisions -- a bracket-titled card whose derived key matches no
+    existing issue and no earlier candidate is promoted normally (no over-rejection)."""
+    card = {"id": "card-1", "laneId": "lane-intake", "title": "[NEW-1] Fresh"}
+
+    result = intake.intake_candidates([card], _lanes(), _stage_map(), _issues())
+
+    assert [c["id"] for c in result] == ["card-1"]
+
+
 # --- _writeback_key ------------------------------------------------------------
 
 def test_writeback_key_uses_bracketed_title_prefix_when_present():
@@ -589,6 +630,25 @@ def test_writeback_skips_link_write_and_warns_for_array_shaped_external_links(mo
 
     assert len(calls) == 1
     assert calls[0]["path"] == "/customId"
+    assert "WARN" in capsys.readouterr().out
+
+
+def test_writeback_skips_link_write_and_warns_for_a_singular_foreign_external_link(monkeypatch,
+                                                                                   capsys):
+    """A candidate deliberately KEEPS a foreign singular externalLink (per _is_candidate -- only a
+    link matching a known target issue URL disqualifies). The intake link write must be skipped: a
+    singular `/externalLink` `add` REPLACES an occupied property, so writing it would silently
+    destroy that foreign Jira/doc link. The customId writeback still proceeds."""
+    calls = []
+    monkeypatch.setattr(agileplace, "patch_card",
+                         lambda cfg, apply, card, ops, **k: calls.append(ops[0]))
+    card = {"id": "card-1", "title": "Card 1",
+            "externalLink": {"url": "https://jira.example.test/TICKET-1"}}
+    issue = {"number": 7, "url": "https://github.com/o/r/issues/7"}
+
+    intake._writeback({}, False, card, issue)
+
+    assert [c["path"] for c in calls] == ["/customId"]
     assert "WARN" in capsys.readouterr().out
 
 

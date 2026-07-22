@@ -17,6 +17,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import intake  # noqa: E402
@@ -95,6 +97,38 @@ def test_main_calls_intake_promote_with_full_unfiltered_cards_and_issues(tmp_pat
     assert call_lanes == lanes
     assert call_stage_map == {"Intake": ["New Requests"]}
     assert call_issues == issues
+
+
+def test_main_runs_intake_only_after_the_fail_closed_identity_check(tmp_path):
+    """P2 regression (issue #62 follow-up): intake.promote() must run only AFTER
+    _reconciled_custom_id_index's ambiguous-identity guard. On a board where one issue matches one
+    card by URL but a DIFFERENT card by customId, the run must SystemExit before any intake write --
+    so promote() (and the writes it would make) is never reached. Before the fix, intake ran at the
+    top of the pipeline and mutated the board before this fail-closed check aborted the run."""
+    cfg = _cfg(tmp_path)
+    state_file = tmp_path / ".sync-state.json"
+    url_card = {"id": "C-url", "externalLink": {"url": ISSUE_URL}, "laneId": "LANE1"}
+    cid_card = {"id": "C-cid", "customId": "1", "laneId": "LANE1"}  # issue #1's fallback customId
+
+    stack = ExitStack()
+    stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
+    stack.enter_context(patch("ghkit.list_issues", return_value=[_issue()]))
+    stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
+    stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
+    stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
+    stack.enter_context(patch("ghproject.configured", return_value=False))
+    stack.enter_context(patch("agileplace.board_layout", return_value=[]))
+    stack.enter_context(patch("agileplace.list_cards", return_value=[url_card, cid_card]))
+    stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
+    stack.enter_context(patch("agileplace.patch_card"))
+    stack.enter_context(patch("agileplace.create_card", return_value={}))
+    promote_mock = stack.enter_context(patch("intake.promote"))
+
+    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+         patch("sys.argv", ["sync.py", "--apply"]), pytest.raises(SystemExit):
+        sync.main()
+
+    promote_mock.assert_not_called()
 
 
 def test_main_prints_intake_summary_line_only_when_candidates_nonzero(tmp_path, capsys):
