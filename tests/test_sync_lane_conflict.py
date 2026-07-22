@@ -33,13 +33,13 @@ import ghkit  # noqa: E402
 import sync  # noqa: E402
 
 
-def _issue(number: int, key: str, *, assignees: tuple[str, ...] = ()) -> dict:
+def _issue(number: int, key: str, *, assignees: tuple[str, ...] = (), state: str = "OPEN") -> dict:
     """A raw gh-CLI-shaped issue whose title-key customId is `key` -- shared across issues to force
     a customId-match collision onto one card."""
     return {
         "number": number,
         "title": f"[{key}] issue {number}",
-        "state": "OPEN",
+        "state": state,
         "stateReason": "",
         "labels": [],
         "milestone": None,
@@ -80,8 +80,13 @@ _LANES = [
     {"id": "L-REVIEW", "title": "In Review", "cardStatus": "started"},
 ]
 
+# A third lane, used only by the three-distinct-values test below to exercise a second conflicting
+# call (rather than a second call that merely re-poisons the same already-seen value).
+_LANES_WITH_DONE = _LANES + [{"id": "L-DONE", "title": "Done", "cardStatus": "finished"}]
 
-def _run_main(tmp_path, monkeypatch, raw_issues, card, *, open_pr_numbers: frozenset = frozenset()):
+
+def _run_main(tmp_path, monkeypatch, raw_issues, card, *, open_pr_numbers: frozenset = frozenset(),
+              lanes: list[dict] = _LANES):
     monkeypatch.setattr(
         ghkit, "run", lambda *_a, **_k: SimpleNamespace(stdout=json.dumps(raw_issues)))
     stack = ExitStack()
@@ -94,7 +99,7 @@ def _run_main(tmp_path, monkeypatch, raw_issues, card, *, open_pr_numbers: froze
     stack.enter_context(patch("ghproject.items", return_value={}))
     stack.enter_context(patch("ghproject.field_meta", return_value=None))
     stack.enter_context(patch("ghproject.hydrate_item_dates", return_value={}))
-    stack.enter_context(patch("agileplace.board_layout", return_value=list(_LANES)))
+    stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes)))
     stack.enter_context(patch("agileplace.list_cards", return_value=[card]))
     stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
     create_card = stack.enter_context(patch("agileplace.create_card", return_value={}))
@@ -122,6 +127,9 @@ def test_conflicting_laneid_ops_poison_the_card_and_skip_its_flush(tmp_path, mon
     out = capsys.readouterr().out
     poison_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 poisoned")]
     assert len(poison_lines) == 1, "exactly one poisoning WARN for the card, not one per op"
+    assert "'L-REVIEW'" in poison_lines[0], (
+        "WARN must name the actual conflicting /laneId value, not a placeholder")
+    assert "new value" not in poison_lines[0]
 
     create_card.assert_not_called()
     patch_card.assert_not_called()
@@ -162,6 +170,26 @@ def test_poisoning_is_monotonic_within_a_run(tmp_path, monkeypatch, capsys):
     poison_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 poisoned")]
     assert len(poison_lines) == 1, "poisoning WARN fires once, on the conflicting call only"
 
-    # If the third (non-conflicting) call had wrongly un-poisoned the entry, this card would flush.
+
+def test_each_distinct_conflicting_value_gets_its_own_warn_line(tmp_path, monkeypatch, capsys):
+    """Three distinct /laneId values (not just two) must print a WARN for EVERY conflicting call
+    after the first-seen value, not just the first: L-PROG (adopted) -> L-REVIEW (conflicts vs the
+    frozen L-PROG, WARN #1) -> L-DONE (also conflicts vs the still-frozen L-PROG, WARN #2), each
+    naming its own conflicting value."""
+    first = _issue(1, "KEY", assignees=("dev",))          # -> "In progress" -> L-PROG (adopted)
+    second = _issue(2, "KEY")                              # has_open_pr -> "In review" -> L-REVIEW (conflict #1)
+    third = _issue(3, "KEY", state="CLOSED")               # -> "Done" -> L-DONE (conflict #2)
+    card = _card_with_customid("500", "KEY")
+
+    create_card, patch_card = _run_main(
+        tmp_path, monkeypatch, [first, second, third], card,
+        open_pr_numbers=frozenset({2}), lanes=_LANES_WITH_DONE)
+
+    out = capsys.readouterr().out
+    poison_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 poisoned")]
+    assert len(poison_lines) == 2, "a fresh WARN for every conflicting call, not just the first"
+    assert "'L-REVIEW'" in poison_lines[0]
+    assert "'L-DONE'" in poison_lines[1]
+
     create_card.assert_not_called()
     patch_card.assert_not_called()

@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from card_coherence import contested_cards, lane_conflict  # noqa: E402
+from card_coherence import contested_cards, laneid_op_value, lane_conflict  # noqa: E402
 
 
 # --- contested_cards --------------------------------------------------------
@@ -99,3 +99,33 @@ def test_lane_conflict_never_mutates_ops_and_never_raises():
     # Malformed/empty inputs must never raise.
     assert lane_conflict([], None) == (None, False)
     assert lane_conflict([{"op": "replace", "path": "/other"}], "lane-a") == ("lane-a", False)
+
+
+# --- laneid_op_value ----------------------------------------------------------
+
+def test_laneid_op_value_returns_none_when_no_laneid_op():
+    ops = [{"op": "replace", "path": "/title", "value": "x"}]
+    assert laneid_op_value(ops) is None
+    assert laneid_op_value([]) is None
+
+
+def test_laneid_op_value_returns_the_laneid_op_value():
+    ops = [{"op": "replace", "path": "/title", "value": "x"},
+           {"op": "replace", "path": "/laneId", "value": "lane-b"}]
+    assert laneid_op_value(ops) == "lane-b"
+
+
+def test_laneid_op_value_returns_last_laneid_op_value_when_multiple():
+    ops = [{"op": "replace", "path": "/laneId", "value": "lane-a"},
+           {"op": "replace", "path": "/laneId", "value": "lane-b"}]
+    assert laneid_op_value(ops) == "lane-b"
+
+
+def test_laneid_op_value_never_mutates_ops_and_never_raises():
+    ops = [{"op": "replace", "path": "/laneId", "value": "lane-b"}]
+    ops_before = copy.deepcopy(ops)
+
+    laneid_op_value(ops)
+
+    assert ops == ops_before
+    assert laneid_op_value([{"op": "replace", "path": "/other"}]) is None

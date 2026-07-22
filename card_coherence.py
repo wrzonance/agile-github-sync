@@ -60,3 +60,17 @@ def lane_conflict(ops: list[dict], current_lane_id: str | None) -> tuple[str | N
         elif value != lane_id:
             conflict = True
     return lane_id, conflict
+
+
+def laneid_op_value(ops: list[dict]) -> str | None:
+    """Return the value of the last '/laneId' replace op in `ops`, or None if `ops` carries no
+    '/laneId' op at all. Used by callers (sync.py's queue()) that already know a conflict occurred
+    via lane_conflict() and need the raw incoming lane value for a diagnostic message -- lane_conflict
+    itself only reports whether a conflict happened, not which value triggered it.
+
+    Pure: never mutates `ops`; never raises."""
+    value = None
+    for op in ops:
+        if op.get("path") == "/laneId":
+            value = op.get("value")
+    return value

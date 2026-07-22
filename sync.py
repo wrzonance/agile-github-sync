@@ -24,7 +24,7 @@ import agileplace
 import ghkit
 import ghproject
 import vetting_latch
-from card_coherence import contested_cards, lane_conflict
+from card_coherence import contested_cards, laneid_op_value, lane_conflict
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
 from stages import (epic_key_for_task, is_retired_issue, issue_stage,
@@ -710,8 +710,9 @@ def main() -> None:
         new_lane_id, conflict = lane_conflict(ops, entry["lane_id"])
         if conflict:
             entry["poisoned"] = True
+            conflicting_value = laneid_op_value(ops)
             print(f"WARN  card {cid} poisoned: conflicting /laneId ops "
-                  f"({entry['lane_id']!r} vs new value)")
+                  f"({entry['lane_id']!r} vs {conflicting_value!r})")
         else:
             entry["lane_id"] = new_lane_id
         entry["ops"].extend(ops)
