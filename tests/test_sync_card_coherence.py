@@ -371,6 +371,60 @@ def test_layer2_poisoned_epic_card_gets_no_connect_or_disconnect_calls(tmp_path,
     create_card_mock.assert_not_called()
 
 
+# --- Issue #75 task 5: a satisfied-in-place claim + a differing customId claim is fenced, not
+#     silently overwritten ---------------------------------------------------------------------
+
+def test_satisfied_in_place_claim_plus_differing_lane_claim_is_fenced_not_silently_overwritten(
+        tmp_path, capsys):
+    """The concrete bug this issue exists to close: issue1's own desired lane already matches the
+    card's CURRENT lane, so its lane-move body queues NO op at all (`_apply_lane_move` only calls
+    `queue()` when `current not in acceptable`) -- while issue2, sharing the same `[KEY]` customId
+    with zero URL claims of its own, wants a genuinely different lane and so queues exactly one op.
+
+    Pre-#75 this was worse than a Layer-2 lane conflict: Layer 1 (URL-only) never saw either claim,
+    and Layer 2's queue() conflict check needs >= 2 *competing* ops on the same card id to fire --
+    with only ONE op ever queued (issue1 contributes none), queue() sees no conflict at all, so the
+    card would be silently PATCHed to issue2's target lane as if issue1 never claimed it, with no
+    WARN anywhere. Post-#75 the widened Layer 1 fence excludes the card on claimant count alone,
+    before either issue ever reaches queue() -- regardless of whether their ops would collide.
+
+    Fencing must be a *defer*, not a poison: an unrelated card syncs normally in the same run, and
+    the run still reaches save_state so `.sync-state.json` persists for the rest of the run."""
+    in_place_issue = _issue(1, "[KEY] issue one", assignees=("dev",))              # -> In progress
+    moving_issue = _issue(2, "[KEY] issue two", labels=("agent:in-review",))       # -> In review
+    # Card already sits in L-PROG: in_place_issue's own lane move queues no op (already acceptable);
+    # only moving_issue's op would ever reach queue() pre-#75. Zero URL claims -> customId-only match.
+    fenced_card = _card("500", "KEY", [], lane_id="L-PROG")
+
+    unrelated_issue = _issue(3, "widget three", assignees=("dev",))               # -> In progress -> L-PROG
+    unrelated_card = _card("600", "3", [unrelated_issue["url"]], lane_id="L-ELSEWHERE")
+
+    create_card_mock, patch_card_mock = _run_main_once(
+        tmp_path,
+        [in_place_issue, moving_issue, unrelated_issue],
+        [fenced_card, unrelated_card],
+        lanes=(_PROG_LANE, _REVIEW_LANE),
+    )
+
+    out = capsys.readouterr().out
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN  card 500 claimed by")]
+    assert len(warn_lines) == 1, "the fence must fire even though only one of the two issues has an op"
+    assert "2 issue URLs" in warn_lines[0]
+    assert in_place_issue["url"] in warn_lines[0] and moving_issue["url"] in warn_lines[0]
+
+    # The fenced card is never touched -- no silent overwrite to moving_issue's target lane.
+    patched_ids = [call.args[2].get("id") for call in patch_card_mock.call_args_list]
+    assert "500" not in patched_ids, "a satisfied-in-place claim must not let the other claim win silently"
+    create_card_mock.assert_not_called()
+
+    # Fencing stays local: the unrelated card still gets its ordinary lane-move PATCH this run.
+    assert "600" in patched_ids, "an unrelated card must sync normally despite the fenced card"
+
+    # Fencing is a defer, not a poison: the run completes and persists state for the rest of the run.
+    assert (tmp_path / ".sync-state.json").exists(), \
+        "a fenced card must not abort save_state for the rest of the run"
+
+
 # --- Issue #75 task 4: the step-4 dependency guard skips a Layer-2-poisoned card ------------------
 
 def test_layer2_poisoned_card_gets_no_dependency_writes(tmp_path, capsys):
