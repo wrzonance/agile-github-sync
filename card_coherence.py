@@ -23,6 +23,10 @@ id, each entry carrying a `'poisoned'` bool set by the Layer 2 lane-conflict che
 just the set of card ids marked poisoned, so callers elsewhere in the run (e.g. child-connection and
 dependency writes) can skip a poisoned card's ops without reaching into `card_ops`'s internal shape
 themselves.
+
+filter_poisoned_edges: the shared "drop poisoned ids out of an already-computed adds/removes pair"
+step both the child-connection loop and sync_dependencies() need -- extracted here (rather than
+duplicated inline in sync.py, as it briefly was) so the two call sites can't drift apart.
 """
 from __future__ import annotations
 
@@ -107,6 +111,23 @@ def poisoned_card_ids(card_ops: dict) -> frozenset[str]:
         cid for cid, entry in card_ops.items()
         if isinstance(entry, dict) and entry.get("poisoned")
     )
+
+
+def filter_poisoned_edges(adds: list[str], removes: list[str],
+                          poisoned: frozenset[str]) -> tuple[list[str], list[str], bool]:
+    """Drop any poisoned card id out of an already-computed adds/removes pair (child connections
+    or dependencies), returning (filtered_adds, filtered_removes, dropped). `dropped` is True iff
+    filtering actually removed at least one id, so the caller knows whether to print its own
+    context-specific WARN (naming "child" vs "dependency" writes) -- this function has no opinion
+    on that message. Filtering the RESULT rather than pre-filtering the caller's `desired` set
+    matters: a still-linked-but-poisoned card must never be misread as a stale edge and queued
+    into `removes` just because it was excluded from `desired` up front.
+
+    Pure: never mutates `adds`/`removes`; never raises; no I/O."""
+    filtered_adds = [a for a in adds if a not in poisoned]
+    filtered_removes = [r for r in removes if r not in poisoned]
+    dropped = len(filtered_adds) != len(adds) or len(filtered_removes) != len(removes)
+    return filtered_adds, filtered_removes, dropped
 
 
 def laneid_op_value(ops: list[dict]) -> str | None:

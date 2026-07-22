@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from card_coherence import (  # noqa: E402
     contested_cards,
+    filter_poisoned_edges,
     laneid_op_value,
     lane_conflict,
     poisoned_card_ids,
@@ -272,3 +273,48 @@ def test_poisoned_card_ids_never_mutates_card_ops():
     poisoned_card_ids(card_ops)
 
     assert card_ops == card_ops_before
+
+
+# --- filter_poisoned_edges (issue #75) ----------------------------------------
+# Shared by sync.py's child-connection loop and sync_dependencies() -- both compute an
+# adds/removes pair and then must drop any poisoned card id from either list, reporting
+# whether anything was actually dropped so the caller can print its own WARN.
+
+def test_filter_poisoned_edges_passes_through_when_nothing_is_poisoned():
+    adds, removes, dropped = filter_poisoned_edges(["1", "2"], ["3"], frozenset())
+    assert adds == ["1", "2"]
+    assert removes == ["3"]
+    assert dropped is False
+
+
+def test_filter_poisoned_edges_drops_poisoned_ids_from_adds():
+    adds, removes, dropped = filter_poisoned_edges(["1", "2"], [], frozenset({"2"}))
+    assert adds == ["1"]
+    assert removes == []
+    assert dropped is True
+
+
+def test_filter_poisoned_edges_drops_poisoned_ids_from_removes():
+    adds, removes, dropped = filter_poisoned_edges([], ["3", "4"], frozenset({"4"}))
+    assert adds == []
+    assert removes == ["3"]
+    assert dropped is True
+
+
+def test_filter_poisoned_edges_drops_from_both_lists_at_once():
+    adds, removes, dropped = filter_poisoned_edges(["1", "2"], ["3", "4"], frozenset({"2", "3"}))
+    assert adds == ["1"]
+    assert removes == ["4"]
+    assert dropped is True
+
+
+def test_filter_poisoned_edges_never_mutates_inputs_and_never_raises():
+    adds = ["1", "2"]
+    removes = ["3"]
+    adds_before, removes_before = list(adds), list(removes)
+
+    filter_poisoned_edges(adds, removes, frozenset({"2"}))
+
+    assert adds == adds_before
+    assert removes == removes_before
+    assert filter_poisoned_edges([], [], frozenset()) == ([], [], False)

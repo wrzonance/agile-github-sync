@@ -1,12 +1,22 @@
 """Regression-budget invariants for issue #70 (card coherence: contested-card exclusion +
-lane-conflict poisoning).
+lane-conflict poisoning) and issue #75 (widened contested_cards() customId fencing +
+poisoned-child/poisoned-dependency guards).
 
-sync.py was already 828 lines before this change -- over the repo's 800-line hard cap. The
-design deliberately extracted the two genuinely-new pieces of logic (contested_cards(),
+sync.py was already 828 lines before issue #70's first commit -- over the repo's 800-line hard
+cap. The design deliberately extracted the two genuinely-new pieces of logic (contested_cards(),
 lane_conflict()) into a new pure module, card_coherence.py, specifically so sync.py would only
-grow by thin wiring (an import, the contested-card WARN loop, four added filter predicates, one
-skip in the retirement loop, queue()'s rewritten body, and one skip in the flush loop) rather than
-by the ~37 lines of logic the spike's inline draft would have added directly.
+grow by thin wiring rather than by re-inlining logic that belongs in card_coherence.py.
+
+Between issue #70 and issue #75, three unrelated PRs (#62 reverse-intake, #64 richtext, plus the
+#69/#72 latch-repair and conflict-retry work) merged into this same line of history and grew
+sync.py to 908 lines by main()'s own intake-promotion wiring -- none of that growth is issue #75's
+to own, and re-deriving PRE_CHANGE_SYNC_LINES from #70's original 828 baseline would blame #75 for
+line growth #75 didn't cause. PRE_CHANGE_SYNC_LINES is therefore recaptured immediately before
+issue #75's first commit (0a72eb3, sync.py at 908 lines) -- the same "baseline right before this
+change's own commits" contract the constant has always documented, just re-anchored to the point
+issue #75 actually started from. issue #75 added its own thin wiring (widen contested_cards() to
+also fence pure-customId collisions, plus poisoned-child and poisoned-dependency guards sharing
+the extracted card_coherence.filter_poisoned_edges() helper) totalling under WIRING_BUDGET_LINES.
 
 These tests pin, at the repo boundary (not sync.py's internals):
 
@@ -32,15 +42,17 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Baseline captured from `git log` immediately before issue #70's first commit (4a69b23).
-PRE_CHANGE_SYNC_LINES = 828
+# Baseline captured from `git log` immediately before issue #75's first commit (0a72eb3) -- i.e.
+# immediately after the unrelated #62/#64/#69/#72 merges this branch bundles, none of which are
+# issue #75's own scope to be budgeted against (see module docstring).
+PRE_CHANGE_SYNC_LINES = 908
 
-# Wiring-only budget: import (1) + contested-loop (4) + four filter predicates (~4) +
-# retirement-loop skip (2) + queue() rewrite (~6) + flush-loop skip (2), plus comments/
-# blank-line slack. Deliberately generous but far short of the ~37 lines the spike's inline
-# (non-extracted) draft would have added -- that draft would have pushed sync.py to 865,
-# compounding the pre-existing 800-line violation instead of avoiding it.
-WIRING_BUDGET_LINES = 50
+# Wiring-only budget for issue #75's own addition: widen contested_cards()'s call site to also
+# fence pure-customId collisions, a poisoned-child guard in the step-3 child-connection loop, a
+# poisoned-dependency guard in step 4, both sharing the extracted card_coherence.filter_poisoned_
+# edges() helper (rather than duplicating the drop/WARN logic inline at each call site), plus the
+# import line -- net ~29 lines. Deliberately generous slack over that actual addition.
+WIRING_BUDGET_LINES = 40
 
 # Pre-existing suite size before issue #70's own test files
 # (test_card_coherence.py, test_sync_contested_cards.py, test_sync_lane_conflict.py,

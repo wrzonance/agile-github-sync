@@ -25,7 +25,8 @@ import ghkit
 import ghproject
 import intake
 import vetting_latch
-from card_coherence import contested_cards, laneid_op_value, lane_conflict, poisoned_card_ids
+from card_coherence import (contested_cards, filter_poisoned_edges, laneid_op_value,
+                            lane_conflict, poisoned_card_ids)
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
 from stages import (epic_key_for_task, is_retired_issue, issue_custom_id,
@@ -205,11 +206,9 @@ def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by:
                 continue
             current = agileplace.incoming_dependency_ids(entries)
         adds, removes = _dependency_changes(desired, current, removal_authority_card_ids)
-        filtered_adds = [a for a in adds if a not in poisoned]
-        filtered_removes = [r for r in removes if r not in poisoned]
-        if len(filtered_adds) != len(adds) or len(filtered_removes) != len(removes):
+        adds, removes, dropped = filter_poisoned_edges(adds, removes, poisoned)
+        if dropped:
             print(f"WARN  [{key}] dropping poisoned card id(s) from dependency writes")
-        adds, removes = filtered_adds, filtered_removes
         if adds:
             agileplace.create_dependencies(cfg, apply, cid, adds)
             print(f"{'dep   ' if apply else 'DRY  '} [{key}] +{len(adds)} dependency(ies)")
@@ -884,13 +883,12 @@ def main() -> None:
             desired, existing, managed_card_ids,
             authoritative=authoritative and existing_snapshot is not None)
         # Issue #75: a poisoned CHILD card must never be connected/disconnected either -- filter
-        # the already-computed adds/removes rather than pre-filtering `desired`, so a
-        # still-linked-but-poisoned child never gets misread as a stale edge and queued for removal.
-        filtered_adds = [a for a in adds if a not in poisoned]
-        filtered_removes = [r for r in removes if r not in poisoned]
-        if len(filtered_adds) != len(adds) or len(filtered_removes) != len(removes):
+        # the already-computed adds/removes (see filter_poisoned_edges) rather than pre-filtering
+        # `desired`, so a still-linked-but-poisoned child never gets misread as a stale edge and
+        # queued for removal.
+        adds, removes, dropped = filter_poisoned_edges(adds, removes, poisoned)
+        if dropped:
             print(f"WARN  [{key}] dropping poisoned child card id(s) from connect/disconnect")
-        adds, removes = filtered_adds, filtered_removes
         if adds:
             agileplace.connect_children(cfg, apply, str(parent["id"]), adds)
             print(f"{'link ' if apply else 'DRY  '} [{key}] +{len(adds)} child card(s)")

@@ -425,6 +425,54 @@ def test_satisfied_in_place_claim_plus_differing_lane_claim_is_fenced_not_silent
         "a fenced card must not abort save_state for the rest of the run"
 
 
+# --- Issue #75 task 3 (sibling case): a clean parent's poisoned CHILD card is dropped, not
+#     just a poisoned parent -----------------------------------------------------------------------
+
+def test_layer2_poisoned_child_card_is_dropped_from_connect_children(tmp_path, capsys):
+    """The epic's own card (500) is clean -- URL-matched, no lane conflict of its own -- but its
+    desired child card (700) is poisoned by a genuine Layer 2 lane conflict between two OTHER
+    issues (task1/task2) that collide on the same customId with zero URL claims of their own.
+    Without the child-poison filter in the epics loop, connect_children would still be called with
+    the poisoned child id included, because the parent-poisoned guard above never fires for this
+    shape (the parent card 500 is never poisoned at all)."""
+    epic = _issue(1, "epic one", labels=("type:epic",))
+    task1 = _issue(2, "[KEY] task one", assignees=("dev",))              # -> In progress
+    task2 = _issue(3, "[KEY] task two", labels=("agent:in-review",))     # -> In review (conflict)
+    epic_card = _card("500", "1", [epic["url"]], lane_id="L-ELSEWHERE")
+    poisoned_task_card = _card("700", "KEY", [])  # zero URL claims -- matched only via customId
+
+    connect_children_mock = Mock()
+    disconnect_children_mock = Mock()
+
+    stack, create_card_mock, patch_card_mock = _mock_io(
+        [epic, task1, task2], [epic_card, poisoned_task_card], lanes=(_PROG_LANE, _REVIEW_LANE))
+    with stack, \
+            patch("sync.contested_cards", return_value={}), \
+            patch("ghkit.sub_issue_numbers", return_value=[task1["number"], task2["number"]]), \
+            patch("agileplace.card_child_ids", return_value=frozenset()), \
+            patch("agileplace.connect_children", connect_children_mock), \
+            patch("agileplace.disconnect_children", disconnect_children_mock), \
+            patch("sync.env_config", return_value=_cfg(tmp_path)), \
+            patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+            patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    out = capsys.readouterr().out
+    assert "poisoned: conflicting /laneId ops" in out, "the fixture must genuinely reach Layer 2"
+    assert any("dropping poisoned child card id(s)" in line for line in out.splitlines()), (
+        "the poisoned child id must be dropped from connect/disconnect even though the parent "
+        "card is clean")
+
+    connect_children_mock.assert_not_called()
+    disconnect_children_mock.assert_not_called()
+
+    # The poisoned child card never reaches patch_card either (pre-existing Layer 2 flush skip),
+    # while the epic's own clean card is untouched by this invariant.
+    patched_ids = [call.args[2].get("id") for call in patch_card_mock.call_args_list]
+    assert "700" not in patched_ids
+    create_card_mock.assert_not_called()
+
+
 # --- Issue #75 task 4: the step-4 dependency guard skips a Layer-2-poisoned card ------------------
 
 def test_layer2_poisoned_card_gets_no_dependency_writes(tmp_path, capsys):
