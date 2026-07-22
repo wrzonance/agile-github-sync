@@ -458,6 +458,9 @@ def test_backslash_escaped_delimiter_inside_code_span_stays_literal_after_reinse
         "**" * 15_000,
         "~~" * 15_000,
         "*a" * 15_000,
+        # Many unmatched backtick runs of distinct lengths: each opener's closing-run search
+        # must be window-bounded or this input is quadratic in the document size.
+        " ".join("`" * k for k in range(1, 530)),
     ],
 )
 def test_pathological_repeated_delimiters_complete_in_bounded_time(pathological_markdown):

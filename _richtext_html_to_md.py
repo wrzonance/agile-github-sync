@@ -144,17 +144,19 @@ class _MarkdownWalker(HTMLParser):
         self.suppress_text = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.in_code and not self.in_pre and tag not in ("code", "script", "style"):
+            # A GFM code span is literal text -- markup cannot nest inside it. Any other tag
+            # opening while a span is buffering (formatting, <br>, a malformed block-level
+            # <pre>, ...) gets the unified unsupported-tag degrade: nothing emitted for the tag
+            # itself (its markers/fences must not land in self.buffer mid-span) while
+            # handle_data keeps buffering its text into the span. <code> passes through for the
+            # nested-<code> depth handling; script/style so their suppression still applies.
+            return
         if tag == "p":
             self._ensure_block_separator()
         elif tag == "br":
             self.buffer.append("\n")
         elif tag == "pre":
-            if self.in_code and not self.in_pre:
-                # Malformed: <pre> opening inside an active <code> span (a block element inside
-                # an inline one). Same degrade as a directly-nested <code>: don't emit a fence
-                # mid-span -- the <pre>'s content just keeps buffering into the enclosing span
-                # (handle_data's in_code branch), and _close_pre ignores the matching </pre>.
-                return
             self._ensure_block_separator()
             self.in_pre = True
             self.buffer.append("```\n")
@@ -178,6 +180,11 @@ class _MarkdownWalker(HTMLParser):
         # tag itself; handle_data still runs so its content is kept.
 
     def handle_endtag(self, tag: str) -> None:
+        if self.in_code and not self.in_pre and tag not in ("code", "script", "style"):
+            # Mirror of the starttag guard: emits nothing, pops no stack -- the opener either
+            # pushed nothing (guarded) or predates the span (malformed cross-nesting, e.g.
+            # "<strong><code>x</strong>y</code>"); get_markdown flushes it balanced at EOF.
+            return
         if tag == "pre":
             self._close_pre()
         elif tag == "code":
@@ -309,9 +316,8 @@ class _MarkdownWalker(HTMLParser):
 
     def _close_pre(self) -> None:
         if not self.in_pre:
-            # Stray </pre> with no open <pre> -- either genuinely unmatched input, or the
-            # closer of a <pre> that handle_starttag degraded inside an active code span.
-            # Emitting a closing fence here would fabricate one that was never opened.
+            # Stray </pre> (unmatched input, or the closer of a <pre> degraded inside an active
+            # code span) -- emitting a closing fence would fabricate one that was never opened.
             return
         if self.buffer and not self.buffer[-1].endswith("\n"):
             self.buffer.append("\n")

@@ -15,6 +15,14 @@ import re
 # *original* input, never from this module's own output.
 _CODE_SPAN_PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
 
+# How far past an opening backtick run _find_closing_backtick_run will look for the closer --
+# the code-span mirror of _richtext_md_to_html's _MAX_DELIMITER_SCAN bound on every other inline
+# delimiter. Without it, each unmatched run scanned the entire remaining text, making input with
+# many distinct-length unmatched runs quadratic in document size (a few hundred KB of adversarial
+# description text could stall a sync pass for seconds). A genuine closer farther away than this
+# degrades the span to literal text -- the same accepted tradeoff as the other delimiters.
+_MAX_CODE_SPAN_SCAN = 2000
+
 
 def _longest_backtick_run(content: str) -> int:
     """Length of the longest run of consecutive backticks in ``content`` (0 if none). A fence one
@@ -99,13 +107,15 @@ def _backtick_run_length(text: str, i: int) -> int:
 
 def _find_closing_backtick_run(text: str, start: int, run_len: int) -> int:
     """Index of the next run of EXACTLY ``run_len`` consecutive backticks at or after ``start``,
-    or -1 if none exists. Per GFM, a code-span delimiter is matched by run length alone -- a
-    backslash immediately preceding a candidate run has no bearing on whether it closes the span,
-    unlike every other delimiter in richtext.py's Markdown->HTML direction (bold/italic/strike/
-    links), which exempts a backslash-escaped candidate via that module's own
-    _is_backslash_escaped. A run whose length doesn't match is skipped in one jump (not re-scanned
-    backtick-by-backtick), so this never revisits a character once it's been measured."""
-    n = len(text)
+    or -1 if none exists within the bounded window (_MAX_CODE_SPAN_SCAN chars past ``start``).
+    Per GFM, a code-span delimiter is matched by run length alone -- a backslash immediately
+    preceding a candidate run has no bearing on whether it closes the span, unlike every other
+    delimiter in richtext.py's Markdown->HTML direction (bold/italic/strike/links), which exempts
+    a backslash-escaped candidate via that module's own _is_backslash_escaped. A run whose length
+    doesn't match is skipped in one jump (not re-scanned backtick-by-backtick), so this never
+    revisits a character once it's been measured. A candidate run may begin inside the window and
+    extend past it -- it is still measured in full and can match."""
+    n = min(len(text), start + _MAX_CODE_SPAN_SCAN)
     i = start
     while i < n:
         if text[i] == "`":

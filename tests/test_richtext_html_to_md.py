@@ -426,3 +426,20 @@ def test_pre_inside_an_active_code_span_merges_into_the_span_instead_of_breaking
 def test_stray_pre_close_tag_with_no_open_pre_emits_no_fence():
     html = "<p>a</pre>b</p>"
     assert leankit_html_to_markdown(html) == "ab"
+
+
+# --- invariant: a GFM code span is literal text -- no nested markup exists inside it. A
+# formatting tag inside an active <code> span emits no markers (into the span or around it);
+# its text content still merges into the span ------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("html", "expected_markdown"),
+    [
+        ("<p><code><strong>x</strong></code></p>", "`x`"),
+        ("<p><code>a<em>b</em>c</code></p>", "`abc`"),
+        ("<p><code>a<br>b</code></p>", "`ab`"),
+        ("<p>before <code><s>gone</s></code> after</p>", "before `gone` after"),
+    ],
+)
+def test_formatting_tags_inside_a_code_span_emit_no_markers(html, expected_markdown):
+    assert leankit_html_to_markdown(html) == expected_markdown
