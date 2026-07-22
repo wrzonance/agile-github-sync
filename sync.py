@@ -24,6 +24,7 @@ import agileplace
 import ghkit
 import ghproject
 import vetting_latch
+from card_coherence import contested_cards
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
 from stages import (epic_key_for_task, is_retired_issue, issue_stage,
@@ -630,9 +631,19 @@ def main() -> None:
         if cid:
             all_card_by_cid[cid] = card
 
+    # Issue #70 Layer 1: before any card is touched, detect this run's issue URLs that don't
+    # resolve 1:1 onto AgilePlace cards (>= 2 distinct issue URLs claiming the same card id) and
+    # exclude those cards from every match/queue path this run, rather than risk one issue's sync
+    # clobbering another's.
+    contested = contested_cards(active_issues + retired_issues, all_card_by_url)
+    contested_urls = {u for urls in contested.values() for u in urls}
+    for cid, urls in sorted(contested.items()):
+        print(f"WARN  card {cid} claimed by {len(urls)} issue URLs, deferring: {sorted(urls)}")
+
     retired_card_by_url = {
         issue["url"]: all_card_by_url[issue["url"]]
-        for issue in retired_issues if issue["url"] in all_card_by_url
+        for issue in retired_issues
+        if issue["url"] in all_card_by_url and issue["url"] not in contested_urls
     }
     retired_cards = tuple(retired_card_by_url.values())
 
@@ -644,10 +655,14 @@ def main() -> None:
         for card in retired_cards if agileplace.custom_id_value(card)
     }
     card_by_url = {
-        url: card for url, card in all_card_by_url.items() if not reserved_for_retirement(card)
+        url: card for url, card in all_card_by_url.items()
+        if not reserved_for_retirement(card) and url not in contested_urls
     }
     card_by_cid = {
-        cid: card for cid, card in all_card_by_cid.items() if not reserved_for_retirement(card)
+        # `cid` here is the card's customId (the comprehension's loop var), NOT its id -- `contested`
+        # is keyed by card id, so the predicate must test the card's own id, never the loop var.
+        cid: card for cid, card in all_card_by_cid.items()
+        if not reserved_for_retirement(card) and str(card["id"]) not in contested
     }
 
     def retirement_reservation(issue):
@@ -663,7 +678,10 @@ def main() -> None:
         issue["url"]: reservation
         for issue in active_issues if (reservation := retirement_reservation(issue))
     }
-    syncable_issues = [issue for issue in active_issues if issue["url"] not in active_reservations]
+    syncable_issues = [
+        issue for issue in active_issues
+        if issue["url"] not in active_reservations and issue["url"] not in contested_urls
+    ]
     for issue in active_issues:
         reservation = active_reservations.get(issue["url"])
         if reservation:
@@ -690,6 +708,8 @@ def main() -> None:
     # another issue's card. Retirement is independent of Projects/open-PR read health because the
     # CLOSED reason itself is the authoritative signal.
     for issue in retired_issues:
+        if issue["url"] in contested_urls:
+            continue  # Layer 1: contested cards are deferred wholesale, not partially retired
         card = retired_card_by_url.get(issue["url"])
         if card:
             _retire_card(issue, card, lanes, smap, apply, queue)
