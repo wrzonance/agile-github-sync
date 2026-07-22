@@ -374,3 +374,13 @@ def test_inline_html_reinsert_never_raises_on_out_of_range_placeholder_pattern()
     # guarantee holds.
     result = markdown_to_leankit_html("\x009\x00 no real code span here")
     assert isinstance(result, str)
+
+
+def test_inline_html_reinsert_never_raises_on_a_pathologically_long_placeholder_digit_run():
+    # A NUL-delimited digit run longer than CPython's int-string-conversion limit (4300 digits by
+    # default, 3.11+) would make an unguarded int() of the captured digits raise ValueError. Such a
+    # run can only come from adversarial input -- this module's own placeholder indices are tiny --
+    # so it must degrade to untouched text, never raise: totality is a hard invariant regardless of
+    # how contrived the input.
+    result = markdown_to_leankit_html("\x00" + ("9" * 5000) + "\x00")
+    assert isinstance(result, str)

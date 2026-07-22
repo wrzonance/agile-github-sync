@@ -230,10 +230,18 @@ def _reinsert_code_spans(html: str, protected: list[str]) -> str:
     verbatim (already HTML-escaped, never re-passed through the unescape pass). A placeholder-
     shaped substring that doesn't correspond to a real protected span -- possible only if the
     original input happened to contain a literal NUL byte shaped just like this module's internal
-    marker -- is left untouched rather than raising: totality over arbitrary content is a hard
+    marker -- is left untouched rather than raising, whether its digit run is merely out of range
+    or too long for int() to parse at all (see _replace): totality over arbitrary content is a hard
     invariant of this module's public functions."""
     def _replace(match: re.Match[str]) -> str:
-        index = int(match.group(1))
+        try:
+            index = int(match.group(1))
+        except ValueError:
+            # A digit run longer than CPython's int-string-conversion limit (4300 digits by
+            # default, 3.11+) can only come from adversarial input -- this module's own placeholder
+            # indices are tiny -- so leave it untouched rather than raising, exactly as an
+            # out-of-range index below does. Totality (never raises) is a hard invariant.
+            return match.group(0)
         if 0 <= index < len(protected):
             return f"<code>{protected[index]}</code>"
         return match.group(0)
