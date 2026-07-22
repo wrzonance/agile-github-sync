@@ -52,8 +52,12 @@ def _gh_subprocess_env(host: str | None = None) -> dict[str, str]:
     return env
 
 
-def run(cfg: dict, args: list[str], *, check: bool = True,
-        host: str | None = None) -> subprocess.CompletedProcess:
+def run(cfg: dict, args: list[str], *, check: bool = True, host: str | None = None,
+        input: str | None = None) -> subprocess.CompletedProcess:
+    """Run one `gh` invocation. `input`, when given, is piped to the subprocess's stdin -- the
+    mechanism create_issue() uses for `--body-file -` so an issue body never has to survive a shell
+    quoting pass. Every existing call site omits it, so the default (None) reproduces exactly the
+    subprocess.run(input=None) behavior those call sites already relied on."""
     target = cfg.get("target_repo_path")
     if target is None:
         raise SystemExit("TARGET_REPO_PATH is not set (.env or environment) -- cannot target the repo")
@@ -62,7 +66,7 @@ def run(cfg: dict, args: list[str], *, check: bool = True,
     try:
         return subprocess.run(["gh", *args], cwd=str(target), check=check, capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=GH_TIMEOUT,
-                              env=_gh_subprocess_env(host))
+                              env=_gh_subprocess_env(host), input=input)
     except subprocess.CalledProcessError as exc:
         # Surface gh's own message; captured-and-discarded stderr makes every failure opaque.
         if exc.stderr:
@@ -128,6 +132,31 @@ def list_issues(cfg: dict) -> list[dict]:
             "has_open_pr": False,  # populated by open_pr_issue_numbers()
         })
     return normalized
+
+
+def list_issue_bodies(cfg: dict) -> list[dict] | None:
+    """Every issue's number/url/state/body, for the Intake feature's disqualification and marker-
+    resume reads. Tri-state, mirroring open_pr_issue_numbers exactly: a list on success (possibly
+    empty when the repo genuinely has zero issues -- a real, distinguishable result), and **None**
+    on ANY failure (gh error, timeout, or a malformed/non-list response), so callers can tell "no
+    issues" from "we don't know" instead of treating a failed read as an empty snapshot and
+    double-creating issues a resume should have found. `body` is normalized to "" -- gh's JSON
+    output omits the field entirely for a bodyless issue rather than emitting null."""
+    try:
+        out = run(cfg, ["issue", "list", "--state", "all", "--limit", "1000", "--json",
+                        "number,url,state,body"])
+        issues = json.loads(out.stdout or "[]")
+        if not isinstance(issues, list):
+            raise TypeError("gh issue list must return a JSON array")
+        return [{
+            "number": i["number"],
+            "url": i.get("url", ""),
+            "state": i.get("state", ""),
+            "body": i.get("body") or "",
+        } for i in issues]
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
+            KeyError, TypeError):
+        return None
 
 
 def open_pr_issue_numbers(cfg: dict) -> set[int] | None:
