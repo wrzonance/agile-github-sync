@@ -58,6 +58,48 @@ _STAR_MARKER_VARIANTS: dict[str, tuple[str, str]] = {
 _BLANK_LINE_RUN = re.compile(r"\n{3,}")
 
 
+def _longest_backtick_run(content: str) -> int:
+    """Length of the longest run of consecutive backticks in ``content`` (0 if none). A fence one
+    longer than this can never be confused with a run inside the content itself."""
+    longest = 0
+    current = 0
+    for ch in content:
+        if ch == "`":
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def _pad_code_span_content(content: str) -> str:
+    """Pad ``content`` with a symmetric leading/trailing space when either edge would otherwise
+    merge with the fence on re-parsing: an edge backtick (read as part of the fence's own run), or
+    both edges space with at least one non-space char (MD->HTML's GFM strip rule would otherwise
+    misread that as unpadded whitespace and strip it for real). Padding is never applied to only
+    one edge, since that strip rule only fires when BOTH ends are space. All-space ``content`` is
+    left untouched -- GFM's strip rule excludes that case, so padding it would corrupt round-trip."""
+    if not content:
+        return content
+    edge_is_backtick = content[0] == "`" or content[-1] == "`"
+    edge_is_space = content[0] == " " and content[-1] == " " and content.strip(" ")
+    if edge_is_backtick or edge_is_space:
+        return f" {content} "
+    return content
+
+
+def _render_code_span(content: str) -> str:
+    """Render ``content`` as a GFM code span: a fence one backtick longer than its longest
+    internal run (_longest_backtick_run), wrapping edge-padded content (_pad_code_span_content).
+    Empty ``content`` renders as "" -- the documented ``<code></code>`` degrade: even the
+    shortest fence pair would produce a bare "``" that MD->HTML reads back as literal text, not
+    an empty code element, so emitting nothing is the more honest choice."""
+    if not content:
+        return ""
+    fence = "`" * (_longest_backtick_run(content) + 1)
+    return f"{fence}{_pad_code_span_content(content)}{fence}"
+
+
 def _digit_run_end(text: str, start: int) -> int:
     """Index just past the contiguous run of ASCII digits beginning at ``start`` (== start if
     text[start] isn't a digit)."""
@@ -127,6 +169,9 @@ class _MarkdownWalker(HTMLParser):
         self.tag_marker_stack: dict[str, list[str]] = {}
         self.list_stack: list[_ListFrame] = []
         self.href_stack: list[str | None] = []
+        # Accumulates a <code> span's text (outside <pre>) so the fence/padding -- which depend
+        # on the whole span's content -- can be chosen at close time. See _flush_code_span.
+        self.code_span_buffer: list[str] = []
         self.in_code = False
         self.in_pre = False
         self.suppress_text = False
@@ -180,13 +225,19 @@ class _MarkdownWalker(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         # handle_data can fire multiple times for one logical run of text -- always append,
-        # never overwrite the buffer.
+        # never overwrite the buffer/code_span_buffer.
         if self.suppress_text or not data:
             return
-        if self.in_pre or self.in_code:
-            # Code content is literal Markdown (backtick/fence spans don't reinterpret syntax
-            # inside them), so it bypasses _escape_markdown_text entirely.
+        if self.in_pre:
+            # <pre> content is literal Markdown (the fence itself doesn't reinterpret syntax
+            # inside it), so it bypasses _escape_markdown_text entirely.
             self.buffer.append(data)
+            return
+        if self.in_code:
+            # Buffered rather than appended directly -- the right-sized fence/padding
+            # (_render_code_span) can only be chosen once the whole span's content is known, at
+            # close time (_flush_code_span).
+            self.code_span_buffer.append(data)
             return
         self.buffer.append(_escape_markdown_text(data, at_line_start=self._at_line_start()))
 
@@ -194,6 +245,14 @@ class _MarkdownWalker(HTMLParser):
         """Flush any still-open inline-format markers (an unclosed ``<strong>`` degrades to a
         balanced ``**word**`` instead of a dangling ``**word``), join the buffer, and collapse
         blank-line runs to the documented single-blank-line block-separator convention."""
+        if self.in_code and not self.in_pre:
+            # An unclosed <code> at EOF never reaches _close_code, so flush it here or its
+            # buffered content is silently dropped. Runs BEFORE the format_stack loop below since
+            # format_stack no longer carries a code marker -- for degenerate, never-closed nested
+            # tag-soup (e.g. "<code><strong>x", neither closed) this changes the relative order
+            # of the code fence vs. the outer format's closer in the output. A harmless behavior
+            # change with no stated invariant covering it -- documented, not test-pinned.
+            self._flush_code_span()
         while self.format_stack:
             self.buffer.append(self.format_stack.pop())
         text = _BLANK_LINE_RUN.sub("\n\n", "".join(self.buffer))
@@ -233,13 +292,28 @@ class _MarkdownWalker(HTMLParser):
     def _open_code(self) -> None:
         self.in_code = True
         if not self.in_pre:
-            self._open_format("`")
+            # Start collecting this span's content fresh -- the fence/padding it needs can only
+            # be chosen once the whole span is known, at close time.
+            self.code_span_buffer = []
+        # else: inside <pre> -- content goes straight to self.buffer via handle_data, unbuffered.
 
     def _close_code(self) -> None:
+        if self.in_pre:
+            # Still inside <pre> -- the fence itself closes on </pre>, not here.
+            self.in_code = False
+        else:
+            self._flush_code_span()
+
+    def _flush_code_span(self) -> None:
+        """Render the buffered ``<code>`` span's content as a GFM code span (_render_code_span)
+        and append it to the buffer, then reset code-span state. An empty span renders to ""
+        (see _render_code_span's documented degrade) and is not appended -- it leaves no trace in
+        the Markdown output rather than a bare, meaningless "``"."""
+        rendered = _render_code_span("".join(self.code_span_buffer))
+        if rendered:
+            self.buffer.append(rendered)
+        self.code_span_buffer = []
         self.in_code = False
-        if not self.in_pre:
-            self._close_format("`")
-        # else: still inside <pre> -- the fence itself closes on </pre>, not here.
 
     def _close_pre(self) -> None:
         if self.buffer and not self.buffer[-1].endswith("\n"):
