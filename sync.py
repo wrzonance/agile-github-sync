@@ -726,9 +726,13 @@ def main() -> None:
         if issue["url"] in contested_urls:
             continue  # Layer 1: contested cards are deferred wholesale, not partially retired
         card = retired_card_by_url.get(issue["url"])
+        cid_card = all_card_by_cid.get(issue_custom_id(issue))
         if card:
             _retire_card(issue, card, lanes, smap, apply, queue)
-        elif all_card_by_cid.get(issue_custom_id(issue)):
+        elif cid_card and str(cid_card["id"]) not in contested:
+            # A customId match against an already-contested card is not a distinct finding --
+            # Layer 1 already printed the "card N claimed by K issue URLs" WARN for that card id;
+            # warning again here under a different message would duplicate it for the same card.
             print(f"WARN  [{issue_custom_id(issue)}] retired issue has only a customId card match; "
                   "refusing to retire without the GitHub external-link URL")
 

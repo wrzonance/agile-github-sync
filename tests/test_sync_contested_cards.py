@@ -125,9 +125,36 @@ def test_contested_card_exclusion_is_consistent_across_retirement_and_active_pat
 
     out = capsys.readouterr().out
     assert "WARN  card 100 claimed by 2 issue URLs, deferring:" in out
-    assert "customId-only match" not in out, (
+    assert "retired issue has only a customId card match" not in out, (
         "the contested-skip must fire before the retirement loop's customId-fallback WARN branch")
     assert "DRY   retire" not in out
+
+    create_card.assert_not_called()
+    patch_card.assert_not_called()
+
+
+def test_retirement_customid_fallback_does_not_duplicate_the_layer1_contested_warn(
+        tmp_path, monkeypatch, capsys):
+    """A retired issue whose own GitHub URL is unrelated to a contested card must not re-trigger a
+    second WARN for that same card id via the retirement loop's customId-only-match fallback, even
+    when the retired issue's customId happens to equal the contested card's customId. Layer 1
+    already printed the 'card N claimed by K issue URLs' WARN for that card once; the fallback
+    branch reads the unfiltered all_card_by_cid and must exclude cards already reported as
+    contested, or the same card id gets warned about twice under two different messages."""
+    issue1 = _issue(1, "widget one")
+    issue2 = _issue(2, "widget two")
+    contested_card = _card_with_urls("100", "ABC", [issue1["url"], issue2["url"]])
+    # customId "ABC" matches contested_card's customId, but issue 30's own URL claims no card.
+    unrelated_retired = _issue(30, "[ABC] fix the thing", state="CLOSED", state_reason="NOT_PLANNED")
+
+    create_card, patch_card = _run_main(
+        tmp_path, monkeypatch, [issue1, issue2, unrelated_retired], cards=[contested_card])
+
+    out = capsys.readouterr().out
+    assert out.count("WARN  card 100 claimed by") == 1
+    assert "retired issue has only a customId card match" not in out, (
+        "exactly one WARN per contested card id -- never duplicated by the retirement-loop "
+        "customId-match WARN branch")
 
     create_card.assert_not_called()
     patch_card.assert_not_called()
