@@ -23,6 +23,7 @@ from collections.abc import Mapping
 import agileplace
 import ghkit
 import ghproject
+import intake
 import vetting_latch
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
@@ -616,6 +617,17 @@ def main() -> None:
     lanes = agileplace.board_layout(cfg) if online else []
     cards = agileplace.list_cards(cfg) if online else []
     smap = cfg.get("stage_lane_map")
+
+    # Reverse intake (issue #62): promote unmanaged Intake-lane cards into new GitHub issues before
+    # the card index below is built. Uses the FULL, unfiltered cards/issues (not the retirement-
+    # filtered indices below, which #70 owns) -- intake candidate selection has nothing to do with
+    # retirement. A card promoted this run is never lane-moved this run either: `issues` was already
+    # fetched above, so the newly created issue is absent from active_issues and the ordinary
+    # per-issue lane-sync loop can't reach it until next run picks it up via its written-back link.
+    intake_summary = intake.promote(cfg, apply, cards, lanes, smap, issues)
+    if intake_summary.candidates:
+        print(f"intake: {intake_summary.candidates} candidate(s) -- "
+              f"{intake_summary.resumed} resumed, {intake_summary.created} created")
 
     all_card_by_url, all_card_by_cid = {}, {}
     for card in cards:
