@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ghkit import edit_label, is_gh_label_safe  # noqa: E402
 from reconcile import Reconciled  # noqa: E402
-from sync import _filter_gh_safe_labels, sync_metadata  # noqa: E402
+from metadata_sync import _filter_gh_safe_labels, sync_metadata  # noqa: E402
 
 
 # --- is_gh_label_safe: pure, total predicate ------------------------------

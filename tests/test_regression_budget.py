@@ -31,10 +31,37 @@ These tests pin, at the repo boundary (not sync.py's internals):
     companion test below additionally asserts each of issue #70's four new test files is collected
     and contributes at least one test, making that failure loud.
 
+Issue #79 (metadata_sync extraction) re-anchors PRE_CHANGE_SYNC_LINES again, for the same reason
+#75 re-anchored it: three more merges (including #75 itself) grew sync.py back to 908 lines by the
+time #79 started, and none of that growth is #79's to own. But #79's own change is not incremental
+wiring -- it is a genuine reduction, pulling the label/milestone/date reconciliation logic (the old
+sync_metadata/sync_dates plus four private helpers: _label_set, _filter_gh_safe_labels,
+_card_milestones, _stale_milestone_tags) out into a new module, metadata_sync.py. Measuring that
+reduction against the pre-#79 908-line figure would let sync.py re-grow most of the way back to 908
+before the wiring-budget test would ever notice -- so PRE_CHANGE_SYNC_LINES is instead re-pinned
+down to sync.py's own post-extraction size (726 lines, measured via `wc -l` right after the move),
+making the smaller, de-bloated file the new baseline future changes are budgeted against.
+WIRING_BUDGET_LINES itself is unchanged (40) -- it is a generic per-change slack, not specific to
+any one issue's own addition.
+
+Independently of that moving baseline, SYNC_PY_HARD_CAP_LINES pins the repo's own stated 800-line
+file-size hard cap (CLAUDE.md's file-organization convention) as an absolute ceiling: a test that
+does not depend on correctly tracking PRE_CHANGE_SYNC_LINES at all, so a future mis-anchored rebase
+of the wiring budget still can't let sync.py silently cross the repo's own file-size convention.
+
+Also pinned here (Task 3/5 of issue #79): no test file may import a name #79 moved out of sync.py
+from sync's own namespace. sync.py still does `from metadata_sync import sync_dates,
+sync_metadata` to wire its own call sites, so `from sync import sync_metadata` would keep working
+by accident -- silently masking the move and coupling tests to sync.py's incidental re-export
+instead of metadata_sync.py, the module that actually owns the logic now. MS_PREFIX and the four
+private helpers are not re-exported from sync.py at all, so an import of those would fail loudly --
+but sync_metadata/sync_dates need the explicit check.
+
 Run: pytest -q
 """
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import sys
@@ -42,17 +69,37 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Baseline captured from `git log` immediately before issue #75's first commit (0a72eb3) -- i.e.
-# immediately after the unrelated #62/#64/#69/#72 merges this branch bundles, none of which are
-# issue #75's own scope to be budgeted against (see module docstring).
-PRE_CHANGE_SYNC_LINES = 908
+# Baseline re-anchored to sync.py's own size immediately after issue #79's metadata_sync extraction
+# (measured via `wc -l sync.py` post-move) -- see module docstring for why #79 re-pins this down
+# rather than budgeting against the pre-#79 908-line figure.
+PRE_CHANGE_SYNC_LINES = 726
 
 # Wiring-only budget for issue #75's own addition: widen contested_cards()'s call site to also
 # fence pure-customId collisions, a poisoned-child guard in the step-3 child-connection loop, a
 # poisoned-dependency guard in step 4, both sharing the extracted card_coherence.filter_poisoned_
 # edges() helper (rather than duplicating the drop/WARN logic inline at each call site), plus the
-# import line -- net ~29 lines. Deliberately generous slack over that actual addition.
+# import line -- net ~29 lines. Deliberately generous slack over that actual addition. Reused as-is
+# by every later re-anchor of PRE_CHANGE_SYNC_LINES (see #79 in the module docstring) -- it is a
+# generic per-change slack, not specific to #75.
 WIRING_BUDGET_LINES = 40
+
+# Repo-wide absolute ceiling (CLAUDE.md file-organization convention: "800 hard cap"), independent
+# of PRE_CHANGE_SYNC_LINES -- see module docstring.
+SYNC_PY_HARD_CAP_LINES = 800
+
+# Names issue #79 moved out of sync.py into metadata_sync.py. sync_metadata/sync_dates are the two
+# public entry points (still reachable as `sync.sync_metadata` via sync.py's own import -- hence the
+# explicit no-stale-import check); the rest are metadata_sync-private and would fail an import
+# outright.
+MOVED_TO_METADATA_SYNC = (
+    "sync_metadata",
+    "sync_dates",
+    "MS_PREFIX",
+    "_label_set",
+    "_filter_gh_safe_labels",
+    "_card_milestones",
+    "_stale_milestone_tags",
+)
 
 # Pre-existing suite size before issue #70's own test files
 # (test_card_coherence.py, test_sync_contested_cards.py, test_sync_lane_conflict.py,
@@ -77,6 +124,43 @@ def test_sync_py_stays_within_wiring_only_line_budget():
         f"{PRE_CHANGE_SYNC_LINES + WIRING_BUDGET_LINES} "
         f"({PRE_CHANGE_SYNC_LINES} pre-change baseline + {WIRING_BUDGET_LINES} budget). "
         "New decision logic belongs in card_coherence.py, not inlined into sync.py."
+    )
+
+
+def test_sync_py_never_exceeds_repo_hard_cap():
+    """Absolute ceiling, independent of the moving PRE_CHANGE_SYNC_LINES baseline above: sync.py must
+    never cross the repo's own stated 800-line file-organization hard cap, regardless of what the
+    wiring-budget arithmetic says. Catches sync.py crossing that convention even in the (unlikely)
+    case a future re-anchor of PRE_CHANGE_SYNC_LINES + WIRING_BUDGET_LINES were miscalculated past
+    800 itself."""
+    line_count = len(Path(REPO_ROOT / "sync.py").read_text().splitlines())
+
+    assert line_count <= SYNC_PY_HARD_CAP_LINES, (
+        f"sync.py has grown to {line_count} lines, past the repo's own {SYNC_PY_HARD_CAP_LINES}-line "
+        "file-organization hard cap. Extract cohesive logic into its own module rather than letting "
+        "sync.py keep absorbing it."
+    )
+
+
+def test_no_test_file_imports_metadata_sync_names_from_sync():
+    """Issue #79 moved sync_metadata/sync_dates and four private helpers out of sync.py into
+    metadata_sync.py (see module docstring). Parses every tests/test_*.py file's AST (not just the
+    ones currently known to import these names, so a stale import surviving anywhere is caught) for
+    a `from sync import (...)` clause naming a moved symbol -- sync.py's own `from metadata_sync
+    import sync_dates, sync_metadata` would otherwise let such a stale import keep working by
+    accident, silently defeating the extraction."""
+    offenders = []
+    for path in sorted((REPO_ROOT / "tests").glob("test_*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "sync":
+                hit = {alias.name for alias in node.names} & set(MOVED_TO_METADATA_SYNC)
+                if hit:
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}: {sorted(hit)}")
+
+    assert not offenders, (
+        "test file(s) still import issue #79-moved name(s) from sync instead of metadata_sync -- "
+        + "; ".join(offenders)
     )
 
 

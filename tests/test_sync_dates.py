@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sync import sync_dates  # noqa: E402
+from metadata_sync import sync_dates  # noqa: E402
 
 
 def _issue(url="https://github.com/o/r/issues/1", title="[T1] widget"):
@@ -64,7 +64,7 @@ def test_prev_does_not_advance_when_gh_write_is_skipped():
     pitem = _pitem(start="2026-01-01")                        # GitHub unchanged
     state = _issues_state(issue["url"], start="2026-01-01")   # base == current gh_date
     queue = _Queue()
-    with patch("sync.ghproject.set_project_date", return_value=False) as write_mock:
+    with patch("metadata_sync.ghproject.set_project_date", return_value=False) as write_mock:
         sync_dates({}, True, issue, card, pitem, _field_meta(), state, queue)
     write_mock.assert_called_once()
     assert state[issue["url"]]["start"] == "2026-01-01"       # NOT advanced to "2026-02-01"
@@ -77,7 +77,7 @@ def test_prev_advances_when_gh_write_succeeds():
     pitem = _pitem(start="2026-01-01")
     state = _issues_state(issue["url"], start="2026-01-01")
     queue = _Queue()
-    with patch("sync.ghproject.set_project_date", return_value=True) as write_mock:
+    with patch("metadata_sync.ghproject.set_project_date", return_value=True) as write_mock:
         sync_dates({}, True, issue, card, pitem, _field_meta(), state, queue)
     write_mock.assert_called_once()
     assert state[issue["url"]]["start"] == "2026-02-01"
@@ -91,7 +91,7 @@ def test_prev_advances_when_new_already_matches_gh_no_write_attempted():
     pitem = _pitem(start="2026-01-01")                         # GitHub already correct
     state = _issues_state(issue["url"], start=None)            # base: AgilePlace's old (unset) value
     queue = _Queue()
-    with patch("sync.ghproject.set_project_date") as write_mock:
+    with patch("metadata_sync.ghproject.set_project_date") as write_mock:
         sync_dates({}, True, issue, card, pitem, _field_meta(), state, queue)
     write_mock.assert_not_called()
     assert state[issue["url"]]["start"] == "2026-01-01"
@@ -104,7 +104,7 @@ def test_prev_does_not_advance_when_apply_is_false():
     pitem = _pitem(start="2026-01-01")
     state = _issues_state(issue["url"], start="2026-01-01")
     queue = _Queue()
-    with patch("sync.ghproject.set_project_date", return_value=True):
+    with patch("metadata_sync.ghproject.set_project_date", return_value=True):
         sync_dates({}, False, issue, card, pitem, _field_meta(), state, queue)
     assert state[issue["url"]]["start"] == "2026-01-01"        # unchanged
 
@@ -125,7 +125,7 @@ def test_queue_write_happens_even_when_gh_write_is_skipped_for_another_kind():
     pitem = _pitem(start="2026-01-01", target="2026-05-01")                 # GH: start unchanged, target changed
     state = _issues_state(issue["url"], start="2026-01-01", target="2026-04-01")
     queue = _Queue()
-    with patch("sync.ghproject.set_project_date", return_value=False) as write_mock:
+    with patch("metadata_sync.ghproject.set_project_date", return_value=False) as write_mock:
         sync_dates({}, True, issue, card, pitem, _field_meta(), state, queue)
     write_mock.assert_called_once()                              # only "start" needed an attempted GH write
     assert state[issue["url"]]["start"] == "2026-01-01"          # gated: GH write was skipped
@@ -144,7 +144,7 @@ def test_queue_write_skipped_only_when_ap_already_matches_new():
     pitem = _pitem(start="2026-01-01")
     state = _issues_state(issue["url"], start="2026-01-01")
     queue = _Queue()
-    with patch("sync.ghproject.set_project_date") as write_mock:
+    with patch("metadata_sync.ghproject.set_project_date") as write_mock:
         sync_dates({}, True, issue, card, pitem, _field_meta(), state, queue)
     write_mock.assert_not_called()
     assert queue.calls == []
