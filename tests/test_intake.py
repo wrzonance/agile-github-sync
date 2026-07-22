@@ -133,6 +133,27 @@ def test_matching_target_external_link_does_disqualify_candidate():
     assert intake._is_candidate(card, {"lane-intake"}, target_urls, set()) is False
 
 
+def test_intake_candidates_boundary_keeps_a_card_with_only_a_foreign_external_link():
+    """Same invariant as test_foreign_external_link_does_not_disqualify_candidate, but pinned
+    through the public intake_candidates() boundary -- so a regression that bypasses/duplicates
+    _is_candidate's link-matching logic inside intake_candidates() itself is still caught."""
+    cards = [_card("card-1", external_links=[{"url": "https://jira.example.test/TICKET-1"}])]
+
+    result = intake.intake_candidates(cards, _lanes(), _stage_map(), _issues())
+
+    assert [c["id"] for c in result] == ["card-1"]
+
+
+def test_intake_candidates_boundary_excludes_a_card_with_a_matching_target_external_link():
+    """Same invariant as test_matching_target_external_link_does_disqualify_candidate, but pinned
+    through the public intake_candidates() boundary."""
+    cards = [_card("card-1", external_links=[{"url": "https://github.com/o/r/issues/1"}])]
+
+    result = intake.intake_candidates(cards, _lanes(), _stage_map(), _issues())
+
+    assert result == []
+
+
 def test_card_outside_intake_lane_is_never_a_candidate_regardless_of_links():
     card = _card("card-1", lane_id="lane-backlog")
 
@@ -151,6 +172,40 @@ def test_card_with_unmatched_custom_id_stays_a_candidate():
     card = _card("card-1", custom_id="stale-value")
 
     assert intake._is_candidate(card, {"lane-intake"}, set(), {"EP-0C"}) is True
+
+
+# --- a card lacking a usable id is never a candidate --------------------------
+#
+# Otherwise promote() builds marker_for_card(None) -> "...card=None -->", card_web_url(cfg, None)
+# -> ".../card/None", and _writeback eventually calls agileplace.patch_card with card.get("id")
+# == None, which _card_path(None) turns into a live PATCH against "/card/None".
+
+@pytest.mark.parametrize("card_id", [None, ""])
+def test_card_lacking_a_usable_id_is_never_a_candidate(card_id):
+    card = {"laneId": "lane-intake", "title": "no id here"}
+    if card_id is not None or "id" not in card:
+        card["id"] = card_id
+
+    assert intake._is_candidate(card, {"lane-intake"}, set(), set()) is False
+
+
+def test_card_missing_the_id_key_entirely_is_never_a_candidate():
+    card = {"laneId": "lane-intake", "title": "no id key at all"}
+
+    assert intake._is_candidate(card, {"lane-intake"}, set(), set()) is False
+
+
+def test_intake_candidates_excludes_a_card_lacking_a_usable_id():
+    """Boundary-level: a card with no id sitting in the Intake lane must never come out of
+    intake_candidates(), regardless of the id-having candidate alongside it."""
+    cards = [
+        {"laneId": "lane-intake", "title": "no id here"},
+        _card("card-1"),
+    ]
+
+    result = intake.intake_candidates(cards, _lanes(), _stage_map(), _issues())
+
+    assert [c.get("id") for c in result] == ["card-1"]
 
 
 # --- invariant 3: provenance_line never raises, always non-empty -------------
@@ -250,6 +305,29 @@ def test_intake_lane_ids_empty_when_stage_map_has_no_intake_key():
 
 def test_intake_lane_ids_resolves_configured_lane():
     assert intake._intake_lane_ids(_lanes(), _stage_map()) == {"lane-intake"}
+
+
+def test_intake_lane_ids_stringifies_non_string_lane_ids():
+    """resolve_lane_for_stage returns lane ids in whatever type the board gave them (AgilePlace
+    board lane ids are commonly ints) -- but _card_lane_id() always returns a str. Without
+    stringifying here, the membership check in _is_candidate would never match a non-string lane id
+    against _card_lane_id()'s str output."""
+    lanes = [{"id": 101, "title": "New Requests"}, {"id": 202, "title": "Approved"}]
+    stage_map = {"Intake": ["New Requests"], "Backlog": ["Approved"]}
+
+    assert intake._intake_lane_ids(lanes, stage_map) == {"101"}
+
+
+def test_intake_candidates_recognizes_cards_in_a_non_string_id_lane():
+    """End-to-end (through the public intake_candidates() boundary): a card sitting in an
+    Intake-mapped lane whose id is an int must still be selected as a candidate."""
+    lanes = [{"id": 101, "title": "New Requests"}, {"id": 202, "title": "Approved"}]
+    stage_map = {"Intake": ["New Requests"], "Backlog": ["Approved"]}
+    cards = [_card("card-1", lane_id=101)]
+
+    result = intake.intake_candidates(cards, lanes, stage_map, _issues())
+
+    assert [c["id"] for c in result] == ["card-1"]
 
 
 # --- _disqualifying_custom_ids -------------------------------------------------
@@ -368,8 +446,17 @@ def test_writeback_key_is_sourced_from_the_cards_own_title_not_a_fetch():
 
 
 # --- invariant 2: writeback ordering is fixed ---------------------------------
+#
+# customId (the actual sync join key, and the only one of the two writes patch_card retries on a
+# 409/428 version conflict -- see API-VALIDATION.md) is written FIRST, external link SECOND. This
+# way, whatever partial failure strikes _writeback, the surviving state is either "nothing written"
+# (still a full candidate next run, resumed via the marker) or "customId written, link missing"
+# (still fully tracked by the ordinary sync's own customId-based matching) -- never the reverse:
+# "link written, customId missing", which would disqualify the card from future intake candidacy
+# (via the external-link match) while its join key was never actually established, permanently
+# stranding it. See test_writeback_customid_failure_never_reaches_the_external_link_write below.
 
-def test_writeback_writes_link_before_custom_id_in_two_separate_calls(monkeypatch):
+def test_writeback_writes_custom_id_before_link_in_two_separate_calls(monkeypatch):
     calls = []
     monkeypatch.setattr(agileplace, "patch_card",
                          lambda cfg, apply, card, ops, **k: calls.append(ops[0]))
@@ -379,8 +466,8 @@ def test_writeback_writes_link_before_custom_id_in_two_separate_calls(monkeypatc
     intake._writeback({}, False, card, issue)
 
     assert len(calls) == 2
-    assert calls[0]["path"] == "/externalLink"
-    assert calls[1]["path"] == "/customId"
+    assert calls[0]["path"] == "/customId"
+    assert calls[1]["path"] == "/externalLink"
 
 
 def test_writeback_customid_matches_writeback_key(monkeypatch):
@@ -392,7 +479,30 @@ def test_writeback_customid_matches_writeback_key(monkeypatch):
 
     intake._writeback({}, False, card, issue)
 
-    assert calls[1]["value"] == "EP-0C"
+    assert calls[0]["value"] == "EP-0C"
+
+
+def test_writeback_customid_failure_never_reaches_the_external_link_write(monkeypatch):
+    """Pins the crash-recovery fix directly: if the customId write raises (a version conflict that
+    exhausts patch_card's one retry, a network error, anything), the external link write must never
+    have been attempted -- so the card is left in its original, fully-unwritten state and remains a
+    full candidate (not a link-only, permanently-disqualified one) for the next run's marker-resume
+    scan to retry."""
+    calls = []
+
+    def fake_patch_card(cfg, apply, card, ops, **k):
+        calls.append(ops[0])
+        if ops[0]["path"] == "/customId":
+            raise RuntimeError("simulated transient failure")
+
+    monkeypatch.setattr(agileplace, "patch_card", fake_patch_card)
+    card = {"id": "card-1", "title": "Card 1"}
+    issue = {"number": 7, "url": "https://github.com/o/r/issues/7"}
+
+    with pytest.raises(RuntimeError):
+        intake._writeback({}, False, card, issue)
+
+    assert [c["path"] for c in calls] == ["/customId"]
 
 
 def test_writeback_skips_link_write_and_warns_for_array_shaped_external_links(monkeypatch, capsys):
@@ -562,6 +672,33 @@ def test_promote_dry_run_never_reaches_the_transport_write_boundary(monkeypatch,
     assert len(run_calls) == 1
     assert len(mutate_calls) == 2  # link + customId, both dry-run
     assert result.resumed == 1
+    assert "DRY" in capsys.readouterr().out
+
+
+def test_promote_dry_run_create_path_never_reaches_the_transport_write_boundary(monkeypatch, capsys):
+    """CREATE-path counterpart of test_promote_dry_run_never_reaches_the_transport_write_boundary
+    above: here NO issue carries the candidate's marker, so _resume_or_create falls all the way
+    through to ghkit.create_issue -- the code path the marker-resume version structurally can't
+    reach. Monkeypatches ghkit.run itself (never the higher-level ghkit.create_issue) so a future
+    refactor that dispatches `gh issue create` directly via ghkit.run, bypassing create_issue's own
+    apply=False gate, would make this test fail: run_calls would grow past the single prescan
+    "issue list" read."""
+    run_calls = []
+
+    def fake_run(cfg, args, **k):
+        run_calls.append(args)
+        assert args[:2] == ["issue", "list"], "dry-run must never dispatch gh issue create via run()"
+        return Mock(stdout=json.dumps([]))  # no marker for any candidate
+
+    monkeypatch.setattr(ghkit, "run", fake_run)
+    cards = [_card("card-1")]
+
+    result = intake.promote({}, False, cards, _lanes(), _stage_map(), _issues())
+
+    assert len(run_calls) == 1
+    assert result.candidates == 1
+    assert result.created == 0
+    assert result.resumed == 0
     assert "DRY" in capsys.readouterr().out
 
 

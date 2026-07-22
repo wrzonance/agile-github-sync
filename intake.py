@@ -93,7 +93,10 @@ def _intake_lane_ids(lanes: list, stage_map: dict | None) -> set[str]:
     if not stage_map or "Intake" not in stage_map:
         return set()
     _, acceptable = agileplace.resolve_lane_for_stage(lanes, "Intake", "", stage_map, quiet=True)
-    return acceptable
+    # resolve_lane_for_stage returns lane ids in whatever type the board gave them (raw, often
+    # ints) -- stringified here to match _card_lane_id()'s always-str return, the same coercion
+    # convention sync.py uses for a card's current lane id.
+    return {str(lane_id) for lane_id in acceptable}
 
 
 def _disqualifying_custom_ids(issues: list[dict]) -> set[str]:
@@ -107,10 +110,17 @@ def _is_candidate(card: dict, intake_lane_ids: set[str], target_urls: set[str],
                    managed_custom_ids: set[str]) -> bool:
     """Pure predicate: does this card need a new GitHub issue?
 
-    A card qualifies only when its current lane is one of `intake_lane_ids`, it carries no external
-    link matching `target_urls` (the known target-repo issue URLs), and its customId doesn't match
-    any of `managed_custom_ids`. A foreign external link (anything not in `target_urls`) or an
-    unrecognized customId never disqualifies a card by itself -- only an actual match does."""
+    A card qualifies only when it has a usable id, its current lane is one of `intake_lane_ids`, it
+    carries no external link matching `target_urls` (the known target-repo issue URLs), and its
+    customId doesn't match any of `managed_custom_ids`. A foreign external link (anything not in
+    `target_urls`) or an unrecognized customId never disqualifies a card by itself -- only an
+    actual match does.
+
+    A card lacking a usable id (missing, None, or empty -- the same truthy check sync.py's own
+    card-matching loop uses) is never a candidate: promoting it would build marker_for_card(None),
+    card_web_url(cfg, None), and eventually a live PATCH against agileplace's "/card/None"."""
+    if not card.get("id"):
+        return False
     if _card_lane_id(card) not in intake_lane_ids:
         return False
     if set(agileplace.card_external_urls(card)) & target_urls:
@@ -183,26 +193,35 @@ def _writeback_key(card_title: str, issue_number: int) -> str:
 
 
 def _writeback(cfg: dict, apply: bool, card: dict, issue: dict) -> None:
-    """Write a promoted issue's link and customId back onto its AgilePlace card, as two SEPARATE
-    patch_card calls -- never batched into one PATCH -- so a link-write failure can never block the
-    customId write.
+    """Write a promoted issue's customId and link back onto its AgilePlace card, as two SEPARATE
+    patch_card calls -- never batched into one PATCH.
+
+    customId (the actual sync join key -- both `_is_candidate`'s own disqualification check and the
+    ordinary sync's card-matching key on it) is written FIRST. It's also the only one of the two
+    writes patch_card retries once on a 409/428 version conflict (see API-VALIDATION.md). Writing it
+    first means the state left behind by ANY failure partway through this function is always one of:
+    nothing written (card stays a full candidate; the next run's marker-resume scan retries the
+    whole writeback), or customId written but the link missing (the card is still fully tracked --
+    matched and reconciled by the ordinary sync via its customId -- just missing the informational
+    external-link decoration). The reverse order would risk the opposite: a card whose link write
+    succeeded but whose customId write then failed would carry a link matching a known target URL,
+    permanently disqualifying it from `_is_candidate` (see the external-link check above) while its
+    join key was never actually established -- stranding it with no further retry path at all.
 
     The link write is skipped (with a WARN) when `card` already carries the plural, array-shaped
     `externalLinks` field: agileplace._card_value_for_patch_path has no case for the singular
     `/externalLink` path this feature writes, so a 409/428 conflict on that write can never retry --
-    it unconditionally re-raises (see API-VALIDATION.md). This is safe/fails-closed by design
-    (marker-resume recovers it next run), but is a real, intentional asymmetry against the customId
-    write's normal one-retry support. The customId write always proceeds either way."""
+    it unconditionally re-raises (see API-VALIDATION.md)."""
     card_id = card.get("id")
-    if "externalLinks" in card:
-        print(f"WARN  card {card_id}: has array-shaped externalLinks -- skipping intake link "
-              "writeback (unsupported shape); customId writeback still proceeds")
-    else:
-        link_op = op_external_link(f"GitHub #{issue['number']}", issue["url"])
-        agileplace.patch_card(cfg, apply, card, [link_op], note=f"intake link -> {issue['url']}")
     key = _writeback_key(card.get("title", ""), issue["number"])
     agileplace.patch_card(cfg, apply, card, [agileplace.op_custom_id(key)],
                           note=f"intake customId -> {key}")
+    if "externalLinks" in card:
+        print(f"WARN  card {card_id}: has array-shaped externalLinks -- skipping intake link "
+              "writeback (unsupported shape); customId writeback already completed")
+    else:
+        link_op = op_external_link(f"GitHub #{issue['number']}", issue["url"])
+        agileplace.patch_card(cfg, apply, card, [link_op], note=f"intake link -> {issue['url']}")
 
 
 def _resume_or_create(cfg: dict, apply: bool, card: dict,

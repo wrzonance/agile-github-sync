@@ -330,11 +330,16 @@ alone, since this worktree has no `.env` and no live board to probe against:
    conflict-retry path in `agileplace.patch_card` uses to recompute a stale op's value before
    retrying) does not recognize `/externalLink` at all. So unlike the `customId` writeback (which
    does retry once on a version conflict), a 409/428 hit on the link write is uncaught and
-   propagates as a failed run. `_writeback` in `intake.py` issues the link write and the `customId`
-   write as two SEPARATE `patch_card` calls specifically so a link-write failure (already-occupied
-   `/externalLink`, i.e. the array-shaped case from finding 2, or a version conflict) never blocks
-   the `customId` write from proceeding -- the card still gets disqualified from being picked up as
-   a candidate again, and the marker-comment resume path recovers the link on the next run. This
+   propagates as a failed run. `_writeback` in `intake.py` issues the `customId` write and the link
+   write as two SEPARATE `patch_card` calls, `customId` FIRST (fixed post-review, issue #62
+   follow-up): writing the more-reliable, retry-supported join-key write first means any failure
+   partway through leaves the card either fully unwritten (still a full candidate; the next run's
+   marker-resume scan retries the whole writeback) or customId-written-but-link-missing (still
+   fully tracked -- matched and reconciled by the ordinary sync via its customId -- just missing the
+   informational external-link decoration, which is never independently retried). The original
+   link-first ordering could instead strand a card permanently: a link write that succeeded followed
+   by a customId write that failed left a card matching a known target URL (disqualifying it from
+   `_is_candidate`) whose join key was never established, with no further retry path at all. This
    asymmetry (one field retries, the other doesn't) is a deliberate fail-closed choice, not a gap:
    extending `_card_value_for_patch_path` to cover `/externalLink` is a reasonable future
    enhancement but was out of scope for this spike since it requires confirming the array shape
