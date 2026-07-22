@@ -24,7 +24,7 @@ import agileplace
 import ghkit
 import ghproject
 import vetting_latch
-from card_coherence import contested_cards
+from card_coherence import contested_cards, lane_conflict
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
 from stages import (epic_key_for_task, is_retired_issue, issue_stage,
@@ -699,7 +699,21 @@ def main() -> None:
     card_ops: dict = {}
 
     def queue(card, ops, note):
-        entry = card_ops.setdefault(str(card["id"]), {"card": card, "ops": [], "notes": []})
+        # Issue #70 Layer 2: two queue() calls for the same card can carry conflicting /laneId
+        # values (e.g. duplicate [KEY]-prefixed issue titles matching the same card through the
+        # customId fallback within one run). Detect and poison the entry rather than risk one
+        # issue's lane move clobbering another's -- the poisoned entry is skipped wholesale at
+        # flush (below), never partially applied.
+        cid = str(card["id"])
+        entry = card_ops.setdefault(
+            cid, {"card": card, "ops": [], "notes": [], "lane_id": None, "poisoned": False})
+        new_lane_id, conflict = lane_conflict(ops, entry["lane_id"])
+        if conflict:
+            entry["poisoned"] = True
+            print(f"WARN  card {cid} poisoned: conflicting /laneId ops "
+                  f"({entry['lane_id']!r} vs new value)")
+        else:
+            entry["lane_id"] = new_lane_id
         entry["ops"].extend(ops)
         entry["notes"].append(note)
 
@@ -836,6 +850,8 @@ def main() -> None:
 
     # 5) flush: ONE versioned PATCH per card (optimistic concurrency)
     for entry in card_ops.values():
+        if entry["poisoned"]:
+            continue  # Issue #70 Layer 2: conflicting /laneId ops -- discard, don't half-apply
         agileplace.patch_card(cfg, apply, entry["card"], entry["ops"], "; ".join(entry["notes"]))
 
     if apply:
