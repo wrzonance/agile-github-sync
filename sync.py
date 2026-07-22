@@ -26,8 +26,8 @@ import ghproject
 import vetting_latch
 from config import STATE_FILE, env_config
 from reconcile import reconcile, reconcile_value
-from stages import (epic_key_for_task, is_retired_issue, issue_stage,
-                    normalize_status, title_key)
+from stages import (epic_key_for_task, is_retired_issue, issue_custom_id,
+                    issue_stage, normalize_status, title_key)
 
 MS_PREFIX = "milestone:"
 STATE_SCHEMA = 2
@@ -208,11 +208,6 @@ def issue_card_title(issue: dict) -> str:
     if k and t.startswith(f"[{k}]"):
         return t[len(f"[{k}]"):].strip() or t
     return t
-
-
-def issue_custom_id(issue: dict) -> str:
-    """The customId written to and read from AgilePlace for one GitHub issue."""
-    return title_key(issue["title"]) or str(issue["number"])
 
 
 def _same_card(left: dict | None, right: dict | None) -> bool:

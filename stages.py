@@ -107,3 +107,8 @@ def epic_key_for_task(task_key: str) -> str | None:
         return None
     core = task_key.rstrip("0123456789")
     return f"EP-{core}" if core else None
+
+
+def issue_custom_id(issue: dict) -> str:
+    """The customId written to and read from AgilePlace for one GitHub issue."""
+    return title_key(issue["title"]) or str(issue["number"])
