@@ -33,7 +33,10 @@ class _Block(NamedTuple):
 
 # Characters that are ambiguous Markdown syntax in ANY position within a line -- always
 # backslash-escaped wherever they appear in text content. Consumed by the HTML->MD escaper.
-_INLINE_AMBIGUOUS_CHARS: frozenset[str] = frozenset({"*", "_", "~", "`", "[", "]", "\\"})
+# '<'/'>' are included so a literal angle bracket typed into source text (e.g. "a < b") can never
+# be reinterpreted as HTML tag-soup once round-tripped back through MD->HTML -- see richtext.py's
+# degradation table entry for raw "<tag>" text.
+_INLINE_AMBIGUOUS_CHARS: frozenset[str] = frozenset({"*", "_", "~", "`", "[", "]", "\\", "<", ">"})
 
 # Characters that only mean something to Markdown when they open a line (heading/list/image
 # markers) -- backslash-escaped ONLY when at true line start, never mid-sentence. Consumed by the
@@ -43,7 +46,9 @@ _STRUCTURAL_LINE_START_CHARS: frozenset[str] = frozenset({"#", "-", "+", "!"})
 # Union of everything the HTML->MD escaper can ever precede with a backslash; the MD->HTML
 # unescaper's inverse strips exactly a backslash before one of these and nothing else. Kept here
 # (not alongside either escaper) so the escape/unescape pair -- defined in different modules --
-# can never drift out of sync with each other.
+# can never drift out of sync with each other. '<' now reaches this union transitively through
+# _INLINE_AMBIGUOUS_CHARS; '>' was already present via the trailing literal set below (kept as-is
+# -- now redundant with _INLINE_AMBIGUOUS_CHARS, but harmless in a frozenset union).
 _UNESCAPABLE_CHARS: frozenset[str] = _INLINE_AMBIGUOUS_CHARS | _STRUCTURAL_LINE_START_CHARS | {".", ">"}
 
 # Href schemes considered safe to emit; anything else (javascript:, data:, bare relative paths,
