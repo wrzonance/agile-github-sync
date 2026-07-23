@@ -36,9 +36,13 @@ def _issue(issue_type=None, labels=None):
 
 
 def _card(type_obj=None, **overrides):
+    # "description": "" (issue #65) keeps agileplace_description.card_description() on its zero-I/O
+    # path -- without the key it falls back to the real (unmocked) agileplace.get_card(), which hits
+    # the live HTTP client and SystemExits (see tests/test_description_sync_wiring_fixtures.py).
     card = {"id": "C1", "version": 1, "customId": "1",
             "externalLink": {"url": ISSUE_URL}, "tags": [],
-            "plannedStart": None, "plannedFinish": None, "laneId": None}
+            "plannedStart": None, "plannedFinish": None, "laneId": None,
+            "description": ""}
     if type_obj is not None:
         card["type"] = type_obj
     card.update(overrides)

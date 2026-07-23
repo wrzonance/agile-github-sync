@@ -41,6 +41,7 @@ WIRED_TEST_FILES = (
     "tests/test_retired_issues.py",
     "tests/test_sync_card_coherence.py",
     "tests/test_sync_contested_cards.py",
+    "tests/test_sync_card_types.py",
 )
 
 
