@@ -154,6 +154,10 @@ UNICODE_SAMPLE = "héllo wörld ☃ \U0001F600 \u200b\u200c\u200d"
         ">" * 500,
         "\n".join(["1."] * 200),
     ],
+    # Short ids: the all-printable / repeated-char payloads reach thousands of chars and would
+    # overflow Windows' 32,767-char PYTEST_CURRENT_TEST env var (issue #90).
+    ids=["empty", "all-printable", "all-printable-x50", "unicode-sample", "backslash-500",
+         "hash-500", "gt-500", "ol-markers-200"],
 )
 def test_html_and_markdown_escapers_never_raise_over_arbitrary_content(content):
     html_escaped = _escape_html_text(content)
@@ -168,6 +172,8 @@ def test_html_and_markdown_escapers_never_raise_over_arbitrary_content(content):
 @pytest.mark.parametrize(
     "content",
     [None, "", "   ", "\t\n", ALL_PRINTABLE, UNICODE_SAMPLE, "http://" + "x" * 5000],
+    # Short ids: the trailing http payload is 5k chars (issue #90).
+    ids=["none", "empty", "spaces", "tab-newline", "all-printable", "unicode-sample", "http-x-5k"],
 )
 def test_sanitize_href_never_raises_over_arbitrary_content(content):
     result = _sanitize_href(content)

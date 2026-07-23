@@ -358,6 +358,39 @@ def test_agileplace_py_is_byte_for_byte_unchanged_by_comment_sync():
     )
 
 
+# Windows caps a single environment variable at 32,767 chars, and pytest writes the running test's
+# node id into PYTEST_CURRENT_TEST -- a parametrize payload baked verbatim into a node id (a 30k-char
+# delimiter run, a 100k-char totality battery) overflows that and raises at setup/teardown (issue
+# #90). 500 sits far below the OS cap yet well above every legitimate node id (the longest real one
+# is ~395: a descriptive test name plus a genuine document fixture), so a new giant-payload param
+# added without a short ids= label trips this immediately.
+MAX_NODE_ID_LENGTH = 500
+
+
+def test_no_collected_node_id_is_pathologically_long():
+    """Guards issue #90: giant parametrize payloads must carry a short ids= label so their node id
+    can't overflow Windows' 32,767-char env-var cap. Collect-only (no test body runs) and assert
+    every collected node id stays under MAX_NODE_ID_LENGTH. This IS the Windows verification -- the
+    failure reproduces on any platform because node-id length is platform-independent."""
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q"],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=180,
+    )
+    node_ids = [line for line in result.stdout.splitlines() if "::" in line]
+    assert node_ids, (
+        f"collect-only produced no node ids (exit={result.returncode}) -- collection itself is "
+        f"broken:\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
+    )
+    offenders = sorted(
+        ((len(n), n[:100]) for n in node_ids if len(n) > MAX_NODE_ID_LENGTH), reverse=True)
+    assert not offenders, (
+        f"{len(offenders)} test node id(s) exceed {MAX_NODE_ID_LENGTH} chars -- a giant parametrize "
+        f"payload needs a short ids= label or it overflows Windows' 32,767-char PYTEST_CURRENT_TEST "
+        f"env var (issue #90). Longest: "
+        + "; ".join(f"{length}:{sample!r}" for length, sample in offenders[:5])
+    )
+
+
 def test_no_test_file_imports_metadata_sync_names_from_sync():
     """Issue #79 moved sync_metadata/sync_dates and four private helpers out of sync.py into
     metadata_sync.py (see module docstring). Parses every tests/test_*.py file's AST (not just the

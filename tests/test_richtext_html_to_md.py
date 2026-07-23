@@ -79,6 +79,11 @@ def test_unclosed_strong_is_force_closed_rather_than_left_dangling():
         UNICODE_SAMPLE,
         "<notatag attr='x'>&&&<<<>>>",
     ],
+    # Short ids: the amp-entity / all-printable payloads are tens of thousands of chars and
+    # would overflow Windows' 32,767-char PYTEST_CURRENT_TEST env var (issue #90).
+    ids=["empty", "unclosed-nested-inline", "deep-nested-unclosed", "script-tag",
+         "unclosed-code-fence", "triple-nested-u", "amp-entities-10k", "all-printable-x20",
+         "unicode-sample", "junk-angles"],
 )
 def test_leankit_html_to_markdown_never_raises_over_arbitrary_or_malformed_html(html):
     result = leankit_html_to_markdown(html)
@@ -394,6 +399,8 @@ def test_unclosed_code_span_with_internal_backtick_run_still_picks_a_safe_fence_
         "<pre><code>unclosed fenced code",
         "<code>" + "`" * 5_000,
     ],
+    # Short ids: the trailing-backtick payload is 5k chars (issue #90).
+    ids=["code-strong", "code-em-closed", "nested-code", "pre-code-unclosed", "code-backticks-5k"],
 )
 def test_malformed_or_nested_unclosed_code_tags_never_raise(html):
     result = leankit_html_to_markdown(html)

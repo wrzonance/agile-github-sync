@@ -462,6 +462,10 @@ def test_backslash_escaped_delimiter_inside_code_span_stays_literal_after_reinse
         # must be window-bounded or this input is quadratic in the document size.
         " ".join("`" * k for k in range(1, 530)),
     ],
+    # Short ids: the raw payloads are up to 30k chars and would overflow Windows'
+    # 32,767-char PYTEST_CURRENT_TEST env var (issue #90).
+    ids=["stars-30k", "brackets-20k", "double-stars-15k", "double-tildes-15k", "star-a-15k",
+         "backtick-runs-1-530"],
 )
 def test_pathological_repeated_delimiters_complete_in_bounded_time(pathological_markdown):
     start = time.monotonic()
