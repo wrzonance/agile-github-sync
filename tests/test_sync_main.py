@@ -25,6 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import agileplace  # noqa: E402
 import ghproject  # noqa: E402
 import sync  # noqa: E402
 
@@ -103,7 +104,10 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
         patch("ghproject.add_item", return_value=add_item_default))
     stack.set_item_status_mock = stack.enter_context(
         patch("ghproject.set_item_status", return_value=set_item_status_return))
-    stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes_return)))
+    stack.enter_context(patch(
+        "agileplace.board_layout",
+        return_value=agileplace.BoardLayout(lanes=list(lanes_return), card_types=[]),
+    ))
     cards = [card] if existing_cards is _UNSET else list(existing_cards)
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))
     stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))

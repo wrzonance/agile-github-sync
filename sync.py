@@ -571,7 +571,7 @@ def main() -> None:
     project_items, project_status = pv2.project_items, pv2.project_status
     field_meta, project_read_failed, move_lanes = pv2.field_meta, pv2.project_read_failed, pv2.move_lanes
 
-    lanes = agileplace.board_layout(cfg) if online else []
+    lanes = agileplace.board_layout(cfg).lanes if online else []
     cards = agileplace.list_cards(cfg) if online else []
     smap = cfg.get("stage_lane_map")
 
