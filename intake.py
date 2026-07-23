@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import agileplace
+import board_layout
 import card_types
 import ghkit
 from stages import issue_custom_id, title_key
@@ -86,14 +87,14 @@ def _intake_lane_ids(lanes: list, stage_map: dict | None) -> set[str]:
     """Acceptable lane ids for the "Intake" stage, or the empty set if the feature is unconfigured.
 
     Guards on `stage_map` and `"Intake" in stage_map` BEFORE delegating to
-    agileplace.resolve_lane_for_stage: STAGE_CARD_STATUS["Intake"] == "notStarted" is shared with
+    board_layout.resolve_lane_for_stage: STAGE_CARD_STATUS["Intake"] == "notStarted" is shared with
     Backlog/Ready, and STAGE_TITLE_HINTS["Intake"] is intentionally empty, so resolve_lane_for_stage's
     unmapped-stage inference fallback could otherwise latch onto an unrelated notStarted leaf lane.
     Missing/empty stage_map or no "Intake" key means the feature no-ops silently -- no candidates,
     zero AgilePlace calls."""
     if not stage_map or "Intake" not in stage_map:
         return set()
-    _, acceptable = agileplace.resolve_lane_for_stage(lanes, "Intake", "", stage_map, quiet=True)
+    _, acceptable = board_layout.resolve_lane_for_stage(lanes, "Intake", "", stage_map, quiet=True)
     # resolve_lane_for_stage returns lane ids in whatever type the board gave them (raw, often
     # ints) -- stringified here to match _card_lane_id()'s always-str return, the same coercion
     # convention sync.py uses for a card's current lane id.

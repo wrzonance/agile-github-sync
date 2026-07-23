@@ -22,6 +22,7 @@ import sys
 
 import agileplace
 import agileplace_description
+import board_layout
 import card_types
 from config import env_config
 
@@ -67,7 +68,7 @@ def _preview(cfg: dict) -> list[dict]:
     print(f"Board {cfg['board_id']} on {cfg['host']}: '{title}'")
     for lane in lanes:
         drop = "  [default drop lane]" if lane.get("isDefaultDropLane") else ""
-        print(f"  lane '{agileplace.lane_title(lane)}' ({lane['id']}){drop}")
+        print(f"  lane '{board_layout.lane_title(lane)}' ({lane['id']}){drop}")
     cards = agileplace.list_cards(cfg)
     print(f"{len(cards)} card(s) currently on this board:")
     for card in cards[:PREVIEW_CARD_LIMIT]:
@@ -375,7 +376,7 @@ def _check_type_id_writes(cfg: dict, lane_id: str | None, parent_id: str, run_id
     """Steps 15-16, gated on the board actually having an eligible card type configured: neither
     step is a sync precondition (a board with no card types configured never derives one), so a
     board without one reports both as informational skips rather than failing the run."""
-    card_type = _pick_card_type(agileplace.board_layout(cfg).card_types)
+    card_type = _pick_card_type(board_layout.board_layout(cfg).card_types)
     if card_type is None:
         skip_detail = "skipped -- board has no eligible (isCardType) card type configured"
         results.append(("typeId replace round-trip", None, skip_detail))
@@ -472,7 +473,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     lane = _pick_lane(lanes)
     if lane is not None:
-        print(f"\nUsing lane '{agileplace.lane_title(lane)}' ({lane['id']}) for the throwaway cards")
+        print(f"\nUsing lane '{board_layout.lane_title(lane)}' ({lane['id']}) for the throwaway cards")
     run_id = secrets.token_hex(3)
     print(f"Throwaway custom-id suffix for this run: {run_id}")
     created: list[str] = []

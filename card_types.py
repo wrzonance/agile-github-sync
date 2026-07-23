@@ -76,8 +76,8 @@ class ResolvedCardTypes(NamedTuple):
 def resolve_card_type_ids(card_types: list) -> ResolvedCardTypes:
     """Resolve every CARD_TYPE_RULES target name against the board's configured card types.
 
-    `card_types` is agileplace.board_layout(cfg).card_types -- already structurally validated by
-    agileplace._card_types_with_ids (every entry a dict with a usable id). Eligibility here is
+    `card_types` is board_layout.board_layout(cfg).card_types -- already structurally validated by
+    board_layout._card_types_with_ids (every entry a dict with a usable id). Eligibility here is
     semantic, not structural: an entry counts only when its `isCardType` flag is truthy (excludes
     task-only types like `Subtask`) and its (stripped) `title` is non-empty. A name with zero
     eligible matches, or more than one (ambiguous -- two board types sharing a title), is left out

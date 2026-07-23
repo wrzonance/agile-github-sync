@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agileplace  # noqa: E402
+import board_layout  # noqa: E402
 import ghkit  # noqa: E402
 import ghproject  # noqa: E402
 import sync  # noqa: E402
@@ -79,8 +80,8 @@ def _run_hierarchy(tmp_path: Path, monkeypatch, issues: list[dict], cards: list[
     monkeypatch.setattr(ghkit, "blocked_by_map", lambda *_args: {})
     monkeypatch.setattr(ghproject, "configured", lambda _cfg: False)
     monkeypatch.setattr(
-        agileplace, "board_layout",
-        lambda _cfg: agileplace.BoardLayout(lanes=[], card_types=[]),
+        board_layout, "board_layout",
+        lambda _cfg: board_layout.BoardLayout(lanes=[], card_types=[]),
     )
     monkeypatch.setattr(agileplace, "list_cards", lambda _cfg: cards)
     monkeypatch.setattr(agileplace, "card_child_ids", child_reads)

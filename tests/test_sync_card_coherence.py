@@ -44,6 +44,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agileplace  # noqa: E402
+import board_layout  # noqa: E402
 import sync  # noqa: E402
 
 _DONE_LANE = {"id": "L-DONE", "title": "Done", "cardStatus": "finished"}
@@ -117,8 +118,8 @@ def _mock_io(issues: list[dict], cards: list[dict], *, lanes: tuple = ()):
     stack.enter_context(patch("ghkit.set_milestone"))
     stack.enter_context(patch("ghproject.configured", return_value=False))
     stack.enter_context(patch(
-        "agileplace.board_layout",
-        return_value=agileplace.BoardLayout(lanes=list(lanes), card_types=[]),
+        "board_layout.board_layout",
+        return_value=board_layout.BoardLayout(lanes=list(lanes), card_types=[]),
     ))
     stack.enter_context(patch("agileplace.list_cards", return_value=list(cards)))
     stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))

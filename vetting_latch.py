@@ -14,7 +14,7 @@ wrong write.
 """
 from __future__ import annotations
 
-import agileplace
+import board_layout
 import ghproject
 
 
@@ -30,7 +30,7 @@ def apply_latch(cfg: dict, apply: bool, issue: dict, key: str, current_lane_id: 
     rather than guess. Either way, a failed promotion still returns True: the demotion trap holds
     regardless of _promote_issue's own success or failure. Never raises.
     """
-    reverse = agileplace.stage_for_lane(current_lane_id, stage_map, lanes)
+    reverse = board_layout.stage_for_lane(current_lane_id, stage_map, lanes)
     if reverse is None:
         print(f"WARN  [{key}] card's current lane doesn't map back to a recognized stage -- "
               "holding at Intake without moving it (cannot tell if a human already vetted it)")
@@ -73,7 +73,7 @@ def repair_statusless_member(cfg: dict, apply: bool, issue: dict, key: str, curr
     Instead: when the card's current lane reverse-maps to a non-Intake stage, retry the Status
     write; otherwise hold with a WARN and let a human finish the vetting. Always returns True
     (the caller skips its lane-move this run); the next run re-evaluates fresh. Never raises."""
-    reverse = agileplace.stage_for_lane(current_lane_id, stage_map, lanes)
+    reverse = board_layout.stage_for_lane(current_lane_id, stage_map, lanes)
     item_id = (item or {}).get("item_id")
     if reverse is None or reverse == "Intake" or not (isinstance(item_id, str) and item_id):
         print(f"WARN  [{key}] Project member has no recognized Status -- holding its card in "
