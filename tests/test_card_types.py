@@ -167,6 +167,15 @@ def test_resolve_never_raises_on_malformed_entries():
     assert isinstance(resolved, ResolvedCardTypes)
 
 
+def test_resolve_never_raises_on_non_dict_list_elements():
+    """The docstring promises totality over 'any list input' -- a non-dict element (a bare string,
+    None, an int) must be skipped like any other ineligible entry, never raise AttributeError."""
+    resolved = resolve_card_type_ids(["not-a-dict", None, 123, {"id": "t-bug", "title": "Bug",
+                                                                  "isCardType": True}])
+    assert isinstance(resolved, ResolvedCardTypes)
+    assert resolved.by_name["Bug"] == "t-bug"
+
+
 def test_resolve_is_idempotent_over_the_same_input():
     card_types = [{"id": "t-bug", "title": "Bug", "isCardType": True}]
     first = resolve_card_type_ids(card_types)

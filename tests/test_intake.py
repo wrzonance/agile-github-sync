@@ -1019,6 +1019,53 @@ def test_promote_applies_a_reverse_seed_label_after_a_successful_create(monkeypa
     assert edit_label_calls == [(55, "enhancement", True)]
 
 
+def test_promote_probes_org_types_exactly_once_with_a_resumed_candidate_interleaved(monkeypatch):
+    """Regression coverage for shared per-call state (claimed_keys, org_types_probed) across a MIX
+    of resumed and not-yet-resumed candidates in one promote() call -- every existing reverse-seed/
+    org-probe test exercises all-resumed or all-not-yet-resumed candidates in isolation, never both
+    kinds interleaved in the same call. A resumed candidate takes the marker-resume branch entirely
+    (no reverse-seed, no org probe, no claimed_keys write) and must not desync the lazy
+    org_types_probed flag the surrounding fresh candidates share: with two fresh candidates
+    sandwiching one resumed candidate, org_issue_types must still be probed exactly ONCE total (for
+    the first fresh candidate) -- a regression that re-probes on every fresh candidate (losing the
+    "at most once per promote() call" guarantee) would only surface with 2+ fresh candidates in the
+    same call, which no prior test exercises."""
+    resumed_card_id = "card-resumed"
+    marker = intake.marker_for_card(resumed_card_id)
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [
+        _issue_with_body(7, "https://github.com/o/r/issues/7", marker)])
+    org_probe_calls = []
+
+    def fake_org_types(cfg):
+        org_probe_calls.append(1)
+        return frozenset({"Bug"})
+
+    monkeypatch.setattr(ghkit, "org_issue_types", fake_org_types)
+    created_issue_types = []
+    next_number = iter([101, 102])
+
+    def fake_create(cfg, apply, title, body, issue_type=None):
+        created_issue_types.append(issue_type)
+        number = next(next_number)
+        return {"number": number, "url": f"https://github.com/o/r/issues/{number}"}
+
+    monkeypatch.setattr(ghkit, "create_issue", fake_create)
+    monkeypatch.setattr(intake, "_writeback", lambda *a, **k: None)
+    resumed_card = {"id": resumed_card_id, "laneId": "lane-intake", "title": "Resumed Card"}
+    fresh_card_1 = {"id": "card-fresh-1", "laneId": "lane-intake", "title": "Fresh Card One",
+                    "type": {"title": "Bug"}}
+    fresh_card_2 = {"id": "card-fresh-2", "laneId": "lane-intake", "title": "Fresh Card Two",
+                    "type": {"title": "Bug"}}
+
+    result = intake.promote({}, True, [fresh_card_1, resumed_card, fresh_card_2],
+                            _lanes(), _stage_map(), _issues())
+
+    assert result.resumed == 1
+    assert result.created == 2
+    assert org_probe_calls == [1]  # probed exactly once total across the whole call, not per candidate
+    assert created_issue_types == ["Bug", "Bug"]  # both fresh candidates got the probed org_types
+
+
 def test_promote_never_reseeds_a_resumed_candidate(monkeypatch):
     card_id = "card-1"
     marker = intake.marker_for_card(card_id)
