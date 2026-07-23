@@ -789,6 +789,11 @@ def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
             patch_card(CFG, True, card, ops)
 
 
+# op_description / card_description (issue #65 Task 1/7) moved to agileplace_description.py and
+# tests/test_agileplace_description.py -- see review finding: keep this file from growing past the
+# project's file-size cap by extracting the description read/write surface into its own module.
+
+
 def test_connect_children_disconnect_children_create_card_have_no_version_header_logic():
     """Non-goal preserved: no version header logic is added to any non-card-PATCH endpoint."""
     with patch("agileplace.api", return_value={}) as api_mock:

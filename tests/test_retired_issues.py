@@ -39,6 +39,7 @@ def _config(tmp_path) -> dict:
         "label_sync_ignore": frozenset(),
         "stage_lane_map": {},
         "gh_project": {},
+        "ap_description_max_length": 20000,  # issue #65: sync_description reads this unconditionally
     }
 
 
@@ -86,6 +87,8 @@ def _card(number: int, lane_id: str, *, blocked: bool) -> dict:
         "blockedStatus": {"isBlocked": blocked, "reason": "Blocked by #10" if blocked else ""},
         "plannedStart": None,
         "plannedFinish": None,
+        # issue #65: keeps agileplace_description.card_description() on its zero-I/O path.
+        "description": "",
     }
 
 

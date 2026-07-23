@@ -115,7 +115,7 @@ def list_issues(cfg: dict) -> list[dict]:
     the card-creation path.
     """
     out = run(cfg, ["issue", "list", "--state", "all", "--limit", "1000", "--json",
-                    "number,title,state,stateReason,labels,milestone,assignees,url"])
+                    "number,title,state,stateReason,labels,milestone,assignees,url,body"])
     issues = json.loads(out.stdout or "[]")
     normalized = []
     for i in issues:
@@ -129,6 +129,7 @@ def list_issues(cfg: dict) -> list[dict]:
             "milestone": ms.get("title") or None,
             "assignees": [a.get("login") for a in i.get("assignees", [])],
             "url": i.get("url", ""),
+            "body": i.get("body") or "",  # description_sync's GitHub-side canonicalization input
             "has_open_pr": False,  # populated by open_pr_issue_numbers()
         })
     return normalized
@@ -327,6 +328,33 @@ def set_milestone(cfg: dict, apply: bool, number: int, title: str | None) -> Non
             print(f"gh    issue {number} milestone cleared")
         else:
             print(f"DRY   gh issue edit {number} --remove-milestone")
+
+
+def edit_issue_body(cfg: dict, apply: bool, number: int, body: str) -> bool:
+    """Set an issue's body via `gh issue edit --body-file -`, through the dry-run gate. The body is
+    piped through run()'s `input=` stdin passthrough (same idiom as create_issue's --body-file -),
+    never interpolated into argv, so a description containing shell metacharacters or gh-flag-like
+    text can't be misparsed.
+
+    Returns True only when the write actually happened (apply=True and gh succeeded) and False for a
+    dry run -- description_sync.sync_description gates its base-advance on this exact boolean
+    (gh_write_ok), so a dry run must never report success. Any CalledProcessError/TimeoutExpired from
+    run() propagates uncaught, matching create_issue/edit_label's own apply=True behavior -- a failed
+    write must not be swallowed into a false "it worked".
+
+    Validates `number`/`body` at this boundary, before either the dry-run print or a live run() call
+    -- an invalid number would otherwise reach `gh issue edit <number>` and fail opaquely, and a
+    non-string body would crash run()'s stdin pipe with a confusing TypeError."""
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        raise ValueError(f"edit_issue_body: number must be a positive int, got {number!r}")
+    if not isinstance(body, str):
+        raise ValueError(f"edit_issue_body: body must be a str, got {type(body).__name__}")
+    if not apply:
+        print(f"DRY   gh issue edit {number} --body-file -")
+        return False
+    run(cfg, ["issue", "edit", str(number), "--body-file", "-"], input=body)
+    print(f"gh    issue {number} body updated")
+    return True
 
 
 def _issue_number_from_url(url: str) -> int:

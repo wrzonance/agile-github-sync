@@ -37,9 +37,13 @@ def _issue():
 
 
 def _card():
+    # "description": "" (issue #65) keeps agileplace_description.card_description() on its zero-I/O path --
+    # without the key it falls back to the real (unmocked) agileplace.get_card(), which hits the
+    # live HTTP client and SystemExits (confirmed live in the design spike).
     return {"id": "C1", "version": 1, "customId": "1",
             "externalLink": {"url": ISSUE_URL}, "tags": [],
-            "plannedStart": "2026-02-01", "plannedFinish": None, "laneId": None}
+            "plannedStart": "2026-02-01", "plannedFinish": None, "laneId": None,
+            "description": ""}
 
 
 def _field_meta():
@@ -55,6 +59,7 @@ def _cfg(tmp_path):
         "stage_lane_map": {},
         "gh_project": {"owner": "acme", "number": "7", "status_field": "Status",
                        "start_field": "Start", "target_field": "Target"},
+        "ap_description_max_length": 20000,  # issue #65: sync_description reads this unconditionally
     }
 
 
@@ -210,6 +215,10 @@ def test_legacy_state_resets_merge_base_before_relearning_live_metadata(tmp_path
     assert state["issues"][ISSUE_URL] == {
         "card_id": "C1", "labels": ["bug"], "milestone": "1.0",
         "start": "2026-02-01", "target": None,
+        # issue #65: sync_description's own additive merge-base keys, advanced together since
+        # both the issue body and the card description are "" here (no GitHub write needed, so
+        # gh_write_ok is trivially True) -- unrelated to this test's own labels/dates focus.
+        "desc_base": "", "desc_ap_written": "",
     }
     run_mock.assert_called_once()
     assert run_mock.call_args.args[1][:2] == ["project", "item-edit"]

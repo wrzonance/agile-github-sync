@@ -39,9 +39,11 @@ def _issue():
 
 
 def _card():
+    # "description": "" (issue #65) keeps agileplace_description.card_description() on its zero-I/O path.
     return {"id": "C1", "version": 1, "customId": "1",
             "externalLink": {"url": ISSUE_URL}, "tags": [],
-            "plannedStart": None, "plannedFinish": None, "laneId": "LANE1"}
+            "plannedStart": None, "plannedFinish": None, "laneId": "LANE1",
+            "description": ""}
 
 
 def _cfg(tmp_path):
@@ -52,6 +54,7 @@ def _cfg(tmp_path):
         "stage_lane_map": {"Intake": ["New Requests"]},
         "gh_project": {"owner": "acme", "number": "7", "status_field": "Status",
                        "start_field": "Start", "target_field": "Target"},
+        "ap_description_max_length": 20000,  # issue #65: sync_description reads this unconditionally
     }
 
 
@@ -110,7 +113,8 @@ def test_main_does_not_create_a_duplicate_card_for_a_resumed_active_issue(tmp_pa
     active_url = "https://github.com/acme/repo/issues/7"
     active_issue = {"number": 7, "title": "Raw idea", "state": "OPEN", "labels": [],
                     "milestone": None, "assignees": [], "url": active_url}
-    intake_card = {"id": "C-intake", "version": 1, "laneId": "lane-intake", "title": "Raw idea"}
+    intake_card = {"id": "C-intake", "version": 1, "laneId": "lane-intake", "title": "Raw idea",
+                  "description": ""}  # issue #65: this card reaches the per-issue loop below
     intake_lane = {"id": "lane-intake", "title": "New Requests"}
     cfg = {**_sync_main_cfg(tmp_path), "stage_lane_map": {"Intake": ["New Requests"]}}
     state_file = tmp_path / ".sync-state.json"

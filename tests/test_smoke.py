@@ -54,7 +54,7 @@ class FakeTenant:
         self.writes: list[tuple[str, str]] = []
         self.cards: dict[str, dict] = {
             "P1": {"id": "P1", "title": "Existing card", "customId": "EX-1",
-                   "laneId": "L1", "tags": [], "version": 3},
+                   "laneId": "L1", "tags": [], "version": 3, "description": ""},
         }
         self.children: dict[str, list[str]] = {}
         self.dependencies: dict[str, list[dict]] = {}
@@ -114,7 +114,7 @@ class FakeTenant:
         self.created_custom_ids.append(body["customId"])
         card = {"id": card_id, "title": body["title"], "customId": body["customId"],
                 "laneId": body.get("laneId"), "tags": [], "version": 1,
-                "plannedStart": None, "plannedFinish": None,
+                "plannedStart": None, "plannedFinish": None, "description": "",
                 "blockedStatus": {"isBlocked": False, "reason": ""}}
         if "externalLink" in body:
             card["externalLink"] = body["externalLink"]
@@ -151,6 +151,8 @@ class FakeTenant:
             elif op["path"] == "/externalLink":
                 if not self.ignore_external_link:
                     card["externalLink"] = op["value"]
+            elif op["path"] == "/description":
+                card["description"] = op["value"]
             elif op["path"] == "/isBlocked":
                 card["blockedStatus"]["isBlocked"] = op["value"]
             elif op["path"] == "/blockReason":
@@ -249,6 +251,8 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
         ("POST", "card/dependency"),      # dependency create (child dependsOn parent)
         ("POST", "card/dependency"),      # duplicate-create fact-finding probe
         ("DELETE", "card/dependency"),    # dependency delete
+        ("PATCH", "card/S1"),             # description write round-trip
+        ("PATCH", "card/S1"),             # description length probe
         ("PATCH", "card/S1"),             # deliberate stale-version probe
         ("DELETE", "card/S2"),            # cleanup child
         ("DELETE", "card/S1"),            # cleanup parent
@@ -263,6 +267,8 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
     assert "planned" in out            # planned-date round-trip reported
     assert "duplicate create rejected" in out   # the live 409 contract, mirrored by the double
     assert "Dependency already exists" in out
+    assert "description write round-trip" in out
+    assert "description length probe" in out
 
 
 def test_unexpected_duplicate_create_failure_fails_the_run(tenant_env, capsys):

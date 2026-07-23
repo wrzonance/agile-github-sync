@@ -86,3 +86,75 @@ def test_load_env_file_does_not_override_real_env_for_blocklisted_keys_either(tm
     assert "AGILEPLACE_TOKEN" in setdefault_calls  # unrelated key still goes through setdefault
     assert os.environ.get("GH_REPO") == "correct/repo"  # untouched, never overwritten
     assert os.environ.get("GH_HOST") == "correct.example.com"
+
+
+# --- AP_DESCRIPTION_MAX_LENGTH: safe int parse with WARN fallback (issue #65 Task 1) -------------
+#
+# description_sync's truncation boundary depends on env_config() always handing back a usable
+# positive int here, whatever garbage a .env file or the real environment supplies -- these tests
+# pin that env_config() itself never raises and never silently produces a 0/negative ceiling that
+# would degrade _truncate_for_agileplace to a marker-only result on every single run.
+
+def test_default_ap_description_max_length_is_a_positive_int():
+    assert isinstance(config.DEFAULT_AP_DESCRIPTION_MAX_LENGTH, int)
+    assert config.DEFAULT_AP_DESCRIPTION_MAX_LENGTH > 0
+
+
+def test_env_config_ap_description_max_length_defaults_when_unset(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")  # no .env file present
+    monkeypatch.delenv("AP_DESCRIPTION_MAX_LENGTH", raising=False)
+
+    cfg = config.env_config()
+
+    assert cfg["ap_description_max_length"] == config.DEFAULT_AP_DESCRIPTION_MAX_LENGTH
+
+
+def test_env_config_ap_description_max_length_reads_valid_override(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setenv("AP_DESCRIPTION_MAX_LENGTH", "5000")
+
+    cfg = config.env_config()
+
+    assert cfg["ap_description_max_length"] == 5000
+
+
+def test_env_config_ap_description_max_length_falls_back_and_warns_on_non_int(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setenv("AP_DESCRIPTION_MAX_LENGTH", "not-a-number")
+
+    cfg = config.env_config()
+
+    assert cfg["ap_description_max_length"] == config.DEFAULT_AP_DESCRIPTION_MAX_LENGTH
+    out = capsys.readouterr().out
+    assert "WARN" in out
+    assert "AP_DESCRIPTION_MAX_LENGTH" in out
+
+
+def test_env_config_ap_description_max_length_falls_back_and_warns_on_zero(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setenv("AP_DESCRIPTION_MAX_LENGTH", "0")
+
+    cfg = config.env_config()
+
+    assert cfg["ap_description_max_length"] == config.DEFAULT_AP_DESCRIPTION_MAX_LENGTH
+    assert "WARN" in capsys.readouterr().out
+
+
+def test_env_config_ap_description_max_length_falls_back_and_warns_on_negative(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setenv("AP_DESCRIPTION_MAX_LENGTH", "-1")
+
+    cfg = config.env_config()
+
+    assert cfg["ap_description_max_length"] == config.DEFAULT_AP_DESCRIPTION_MAX_LENGTH
+    assert "WARN" in capsys.readouterr().out
+
+
+def test_env_config_ap_description_max_length_treats_blank_as_unset(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setenv("AP_DESCRIPTION_MAX_LENGTH", "   ")
+
+    cfg = config.env_config()
+
+    assert cfg["ap_description_max_length"] == config.DEFAULT_AP_DESCRIPTION_MAX_LENGTH
+    assert capsys.readouterr().out == ""  # blank is "unset", not a malformed value -- no WARN noise
