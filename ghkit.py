@@ -115,7 +115,7 @@ def list_issues(cfg: dict) -> list[dict]:
     the card-creation path.
     """
     out = run(cfg, ["issue", "list", "--state", "all", "--limit", "1000", "--json",
-                    "number,title,state,stateReason,labels,milestone,assignees,url"])
+                    "number,title,state,stateReason,labels,milestone,assignees,url,issueType"])
     issues = json.loads(out.stdout or "[]")
     normalized = []
     for i in issues:
@@ -130,6 +130,10 @@ def list_issues(cfg: dict) -> list[dict]:
             "assignees": [a.get("login") for a in i.get("assignees", [])],
             "url": i.get("url", ""),
             "has_open_pr": False,  # populated by open_pr_issue_numbers()
+            # gh's own `issueType` field is an object ({"id","name","description","color"}) or null,
+            # never a bare string -- (i.get("issueType") or {}).get("name") is exactly that shape,
+            # confirmed live (issue #82 spike). None means "native Task or no type set".
+            "issue_type": (i.get("issueType") or {}).get("name"),
         })
     return normalized
 
@@ -329,6 +333,13 @@ def set_milestone(cfg: dict, apply: bool, number: int, title: str | None) -> Non
             print(f"DRY   gh issue edit {number} --remove-milestone")
 
 
+# GitHub's own native issue-type set -- the only three values `gh issue create --type` ever accepts,
+# regardless of which of them any given org has actually enabled (that's org_issue_types's job to
+# probe). create_issue validates against this fixed literal set as a schema/boundary check; it does
+# NOT re-probe org enablement, which is the caller's responsibility (see intake.promote()).
+_GH_ISSUE_TYPES = frozenset({"Task", "Bug", "Feature"})
+
+
 def _issue_number_from_url(url: str) -> int:
     """The trailing /issues/{n} segment of a GitHub issue URL, as an int. `gh issue create`'s
     stdout contract is exactly one bare URL line; a malformed one is a genuine unrecovered failure,
@@ -337,33 +348,79 @@ def _issue_number_from_url(url: str) -> int:
     return int(url.rsplit("/", 1)[-1])
 
 
-def create_issue(cfg: dict, apply: bool, title: str, body: str) -> dict | None:
+def create_issue(cfg: dict, apply: bool, title: str, body: str,
+                  issue_type: str | None = None) -> dict | None:
     """Create one issue via `gh issue create --body-file -`, through the dry-run gate. The body is
     never interpolated into argv -- it is piped through run()'s `input=` stdin passthrough (Task
     2), so a body containing shell metacharacters or gh-flag-like text can't be misparsed.
 
-    Never passes --type: API-VALIDATION.md records `gh issue create --type <TYPE>` as non-atomic
-    (an org missing that type still gets the issue created before the command fails), so a blind
-    retry would double-create. The Intake feature has no need for issue types, so the flag is
-    omitted outright rather than probed for.
+    `issue_type`, when given, is threaded onto the command as `--type <value>` (and into the dry-run
+    print line) -- but ONLY after passing the boundary check below. API-VALIDATION.md records
+    `gh issue create --type <TYPE>` as non-atomic (an org missing that type still gets the issue
+    created before the command fails), so this function never re-probes org enablement itself and
+    never retries -- that landmine is exactly why callers must resolve `issue_type` through
+    card_types.validate_reverse_issue_type (gated on ghkit.org_issue_types) BEFORE calling here,
+    passing None whenever the type isn't confirmed enabled.
 
-    apply=False prints the planned title and returns None, with zero calls to run() -- identical
-    dry-run shape to edit_label/set_milestone. apply=True runs the create, parses the issue number
-    out of gh's own stdout (a bare created-issue URL), and returns {"number", "url"}. Any
-    CalledProcessError/TimeoutExpired from run() propagates uncaught -- no swallowed sentinel.
+    apply=False prints the planned title (and type, if any) and returns None, with zero calls to
+    run() -- identical dry-run shape to edit_label/set_milestone. apply=True runs the create, parses
+    the issue number out of gh's own stdout (a bare created-issue URL), and returns {"number", "url"}.
+    Any CalledProcessError/TimeoutExpired from run() propagates uncaught -- no swallowed sentinel.
 
     Validates `title` at this boundary, before either the dry-run print or a live run() call: a
     blank or non-string title would otherwise reach subprocess.Popen unvalidated -- None raises an
     opaque TypeError ("argv must be str"), and "" produces a gh CalledProcessError -- either way an
     exception nothing upstream catches, crashing the entire sync run for one bad title. Raises
     ValueError with the offending value for context, matching edit_label's own boundary-validation
-    convention (unsafe label names)."""
+    convention (unsafe label names). `issue_type`, when not None, is validated the same way against
+    GitHub's own fixed three-value set (_GH_ISSUE_TYPES) -- a schema check, not an org-enablement
+    check (that's the caller's job, via validate_reverse_issue_type)."""
     if not isinstance(title, str) or not title.strip():
         raise ValueError(f"create_issue: title must be a non-empty string, got {title!r}")
+    if issue_type is not None and issue_type not in _GH_ISSUE_TYPES:
+        raise ValueError(f"create_issue: issue_type must be one of {sorted(_GH_ISSUE_TYPES)}, "
+                          f"got {issue_type!r}")
     if not apply:
-        print(f"DRY   gh issue create --title '{title}'")
+        type_suffix = f" --type '{issue_type}'" if issue_type else ""
+        print(f"DRY   gh issue create --title '{title}'{type_suffix}")
         return None
-    out = run(cfg, ["issue", "create", "--title", title, "--body-file", "-"], input=body)
+    args = ["issue", "create", "--title", title, "--body-file", "-"]
+    if issue_type:
+        args += ["--type", issue_type]
+    out = run(cfg, args, input=body)
     url = out.stdout.strip()
     print(f"gh    issue create -> {url}")
     return {"number": _issue_number_from_url(url), "url": url}
+
+
+def org_issue_types(cfg: dict) -> frozenset[str] | None:
+    """The set of native issue TYPE names enabled for the repo's owning organization, via one
+    `gh api orgs/{owner}/issue-types` call over the repo context resolved by `_repo_context`.
+
+    Tri-state, mirroring open_pr_issue_numbers/sub_issue_numbers exactly: a frozenset[str] on
+    success (possibly empty when the org has no issue types enabled -- a real, distinguishable
+    result), and **None** on ANY failure (no repo context, 404/non-org repo, subprocess error or
+    timeout, or a malformed/non-list response) -- so callers get one uniform fail-closed signal
+    rather than a fabricated empty set standing in for "we don't know". This is the exact probe
+    API-VALIDATION.md records as mandatory before any `gh issue create --type` call, since that flag
+    is non-atomic (see create_issue's own docstring). One WARN is printed on failure so a silent
+    outage here isn't invisible; callers (card_types.validate_reverse_issue_type) already treat
+    `None` and "type not enabled" as the same fail-closed signal, so no caller needs to special-case
+    the warning itself."""
+    ctx = _repo_context(cfg)
+    if ctx is None:
+        print("WARN  org issue-types probe skipped -- repo context unavailable", file=sys.stderr)
+        return None
+    try:
+        out = run(cfg, ["api", "--hostname", ctx.host, f"orgs/{ctx.owner}/issue-types"])
+        data = json.loads(out.stdout or "[]")
+        if not isinstance(data, list):
+            raise TypeError("orgs/{owner}/issue-types must return a JSON array")
+        return frozenset(
+            item["name"] for item in data
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
+            TypeError, KeyError) as exc:
+        print(f"WARN  org issue-types probe failed: {exc}", file=sys.stderr)
+        return None
