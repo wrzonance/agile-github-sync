@@ -88,8 +88,8 @@ def _run_hierarchy(tmp_path: Path, monkeypatch, issues: list[dict], cards: list[
     monkeypatch.setattr(
         agileplace,
         "create_card",
-        Mock(side_effect=lambda _cfg, _apply, _title, custom_id, _url, _lane_id:
-             planned_cards.get(custom_id, {})),
+        Mock(side_effect=lambda _cfg, _apply, _title, custom_id, _url, _lane_id,
+             type_id=None, type_title=None: planned_cards.get(custom_id, {})),
     )
     monkeypatch.setattr(agileplace, "patch_card", Mock())
     monkeypatch.setattr(agileplace, "connect_children", connect_children)

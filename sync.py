@@ -21,6 +21,7 @@ import tempfile
 from collections.abc import Mapping
 
 import agileplace
+import card_types
 import ghkit
 import ghproject
 import intake
@@ -464,7 +465,8 @@ def _ensure_cards_for_syncable_issues(cfg: dict, apply: bool, syncable_issues: l
                                       pending_custom_id_releases: frozenset[str], project_status: dict,
                                       project_items: dict, project_read_failed: bool, lanes: list,
                                       stage_map: dict | None, card_by_url: dict[str, dict],
-                                      card_by_cid: dict[str, dict]) -> None:
+                                      card_by_cid: dict[str, dict],
+                                      type_by_name: Mapping[str, str]) -> None:
     """Step 1: ensure a card exists for every syncable active issue that doesn't have one yet.
 
     Mutates `card_by_url`/`card_by_cid` IN PLACE to register each freshly created card under its
@@ -472,7 +474,13 @@ def _ensure_cards_for_syncable_issues(cfg: dict, apply: bool, syncable_issues: l
     steps 2-4 close over these SAME dict objects via `card_for()`, so a card created here is visible
     to them immediately, with no second index-rebuild pass. Dry-run creates carry an obvious
     plan-only id that is indexed the same way; dry-run state is never saved, so that identity can't
-    escape this run."""
+    escape this run.
+
+    `type_by_name` is card_types.resolve_card_type_ids(...).by_name (issue #82): a new card's typeId
+    is set at create time from the issue's derived card type, when that name resolved to a board
+    type. create_card's type_title mirrors the derived name back into the dry-run snapshot's nested
+    type.title, so a same-pass card_types.sync_card_type reads current==derived and never double-
+    queues the same typeId patch."""
     for issue in syncable_issues:
         if card_for(issue):
             continue
@@ -485,8 +493,11 @@ def _ensure_cards_for_syncable_issues(cfg: dict, apply: bool, syncable_issues: l
         lane = None
         if not project_read_failed:
             lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", stage_map)
+        derived_type = card_types.derive_card_type_name(issue)
+        type_id = type_by_name.get(derived_type) if derived_type else None
         created = agileplace.create_card(cfg, apply, issue_card_title(issue), key, issue["url"],
-                                         lane["id"] if lane else None)
+                                         lane["id"] if lane else None,
+                                         type_id=type_id, type_title=derived_type if type_id else None)
         if apply and created.get("id"):
             created = _created_card_snapshot(cfg, created)
         if created.get("id"):
@@ -572,7 +583,14 @@ def main() -> None:
     project_items, project_status = pv2.project_items, pv2.project_status
     field_meta, project_read_failed, move_lanes = pv2.field_meta, pv2.project_read_failed, pv2.move_lanes
 
-    lanes = agileplace.board_layout(cfg).lanes if online else []
+    # --- issue #82: card-types wiring (comment-banner delimited -- #65 is expected to touch this
+    # same `lanes = ...` line, so this is flagged as a likely merge conflict up front) ---
+    layout = agileplace.board_layout(cfg) if online else agileplace.BoardLayout(lanes=[], card_types=[])
+    lanes = layout.lanes
+    resolved = card_types.resolve_card_type_ids(layout.card_types)
+    for line in resolved.warnings:
+        print(line)
+    # --- end issue #82 card-types wiring ---
     cards = agileplace.list_cards(cfg) if online else []
     smap = cfg.get("stage_lane_map")
 
@@ -639,7 +657,8 @@ def main() -> None:
     # 1) ensure a card per active issue (see _ensure_cards_for_syncable_issues).
     _ensure_cards_for_syncable_issues(cfg, apply, syncable_issues, card_for,
                                       pending_custom_id_releases, project_status, project_items,
-                                      project_read_failed, lanes, smap, card_by_url, card_by_cid)
+                                      project_read_failed, lanes, smap, card_by_url, card_by_cid,
+                                      resolved.by_name)
 
     # 2) per active issue: base reset if card changed; lane; metadata; dates
     for issue in syncable_issues:
@@ -681,6 +700,7 @@ def main() -> None:
         if field_meta:
             sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue)
         sync_description(cfg, apply, issue, card, issues_state, queue)
+        card_types.sync_card_type(cfg, apply, issue, card, resolved.by_name, issues_state, queue)
 
     # 3) parent/child connections (see sync_child_connections for the full contract).
     poisoned = poisoned_card_ids(card_ops)
