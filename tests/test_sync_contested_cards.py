@@ -61,7 +61,7 @@ def _card_with_urls(card_id: str, custom_id: str, urls: list[str], *, lane_id: s
         "tags": [],
         "plannedStart": None,
         "plannedFinish": None,
-        # issue #65: keeps agileplace.card_description() on its zero-I/O path.
+        # issue #65: keeps agileplace_description.card_description() on its zero-I/O path.
         "description": "",
     }
 

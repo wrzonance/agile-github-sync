@@ -1,11 +1,11 @@
-"""Unit tests for description_sync.py's pure merge (issue #65). No I/O -- pins the full 9-state
+"""Unit tests for description_sync.py's pure merge (issue #65). No I/O -- pins the full 10-state
 resolve_description matrix plus the two canonicalization helpers' (corrected) idempotence
 invariants. Run: pytest -q
 """
 from __future__ import annotations
 
+import math
 import sys
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -60,7 +60,7 @@ def _assert_invariant(base: str | None, result: DescriptionResolution) -> None:
 
 
 # =====================================================================================
-# resolve_description -- the 9 hand-traced states
+# resolve_description -- the 10 hand-traced states
 # =====================================================================================
 
 def test_seeding_card_empty_pushes_gh_body_to_agileplace():
@@ -100,6 +100,28 @@ def test_truncated_steady_state_compares_ap_side_against_its_own_written_form():
     truncated = full[:100] + "...[truncated by sync]"
     result = resolve_description(full, truncated, full, truncated)
     assert result == DescriptionResolution(full, False, False, False, None)
+    _assert_invariant(full, result)
+
+
+def test_ap_edit_on_top_of_a_truncated_stub_is_not_blindly_pushed_to_github():
+    # desc_base is the FULL agreed canonical; desc_ap_written is only the canonical of the
+    # TRUNCATED stand-in a prior run actually wrote (see the truncated-steady-state test above).
+    # If the card's truncated stub is edited further (a comment appended, a typo fixed on the
+    # visible portion, ...), ap_canonical now differs from desc_ap_written -- but ap_canonical is
+    # still only that truncated stub, never the untruncated tail that lives solely in `base`.
+    # Blindly promoting it to `merged` and pushing it to GitHub would permanently destroy the lost
+    # tail with no warning (critical review finding for issue #65). This must degrade to the same
+    # warn-and-skip conflict policy as a genuine both-sides conflict: nothing is written, the full
+    # base stays put, and a human is told to reconcile by hand.
+    full = "A very long description " * 50
+    truncated = full[:100] + "...[truncated by sync]"
+    edited_truncated = truncated + " one more sentence appended on the card"
+    result = resolve_description(full, truncated, full, edited_truncated)
+    assert result.write_gh is False
+    assert result.write_ap is False
+    assert result.conflict is True
+    assert result.merged == full
+    assert result.warning is not None
     _assert_invariant(full, result)
 
 
@@ -246,17 +268,37 @@ def test_truncate_result_never_exceeds_max_length_when_achievable():
     assert len(html) <= max_length
 
 
-def test_truncate_large_body_completes_in_low_single_digit_seconds():
-    # Pins the O(log n) fix: the spike's O(n^2) per-word shrink loop took 52+s on a 25k-char body.
-    # GH issue bodies run up to 65,536 chars. A handful of renders (~log2(n)) must stay fast.
+def test_truncate_large_body_uses_a_logarithmic_number_of_renders_not_linear():
+    # Pins the O(log n)-RENDERS invariant _truncate_for_agileplace's own docstring claims, by
+    # counting actual calls to richtext.markdown_to_leankit_html instead of inferring it from
+    # wall-clock time. A wall-clock ceiling is only a proxy: a regression to a coarser-but-still-
+    # polynomial scheme (fixed-percentage chunks, an accidental O(sqrt(n)) loop, ...) could still
+    # finish under a generous time budget and pass, and a genuinely correct O(log n) run could
+    # exceed a tight one on slow/loaded CI hardware. Counting calls pins the claim directly.
+    # Wraps (never replaces) the real renderer so truncation behavior itself is unaffected.
     markdown = ("The quick brown fox jumps over the lazy dog. " * 1500)
     assert len(markdown) >= 20_000
-    start = time.monotonic()
-    html, was_truncated = _truncate_for_agileplace(markdown, max_length=5000)
-    elapsed = time.monotonic() - start
+    real_render = richtext.markdown_to_leankit_html
+    calls = []
+
+    def _counting_render(md):
+        calls.append(md)
+        return real_render(md)
+
+    with patch("description_sync.richtext.markdown_to_leankit_html", side_effect=_counting_render):
+        html, was_truncated = _truncate_for_agileplace(markdown, max_length=5000)
+
     assert was_truncated is True
     assert len(html) <= 5000
-    assert elapsed < 5.0, f"truncation took {elapsed:.2f}s -- the O(n^2) regression may have returned"
+    # A binary search over len(markdown) candidate cuts takes ~log2(n) iterations plus a couple of
+    # fixed renders (the initial full-length probe, the final confirmed cut) -- nowhere near
+    # proportional to len(markdown). A regression back to a per-word/per-chunk shrink loop would
+    # blow this bound by orders of magnitude on a ~70,000-char input.
+    max_expected_renders = math.ceil(math.log2(len(markdown))) + 4
+    assert len(calls) <= max_expected_renders, (
+        f"_truncate_for_agileplace made {len(calls)} renders (expected <= {max_expected_renders}) "
+        "-- the O(log n) fix may have regressed to a linear/near-linear scheme"
+    )
 
 
 # =====================================================================================
@@ -276,8 +318,8 @@ def test_sync_description_dry_run_does_not_advance_base_despite_queued_ap_write(
     card = _card()
     state = {ISSUE_URL: {}}
     queue = _Queue()
-    with patch("description_sync.agileplace.card_description", return_value=""), \
-         patch("description_sync.agileplace.op_description", return_value="OP") as op_mock, \
+    with patch("description_sync.agileplace_description.card_description", return_value=""), \
+         patch("description_sync.agileplace_description.op_description", return_value="OP") as op_mock, \
          patch("description_sync.ghkit.edit_issue_body") as edit_mock:
         sync_description(_cfg(), False, issue, card, state, queue)
     op_mock.assert_called_once()
@@ -294,8 +336,8 @@ def test_sync_description_failed_gh_write_blocks_base_advance():
     card = _card()
     state = {ISSUE_URL: {}}
     queue = _Queue()
-    with patch("description_sync.agileplace.card_description", return_value="Hello from AgilePlace"), \
-         patch("description_sync.agileplace.op_description") as op_mock, \
+    with patch("description_sync.agileplace_description.card_description", return_value="Hello from AgilePlace"), \
+         patch("description_sync.agileplace_description.op_description") as op_mock, \
          patch("description_sync.ghkit.edit_issue_body", return_value=False) as edit_mock:
         sync_description(_cfg(), True, issue, card, state, queue)
     edit_mock.assert_called_once_with(_cfg(), True, issue["number"], "Hello from AgilePlace")
@@ -310,8 +352,8 @@ def test_sync_description_conflict_makes_no_writes_and_no_advance():
     card = _card()
     state = {ISSUE_URL: {}}
     queue = _Queue()
-    with patch("description_sync.agileplace.card_description", return_value="AP text"), \
-         patch("description_sync.agileplace.op_description") as op_mock, \
+    with patch("description_sync.agileplace_description.card_description", return_value="AP text"), \
+         patch("description_sync.agileplace_description.op_description") as op_mock, \
          patch("description_sync.ghkit.edit_issue_body") as edit_mock:
         sync_description(_cfg(), True, issue, card, state, queue)
     edit_mock.assert_not_called()
@@ -328,8 +370,8 @@ def test_sync_description_confirmed_gh_write_advances_both_fields_together():
     card = _card()
     state = {ISSUE_URL: {}}
     queue = _Queue()
-    with patch("description_sync.agileplace.card_description", return_value="Hello from AgilePlace"), \
-         patch("description_sync.agileplace.op_description") as op_mock, \
+    with patch("description_sync.agileplace_description.card_description", return_value="Hello from AgilePlace"), \
+         patch("description_sync.agileplace_description.op_description") as op_mock, \
          patch("description_sync.ghkit.edit_issue_body", return_value=True) as edit_mock:
         sync_description(_cfg(), True, issue, card, state, queue)
     edit_mock.assert_called_once_with(_cfg(), True, issue["number"], "Hello from AgilePlace")
@@ -348,8 +390,8 @@ def test_sync_description_confirmed_ap_write_advances_both_fields_together():
     queue = _Queue()
     written_html = richtext.markdown_to_leankit_html("Hello from GitHub")
     expected_ap_written = _canonicalize_ap_description(written_html)
-    with patch("description_sync.agileplace.card_description", return_value=""), \
-         patch("description_sync.agileplace.op_description", return_value="OP") as op_mock, \
+    with patch("description_sync.agileplace_description.card_description", return_value=""), \
+         patch("description_sync.agileplace_description.op_description", return_value="OP") as op_mock, \
          patch("description_sync.ghkit.edit_issue_body") as edit_mock:
         sync_description(_cfg(), True, issue, card, state, queue)
     edit_mock.assert_not_called()
@@ -363,18 +405,18 @@ def test_sync_description_never_reads_a_plan_only_dry_run_card():
     # Discovered running the wiring end-to-end (tests/test_run.py's dry-run path, issue #65 task
     # 5/7): a dry-run-only card carries agileplace.create_card's synthetic "_planOnly" marker and
     # has no server-side identity yet, so it never has a 'description' key. Without a guard,
-    # agileplace.card_description()'s lazy get_card() fallback fires a live GET for an id that was
+    # agileplace_description.card_description()'s lazy get_card() fallback fires a live GET for an id that was
     # never created on the server -- exactly the network read sync.py's own dependency-sync loop
     # already refuses for plan-only cards ("a fresh card has no server-side dependencies; never
     # read a plan-only id"). sync_description must apply that same convention: treat a plan-only
-    # card's AgilePlace-side description as "" without calling agileplace.card_description() at all.
+    # card's AgilePlace-side description as "" without calling agileplace_description.card_description() at all.
     issue = _issue(body="Hello from GitHub")
     card = {**_card(), "_planOnly": True}
     state = {ISSUE_URL: {}}
     queue = _Queue()
     written_html = richtext.markdown_to_leankit_html("Hello from GitHub")
-    with patch("description_sync.agileplace.card_description") as card_description_mock, \
-         patch("description_sync.agileplace.op_description", return_value="OP") as op_mock, \
+    with patch("description_sync.agileplace_description.card_description") as card_description_mock, \
+         patch("description_sync.agileplace_description.op_description", return_value="OP") as op_mock, \
          patch("description_sync.ghkit.edit_issue_body") as edit_mock:
         sync_description(_cfg(), False, issue, card, state, queue)
     card_description_mock.assert_not_called()

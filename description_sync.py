@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import NamedTuple
 
-import agileplace
+import agileplace_description
 import ghkit
 import richtext
 from stages import issue_custom_id
@@ -61,11 +61,19 @@ def resolve_description(base: str | None, ap_written_base: str | None, gh_canoni
     truncated text would look AP-side-edited on every subsequent run, forever.
 
     Change is detected independently per side against its own reference point; `None` normalizes
-    to "" on both sides. Four outcomes:
+    to "" on both sides. Five outcomes:
       - neither side changed -> no write; `merged` is the unchanged base (steady state, including
         the truncated-steady-state where the card still carries last run's truncated text).
-      - exactly one side changed -> that side's value propagates to the other; `merged` is the
-        changed side's canonical text.
+      - only the GH side changed -> propagates to AgilePlace; `merged` is the GH canonical text.
+      - only the AP side changed, AND `ap_written_base` already equalled `base` (the card carried
+        the FULL text, never a truncated stand-in) -> propagates to GitHub; `merged` is the AP
+        canonical text.
+      - only the AP side changed, but `ap_written_base` diverges from `base` (the card has only
+        ever carried a truncated stand-in for the full body) -> treated as unresolvable: the edit
+        touches only the visible truncated portion, never the untruncated tail that lives solely
+        in `base`, so promoting it to GitHub would silently destroy that tail. Degrades to the same
+        conflict outcome as both-sides-changed: neither side is written, `merged` stays the old
+        base, and `warning` names the issue for a human to reconcile by hand.
       - both changed but landed on the SAME value -> no conflict, no write (independently
         converged); `merged` becomes that shared value so the base can advance to it.
       - both changed to DIFFERENT values -> conflict: neither side is written, `merged` stays the
@@ -81,6 +89,19 @@ def resolve_description(base: str | None, ap_written_base: str | None, gh_canoni
     if gh_changed and not ap_changed:
         return DescriptionResolution(gh_canonical, False, True, False, None)
     if ap_changed and not gh_changed:
+        if ap_written_norm != base_norm:
+            # ap_written_base diverges from base ONLY when a prior run truncated the full body for
+            # the card (see _truncate_for_agileplace) -- the card has never carried anything but a
+            # truncated stand-in. An edit on top of that stub only ever touches the visible
+            # truncated portion, never the untruncated tail that lives solely in `base`. Blindly
+            # promoting ap_canonical to `merged` here would push that short stub to GitHub and
+            # permanently destroy the lost tail with no warning. Degrade to the same warn-and-skip
+            # conflict policy as a genuine both-sides conflict instead.
+            warning = ("description conflict: the AgilePlace card description changed, but the "
+                       "card holds only a truncated stand-in for the full GitHub issue body -- the "
+                       "edit cannot be safely merged back without risking loss of the untruncated "
+                       "tail -- leaving both sides untouched until a human reconciles them by hand")
+            return DescriptionResolution(base_norm, False, False, True, warning)
         return DescriptionResolution(ap_canonical, True, False, False, None)
     if gh_canonical == ap_canonical:
         return DescriptionResolution(gh_canonical, False, False, False, None)
@@ -180,8 +201,8 @@ def sync_description(cfg: dict, apply: bool, issue: dict, card: dict, issues_sta
 
     A dry-run-only planned card (``card["_planOnly"]``) exists only as a synthetic snapshot for
     continuing this one dry run -- it has no server-side identity yet, so it never carries a
-    'description' key. agileplace.card_description()'s lazy get_card() fallback would otherwise
-    issue a live GET for an id that was never created on the server. Same convention sync.py's
+    'description' key. agileplace_description.card_description()'s lazy get_card() fallback would
+    otherwise issue a live GET for an id that was never created on the server. Same convention sync.py's
     dependency-sync loop already uses for plan-only cards ("a fresh card has no server-side
     dependencies; never read a plan-only id") -- a fresh card likewise has no server-side
     description yet, so the AgilePlace side is treated as "" without any network read.
@@ -191,7 +212,8 @@ def sync_description(cfg: dict, apply: bool, issue: dict, card: dict, issues_sta
     key = issue_custom_id(issue)
 
     gh_canonical = _canonicalize_gh_body(issue.get("body"))
-    ap_description = "" if card.get("_planOnly") else agileplace.card_description(cfg, card)
+    ap_description = ("" if card.get("_planOnly")
+                      else agileplace_description.card_description(cfg, card))
     ap_canonical = _canonicalize_ap_description(ap_description)
     result = resolve_description(prev.get("desc_base"), prev.get("desc_ap_written"),
                                  gh_canonical, ap_canonical)
@@ -207,7 +229,7 @@ def sync_description(cfg: dict, apply: bool, issue: dict, card: dict, issues_sta
     new_ap_written = ap_canonical
     if result.write_ap:
         html, _ = _truncate_for_agileplace(result.merged, cfg["ap_description_max_length"])
-        queue(card, [agileplace.op_description(html)], "description")
+        queue(card, [agileplace_description.op_description(html)], "description")
         new_ap_written = _canonicalize_ap_description(html)
 
     if result.write_gh or result.write_ap:

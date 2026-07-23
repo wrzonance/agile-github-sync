@@ -19,6 +19,7 @@ import secrets
 import sys
 
 import agileplace
+import agileplace_description
 from config import env_config
 
 PARENT_TITLE = "SMOKE parent (safe to delete)"
@@ -281,7 +282,7 @@ def _check_dependencies(cfg: dict, parent_id: str, child_id: str, results: list)
 
 
 def _check_description(cfg: dict, parent_id: str, results: list) -> None:
-    """Steps 14-15: agileplace.op_description's exact write shape through the same versioned-PATCH
+    """Steps 14-15: agileplace_description.op_description's exact write shape through the same versioned-PATCH
     path (patch_card) the sync itself uses (description_sync.sync_description), then a
     fact-finding probe of the configured ap_description_max_length against the live server (the
     issue #65 design doc's "max-length probe": cross-check config.DEFAULT_AP_DESCRIPTION_MAX_LENGTH
@@ -299,8 +300,8 @@ def _check_description(cfg: dict, parent_id: str, results: list) -> None:
     _step(14, "description write via op_description through patch_card")
     fresh = agileplace.get_card(cfg, parent_id)
     html = "<p>SMOKE description write</p>"
-    agileplace.patch_card(cfg, True, fresh, [agileplace.op_description(html)])
-    readback = agileplace.card_description(cfg, agileplace.get_card(cfg, parent_id))
+    agileplace.patch_card(cfg, True, fresh, [agileplace_description.op_description(html)])
+    readback = agileplace_description.card_description(cfg, agileplace.get_card(cfg, parent_id))
     results.append(("description write round-trip (op_description via patch_card)",
                     readback == html, f"description now {readback!r}"))
 
@@ -309,14 +310,14 @@ def _check_description(cfg: dict, parent_id: str, results: list) -> None:
     probe_html = f"<p>{'x' * limit}</p>"
     fresh = agileplace.get_card(cfg, parent_id)
     try:
-        agileplace.patch_card(cfg, True, fresh, [agileplace.op_description(probe_html)])
+        agileplace.patch_card(cfg, True, fresh, [agileplace_description.op_description(probe_html)])
     except SystemExit as exc:
         _print_http_failure(exc)
         results.append(("description length probe", None,
                         f"server REJECTED a {len(probe_html)}-char description "
                         f"(configured max_length={limit}): {exc}"))
         return
-    readback = agileplace.card_description(cfg, agileplace.get_card(cfg, parent_id))
+    readback = agileplace_description.card_description(cfg, agileplace.get_card(cfg, parent_id))
     results.append(("description length probe", None,
                     f"sent {len(probe_html)} chars, server stored {len(readback)} chars back "
                     f"(configured max_length={limit})"))

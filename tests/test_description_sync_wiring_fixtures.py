@@ -2,7 +2,7 @@
 per-issue loop must never let a pre-existing card fixture in test_sync_main.py,
 test_vetting_latch.py, or test_run.py fall through to a real agileplace.api() call.
 
-agileplace.card_description() takes a zero-I/O path whenever the card dict already carries a
+agileplace_description.card_description() takes a zero-I/O path whenever the card dict already carries a
 'description' key (even ""); a fixture that omits it makes sync_description's
 card_description(cfg, card) call fall back to agileplace.get_card(), which none of these three
 files mock -- so it hits the real HTTP client. Confirmed live in the design spike: a real host
@@ -54,6 +54,6 @@ def test_no_wired_test_file_lets_a_card_fixture_reach_real_agileplace_api():
 
     assert not failures, (
         "one or more wired test files let a card fixture reach sync_description's "
-        "agileplace.card_description() fallback (real agileplace.api() call) -- give the fixture "
+        "agileplace_description.card_description() fallback (real agileplace.api() call) -- give the fixture "
         "a 'description' key or explicitly mock agileplace.get_card:\n\n" + "\n\n".join(failures)
     )

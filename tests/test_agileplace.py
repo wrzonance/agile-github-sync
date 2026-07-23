@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agileplace import (  # noqa: E402
     _card_with_version,
     api,
-    card_description,
     card_external_urls,
     card_block_reason,
     card_is_blocked,
@@ -23,7 +22,6 @@ from agileplace import (  # noqa: E402
     get_card,
     list_cards,
     op_custom_id,
-    op_description,
     op_planned_date,
     op_tag,
     ops_blocked,
@@ -791,64 +789,9 @@ def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
             patch_card(CFG, True, card, ops)
 
 
-# --- op_description / card_description (issue #65 Task 1/7) --------------
-
-def test_op_description_returns_single_replace_op():
-    """No validation here (description_sync owns write-vs-not) -- matches op_custom_id's shape."""
-    op = op_description("<p>hello</p>")
-    assert op == {"op": "replace", "path": "/description", "value": "<p>hello</p>"}
-
-
-def test_card_description_returns_present_description_without_network_call():
-    card = {"id": "1", "description": "<p>hi</p>"}
-    with patch("agileplace.get_card") as get_card_mock:
-        result = card_description(CFG, card)
-    get_card_mock.assert_not_called()
-    assert result == "<p>hi</p>"
-
-
-def test_card_description_present_but_empty_string_takes_zero_io_path():
-    """A card literally carrying description="" is a real, current empty description -- NOT
-    'unknown' -- and must not trigger the lazy get_card fallback (see struct #7 in the design:
-    every fixture reaching this must either carry the key or explicitly mock get_card)."""
-    card = {"id": "1", "description": ""}
-    with patch("agileplace.get_card") as get_card_mock:
-        result = card_description(CFG, card)
-    get_card_mock.assert_not_called()
-    assert result == ""
-
-
-def test_card_description_present_but_none_normalizes_to_empty_string():
-    card = {"id": "1", "description": None}
-    with patch("agileplace.get_card") as get_card_mock:
-        result = card_description(CFG, card)
-    get_card_mock.assert_not_called()
-    assert result == ""
-
-
-def test_card_description_missing_key_falls_back_to_lazy_get_card():
-    """list_cards() never returns description (no field-selection params sent) -- a card summary
-    missing the key entirely must trigger exactly one get_card refetch."""
-    card = {"id": "77"}
-    with patch("agileplace.get_card",
-               return_value={"id": "77", "description": "<p>fresh</p>"}) as get_card_mock:
-        result = card_description(CFG, card)
-    get_card_mock.assert_called_once_with(CFG, "77")
-    assert result == "<p>fresh</p>"
-
-
-def test_card_description_lazy_fallback_normalizes_missing_description_to_empty_string():
-    card = {"id": "78"}
-    with patch("agileplace.get_card", return_value={"id": "78"}):
-        result = card_description(CFG, card)
-    assert result == ""
-
-
-def test_card_description_never_mutates_input_card():
-    card = {"id": "1", "description": "<p>hi</p>"}
-    before = dict(card)
-    card_description(CFG, card)
-    assert card == before
+# op_description / card_description (issue #65 Task 1/7) moved to agileplace_description.py and
+# tests/test_agileplace_description.py -- see review finding: keep this file from growing past the
+# project's file-size cap by extracting the description read/write surface into its own module.
 
 
 def test_connect_children_disconnect_children_create_card_have_no_version_header_logic():

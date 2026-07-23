@@ -39,7 +39,7 @@ def _issue():
 
 
 def _card():
-    # "description": "" (issue #65) keeps agileplace.card_description() on its zero-I/O path.
+    # "description": "" (issue #65) keeps agileplace_description.card_description() on its zero-I/O path.
     return {"id": "C1", "version": 1, "customId": "1",
             "externalLink": {"url": ISSUE_URL}, "tags": [],
             "plannedStart": None, "plannedFinish": None, "laneId": "LANE1",

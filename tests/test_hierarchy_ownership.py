@@ -39,7 +39,7 @@ def _card(number: int, custom_id: str, *, url: str | None = None,
         "laneId": None,
         "blockedStatus": {"isBlocked": False, "reason": ""},
         "childCards": [{"id": child_id} for child_id in children],
-        # issue #65: keeps agileplace.card_description() on its zero-I/O path.
+        # issue #65: keeps agileplace_description.card_description() on its zero-I/O path.
         "description": "",
     }
     return {**card, **({"externalLink": {"url": url}} if url else {})}

@@ -119,7 +119,7 @@ class FixtureWorld:
             "plannedFinish": None,
             "blockedStatus": {"isBlocked": False, "reason": ""},
             "childCards": [],
-            # issue #65: keeps agileplace.card_description() on its zero-I/O path -- without this
+            # issue #65: keeps agileplace_description.card_description() on its zero-I/O path -- without this
             # key it falls back to the real (unmocked) GET card/{id}, which this fixture's own
             # open_url dispatch doesn't expect and raises "unexpected AgilePlace request".
             "description": "",

@@ -37,7 +37,7 @@ def _issue():
 
 
 def _card():
-    # "description": "" (issue #65) keeps agileplace.card_description() on its zero-I/O path --
+    # "description": "" (issue #65) keeps agileplace_description.card_description() on its zero-I/O path --
     # without the key it falls back to the real (unmocked) agileplace.get_card(), which hits the
     # live HTTP client and SystemExits (confirmed live in the design spike).
     return {"id": "C1", "version": 1, "customId": "1",
