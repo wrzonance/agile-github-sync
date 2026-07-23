@@ -1,11 +1,13 @@
 """One-shot live smoke test for the AgilePlace write path. Stdlib only.
 
 Reads .env exactly like sync.py, previews the target board (title, lanes, existing cards), and only
-after an explicit confirmation creates two clearly-marked throwaway cards, exercises every write
-shape the sync uses -- card create, versioned PATCH tag add/remove, externalLink add on a bare card,
-connect/disconnect children, and a deliberately stale-version PATCH that MUST be rejected -- then
-deletes both cards and confirms they are gone. The steps mirror the ``[live-check]`` items in
-API-VALIDATION.md so one confirmed run retires them.
+after an explicit confirmation creates clearly-marked throwaway cards, exercises every write shape
+the sync uses -- card create, versioned PATCH tag add/remove, externalLink add on a bare card,
+connect/disconnect children, a typeId replace and a typed card create (each verified via refetch,
+skipped as informational when the board has no eligible card type configured), and a deliberately
+stale-version PATCH that MUST be rejected -- then deletes every throwaway card and confirms they are
+gone. The steps mirror the ``[live-check]`` items in API-VALIDATION.md so one confirmed run retires
+them.
 
 GitHub is never touched (dry run already exercises every gh read live), and the sync state file is
 never read or written. Every server rejection is printed with its full, untruncated response body so
@@ -19,15 +21,18 @@ import secrets
 import sys
 
 import agileplace
+import card_types
 from config import env_config
 
 PARENT_TITLE = "SMOKE parent (safe to delete)"
 CHILD_TITLE = "SMOKE child (safe to delete)"
+TYPED_TITLE = "SMOKE typed (safe to delete)"
 # Custom ids carry a fresh per-run suffix: the sync's _matching_card falls back to customId
 # matching, so a fixed id on a leftover card could be adopted by a concurrent or later sync run
 # (and two smoke runs would collide on the board). See PR #51 review.
 PARENT_CUSTOM_ID_PREFIX = "SMOKE-P-"
 CHILD_CUSTOM_ID_PREFIX = "SMOKE-C-"
+TYPED_CUSTOM_ID_PREFIX = "SMOKE-T-"
 # example.invalid can never collide with a real issue URL, so a card left behind by a failed
 # cleanup can never be adopted by a later sync run's external-link matching.
 PARENT_URL = "https://example.invalid/smoke/parent"
@@ -82,6 +87,14 @@ def _confirm(assume_yes: bool) -> bool:
 def _pick_lane(lanes: list[dict]) -> dict | None:
     return next((lane for lane in lanes if lane.get("isDefaultDropLane")),
                 lanes[0] if lanes else None)
+
+
+def _pick_card_type(board_card_types: list[dict]) -> dict | None:
+    """First eligible (isCardType, non-empty title) board card type. Smoke only needs ANY
+    real board-configured type to exercise the typeId write path -- unlike the sync's own
+    card_types.resolve_card_type_ids, it does not need one matching a specific derived name."""
+    return next((card_type for card_type in board_card_types
+                if card_type.get("isCardType") and (card_type.get("title") or "").strip()), None)
 
 
 def _print_http_failure(exc: SystemExit) -> None:
@@ -280,9 +293,59 @@ def _check_dependencies(cfg: dict, parent_id: str, child_id: str, results: list)
                     f"incoming read back: {sorted(incoming) if incoming is not None else 'unavailable'}"))
 
 
+def _check_type_id_roundtrip(cfg: dict, parent_id: str, card_type: dict, results: list) -> None:
+    """Step 13: card_types.op_type's /typeId replace on the existing parent card, then read the
+    nested type back -- the same shape sync_card_type queues for a derived-type drift fix."""
+    _step(13, "typeId replace via one versioned PATCH, then read the type back")
+    type_id = str(card_type["id"])
+    fresh = agileplace.get_card(cfg, parent_id)
+    agileplace.patch_card(cfg, True, fresh, [card_types.op_type(type_id)])
+    readback = agileplace.get_card(cfg, parent_id)
+    nested = readback.get("type") if isinstance(readback.get("type"), dict) else {}
+    results.append(("typeId replace round-trip", str(nested.get("id")) == type_id,
+                    f"type now {nested!r}"))
+
+
+def _check_create_with_type_id(cfg: dict, lane_id: str | None, custom_id: str, card_type: dict,
+                               created: list[str], results: list) -> None:
+    """Step 14: create a card with typeId set, then refetch it. The create response is confirmed
+    sparse (no customId/laneId echo, no version -- see API-VALIDATION.md 2026-07-21), so this
+    checks the refetch, never the create response itself."""
+    _step(14, "create card with typeId, verified via refetch (create response is sparse)")
+    type_id = str(card_type["id"])
+    type_title = (card_type.get("title") or "").strip()
+    card = agileplace.create_card(cfg, True, TYPED_TITLE, custom_id, "", lane_id,
+                                  type_id=type_id, type_title=type_title)
+    card_id = str(card.get("id") or "")
+    if not card_id:
+        raise SystemExit(f"typed-create response has no card id ({dict(card)!r}) -- cannot continue")
+    created.append(card_id)
+    print(f"      created card {card_id}")
+    readback = agileplace.get_card(cfg, card_id)
+    nested = readback.get("type") if isinstance(readback.get("type"), dict) else {}
+    results.append(("create with typeId, confirmed via refetch", str(nested.get("id")) == type_id,
+                    f"refetched type {nested!r}"))
+
+
+def _check_type_id_writes(cfg: dict, lane_id: str | None, parent_id: str, run_id: str,
+                          created: list[str], results: list) -> None:
+    """Steps 13-14, gated on the board actually having an eligible card type configured: neither
+    step is a sync precondition (a board with no card types configured never derives one), so a
+    board without one reports both as informational skips rather than failing the run."""
+    card_type = _pick_card_type(agileplace.board_layout(cfg).card_types)
+    if card_type is None:
+        skip_detail = "skipped -- board has no eligible (isCardType) card type configured"
+        results.append(("typeId replace round-trip", None, skip_detail))
+        results.append(("create with typeId, confirmed via refetch", None, skip_detail))
+        return
+    _check_type_id_roundtrip(cfg, parent_id, card_type, results)
+    _check_create_with_type_id(cfg, lane_id, TYPED_CUSTOM_ID_PREFIX + run_id, card_type,
+                               created, results)
+
+
 def _check_stale_patch(cfg: dict, parent_id: str, stale_version: str, results: list) -> None:
-    """Step 13: a stale x-lk-resource-version PATCH must be rejected, not silently applied."""
-    _step(13, "deliberately stale-version PATCH (the server MUST reject this)")
+    """Step 15: a stale x-lk-resource-version PATCH must be rejected, not silently applied."""
+    _step(15, "deliberately stale-version PATCH (the server MUST reject this)")
     body = [agileplace.op_tag("smoke-stale")]
     print(f"      PATCH /io/card/{parent_id} with stale x-lk-resource-version={stale_version} "
           f"body={json.dumps(body)}")
@@ -338,6 +401,7 @@ def _run_checks(cfg: dict, lane_id: str | None, run_id: str, created: list[str],
     child_id = _check_child_and_link(cfg, lane_id, CHILD_CUSTOM_ID_PREFIX + run_id, created, results)
     _check_connections(cfg, parent_id, child_id, results)
     _check_dependencies(cfg, parent_id, child_id, results)
+    _check_type_id_writes(cfg, lane_id, parent_id, run_id, created, results)
     _check_stale_patch(cfg, parent_id, baseline_version, results)
 
 
