@@ -45,9 +45,13 @@ def _card(type_obj=None, **overrides):
     return card
 
 
-def _cfg(tmp_path):
+def _cfg(tmp_path, online=True):
+    """`online=False` mirrors main()'s own `bool(cfg["token"] and cfg["host"] and cfg["board_id"])`
+    gate (issue #82 review finding) -- an unconfigured/offline run never has all three set."""
     return {
-        "token": "tok", "host": "example.leankit.com", "board_id": "42",
+        "token": "tok" if online else None,
+        "host": "example.leankit.com" if online else None,
+        "board_id": "42" if online else None,
         "target_repo_path": tmp_path,
         "label_sync_ignore": frozenset(),
         "stage_lane_map": {},
@@ -57,7 +61,7 @@ def _cfg(tmp_path):
 
 
 def _run_main(tmp_path, issue, card_types=(), existing_cards=None, seed_issues_state=None,
-             apply=True, create_card_return=None, get_card_return=None):
+             apply=True, create_card_return=None, get_card_return=None, online=True):
     """ExitStack covering every I/O boundary main() touches, with card_types under caller control
     (test_sync_main._mock_io hardcodes card_types=[] -- this file's whole point is exercising it
     non-empty). Returns the patch_card and create_card mocks for call-site assertions.
@@ -65,8 +69,13 @@ def _run_main(tmp_path, issue, card_types=(), existing_cards=None, seed_issues_s
     `create_card_return`/`get_card_return` let a caller simulate a REALISTIC create response (an id,
     optionally refetched into a full card) instead of the bare `{}` every other test here uses --
     `{}` never registers into card_by_url/card_by_cid (no "id" key), so it can't exercise the
-    same-pass create-then-sync_card_type wiring at all."""
-    cfg = _cfg(tmp_path)
+    same-pass create-then-sync_card_type wiring at all.
+
+    `online=False` drives main() down its unconfigured/offline branch (cfg's token/host/board_id all
+    None) -- board_layout is never even called there (main() substitutes an empty BoardLayout
+    itself), so the mocked "agileplace.board_layout" return_value below is simply unused in that
+    case."""
+    cfg = _cfg(tmp_path, online=online)
     state_file = tmp_path / ".sync-state.json"
     if seed_issues_state is not None:
         state_file.write_text(json.dumps({"schema": sync.STATE_SCHEMA, "target": "acme/repo",
@@ -114,6 +123,18 @@ def test_main_prints_resolve_card_type_ids_warnings_for_unresolved_names(tmp_pat
     assert "WARN  no eligible board card type named 'New Feature'" in out
     assert "WARN  no eligible board card type named 'Documentation'" in out
     assert "WARN  no eligible board card type named 'Improvement'" in out
+
+
+def test_main_prints_no_card_type_warnings_when_agileplace_is_not_configured(tmp_path, capsys):
+    """Issue #82 review finding: when AgilePlace is not configured at all (online == False), main()
+    substitutes an empty BoardLayout(card_types=[]) -- resolve_card_type_ids([]) then finds zero
+    eligible matches for every one of the 4 CARD_TYPE_RULES target names, so printing its warnings
+    unconditionally would misleadingly WARN about a board that was never even queried. Offline runs
+    must print none of them."""
+    _run_main(tmp_path, _issue(), card_types=[], online=False, apply=False)
+
+    out = capsys.readouterr().out
+    assert "WARN  no eligible board card type named" not in out
 
 
 def test_main_prints_no_card_type_warning_once_the_board_defines_it(tmp_path, capsys):
