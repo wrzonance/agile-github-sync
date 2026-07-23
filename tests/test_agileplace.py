@@ -10,8 +10,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agileplace import (  # noqa: E402
+    BoardLayout,
+    _card_types_with_ids,
+    _card_value_for_patch_path,
     _card_with_version,
+    _planned_card_snapshot,
     api,
+    board_layout,
     card_external_urls,
     card_block_reason,
     card_is_blocked,
@@ -805,3 +810,111 @@ def test_connect_children_disconnect_children_create_card_have_no_version_header
         create_card(CFG, True, "Title", "CID-1", "https://example.com", None)
     _, kwargs = api_mock.call_args
     assert kwargs.get("headers") is None
+
+
+# --- issue #82: BoardLayout + card-types structural filter + typeId patch path --------------------
+
+def test_board_layout_returns_lanes_and_card_types_as_a_boardlayout():
+    """board_layout's return shape is now a BoardLayout(lanes, card_types) NamedTuple -- both fields
+    structurally filtered the same way lanes always were."""
+    response = {
+        "lanes": [{"id": "L1", "title": "Ready"}],
+        "cardTypes": [{"id": "T1", "title": "Bug", "isCardType": True}],
+    }
+    with patch("agileplace.api", return_value=response) as api_mock:
+        layout = board_layout(CFG)
+    api_mock.assert_called_once_with(CFG, "GET", "board/b1")
+    assert layout == BoardLayout(
+        lanes=[{"id": "L1", "title": "Ready"}],
+        card_types=[{"id": "T1", "title": "Bug", "isCardType": True}],
+    )
+
+
+def test_board_layout_defaults_missing_cardtypes_to_empty_list():
+    """A board response with no cardTypes key at all (older board / no card types configured) must
+    not raise -- card_types comes back as an empty list, same fail-open shape lanes already had."""
+    with patch("agileplace.api", return_value={"lanes": []}):
+        layout = board_layout(CFG)
+    assert layout == BoardLayout(lanes=[], card_types=[])
+
+
+def test_card_types_with_ids_skips_malformed_card_types(capsys):
+    """Mirrors _lanes_with_ids's structural contract: non-object entries, non-string titles, missing
+    ids, and unhashable ids are all skipped with one WARN each -- never raised."""
+    card_types = [
+        {"id": "valid", "title": "Bug"},
+        {"id": "bad-title", "title": {"text": "Bug"}},
+        {"id": ["bad-id"], "title": "Feature"},
+        {"title": "no-id"},
+        "not-a-dict",
+    ]
+
+    valid = _card_types_with_ids(card_types)
+
+    assert valid == [{"id": "valid", "title": "Bug"}]
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warnings) == 4
+    assert any("bad-title" in line and "non-string" in line for line in warnings)
+    assert any("unhashable" in line for line in warnings)
+    assert any("no id" in line for line in warnings)
+    assert any("is not an object" in line for line in warnings)
+
+
+def test_card_value_for_patch_path_typeid_never_raises_regardless_of_card_shape():
+    """Spike probe #2's four confirmed cases for the new typeId branch: identical nested type -> no
+    diff via matching values; differing type.id -> different values; type key absent -> None both
+    sides (no false positive); malformed non-dict type -> None, fails toward 'do not retry' rather
+    than trusting garbage -- and none of these ever raise."""
+    assert _card_value_for_patch_path({"type": {"id": "5", "title": "Bug"}}, "/typeId") == "5"
+    assert _card_value_for_patch_path({"type": {"id": "9"}}, "/typeId") == "9"
+    assert _card_value_for_patch_path({}, "/typeId") is None
+    assert _card_value_for_patch_path({"type": None}, "/typeId") is None
+    assert _card_value_for_patch_path({"type": "Bug"}, "/typeId") is None
+    assert _card_value_for_patch_path({"type": ["Bug"]}, "/typeId") is None
+
+
+def test_create_card_dry_run_snapshot_type_title_reads_back_exactly():
+    """A card created via create_card(..., type_id=X, type_title=Y) in the same dry-run pass, when
+    later read back through its planned snapshot's nested type.title, returns exactly Y -- this is
+    what prevents create_card + sync_card_type from double-queuing the same-pass typeId patch."""
+    snapshot = create_card(CFG, False, "Title", "CID-1", "https://example.com", None,
+                           type_id="42", type_title="Bug")
+    assert snapshot["type"] == {"id": "42", "title": "Bug"}
+
+
+def test_create_card_dry_run_snapshot_omits_type_when_type_id_not_supplied():
+    """Existing call sites that never pass type_id must see byte-identical snapshots -- no `type`
+    key appears at all when type_id is falsy."""
+    snapshot = create_card(CFG, False, "Title", "CID-1", "https://example.com", None)
+    assert "type" not in snapshot
+
+
+def test_create_card_apply_mode_sends_typeid_in_post_body_when_supplied():
+    with patch("agileplace.api", return_value={"id": "new"}) as api_mock:
+        create_card(CFG, True, "Title", "CID-1", "https://example.com", None,
+                    type_id="42", type_title="Bug")
+    _, kwargs = api_mock.call_args
+    assert kwargs["body"]["typeId"] == "42"
+
+
+def test_create_card_apply_mode_omits_typeid_when_not_supplied():
+    """Existing call sites (no type_id passed) must send a byte-identical POST body -- no `typeId`
+    key appears at all."""
+    with patch("agileplace.api", return_value={"id": "new"}) as api_mock:
+        create_card(CFG, True, "Title", "CID-1", "https://example.com", None)
+    _, kwargs = api_mock.call_args
+    assert "typeId" not in kwargs["body"]
+
+
+def test_planned_card_snapshot_type_title_never_reaches_the_post_body():
+    """type_title only feeds the dry-run snapshot's read-back shape; it must never leak into the
+    real POST body even when supplied alongside type_id."""
+    snapshot = _planned_card_snapshot("Title", "CID-1", "https://example.com", None,
+                                      type_id="42", type_title="Bug")
+    assert snapshot["type"] == {"id": "42", "title": "Bug"}
+    with patch("agileplace.api", return_value={"id": "new"}) as api_mock:
+        create_card(CFG, True, "Title", "CID-1", "https://example.com", None,
+                    type_id="42", type_title="Bug")
+    _, kwargs = api_mock.call_args
+    assert "type_title" not in kwargs["body"]
+    assert "title" in kwargs["body"] and kwargs["body"]["title"] == "Title"
