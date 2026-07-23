@@ -240,17 +240,20 @@ def _configure(monkeypatch, tmp_path):
         "GH_PROJECT_NUMBER",
         "LABEL_SYNC_IGNORE",
         "STAGE_LANE_MAP",
-        # config.env_config() reads these straight from os.environ (config.py), so a developer whose
-        # real .env exports them (the production comment-sync identity) would otherwise make every
-        # e2e run enable comment sync and hit un-stubbed comment endpoints -- the whole suite's
-        # result would depend on ambient environment. Clear them so the baseline world is
-        # deterministic on every machine; the enabled scenario sets them back explicitly.
-        "COMMENT_SYNC_GH_LOGIN",
-        "COMMENT_SYNC_AP_AUTHOR",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in values.items():
         monkeypatch.setenv(name, value)
+    # Comment-sync identity: force BLANK, not delenv. env_config() -> load_env_file() does
+    # os.environ.setdefault() from the repo-root .env (see this function's top comment: it
+    # "repopulates deleted variables"), so a merely-DELETED identity var is refilled from a dev box's
+    # production .env -- enabling comment sync and hitting un-stubbed endpoints (4 test_run failures
+    # on a machine whose .env exports COMMENT_SYNC_*; the ENV_FILE redirect above did not save it).
+    # A present-but-BLANK value survives setdefault (it only fills UNSET keys) and
+    # _parse_comment_sync_identity treats blank as disabled, so the baseline world is deterministic
+    # regardless of ambient env OR .env contents. The enabled scenario sets real values on top.
+    for name in ("COMMENT_SYNC_GH_LOGIN", "COMMENT_SYNC_AP_AUTHOR"):
+        monkeypatch.setenv(name, "")
 
 
 def _run(monkeypatch, tmp_path, *, apply: bool, world_factory=FixtureWorld) -> RunResult:

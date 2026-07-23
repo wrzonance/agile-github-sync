@@ -262,3 +262,29 @@ def test_env_config_never_prints_for_any_comment_sync_identity_combination(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_deleted_comment_sync_identity_is_repopulated_by_dotenv_but_blank_is_not(tmp_path, monkeypatch):
+    """Platform-independent reproduction of the Windows e2e failure: env_config() calls
+    load_env_file(), which does os.environ.setdefault() from the repo .env. A merely-DELETED
+    COMMENT_SYNC_* var is therefore REPOPULATED from a .env that exports the production identity --
+    silently re-enabling comment sync (on the user's box this hit un-stubbed endpoints in 4
+    test_run.py tests). A present-but-BLANK value survives setdefault (it only fills UNSET keys) and
+    _parse_comment_sync_identity treats blank as disabled -- which is why the run harness's _configure
+    blanks these vars rather than deleting them."""
+    import os
+
+    env_file = _write_env(
+        tmp_path, "COMMENT_SYNC_GH_LOGIN=someone\nCOMMENT_SYNC_AP_AUTHOR=someone@example.com\n")
+    monkeypatch.setattr(config, "ENV_FILE", env_file)
+
+    # DELETED -> load_env_file's setdefault refills it from the .env -> identity comes back
+    monkeypatch.delenv("COMMENT_SYNC_GH_LOGIN", raising=False)
+    monkeypatch.delenv("COMMENT_SYNC_AP_AUTHOR", raising=False)
+    assert config.env_config()["comment_sync_identity"] is not None
+    assert os.environ["COMMENT_SYNC_GH_LOGIN"] == "someone"  # repopulated behind our back
+
+    # BLANK -> setdefault is a no-op (key already set) -> identity stays disabled
+    monkeypatch.setenv("COMMENT_SYNC_GH_LOGIN", "")
+    monkeypatch.setenv("COMMENT_SYNC_AP_AUTHOR", "")
+    assert config.env_config()["comment_sync_identity"] is None
