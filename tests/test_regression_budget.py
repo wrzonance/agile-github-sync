@@ -87,6 +87,17 @@ than a six-issues-stale number. NEW_TEST_FILES gains issue #82's three files alo
 four, for the same reason #70 tracked its own: a passed_count floor alone can't notice one of these
 three files silently leaving discovery.
 
+Issue #84 (agileplace.py split: board topology extracted into board_layout.py) bumps
+PRE_CHANGE_TEST_COUNT again, from 988 to 1167 -- comfortably below the ~1194 tests collected
+immediately after task 3/4 rewired every test file's imports/mock targets from agileplace to
+board_layout, the same generous-slack convention every prior bump here follows. The companion
+"no stale import of a moved name" invariant for this issue lives in its own file,
+tests/test_board_layout_import_boundary.py, rather than growing MOVED_TO_METADATA_SYNC-style here:
+that file's own module docstring explains why its "full suite stays green" check was deliberately
+*not* duplicated as a second subprocess-spawning test (two such tests in two different files would
+recurse into each other indefinitely -- see that docstring, and the 149-orphaned-process incident
+that originally motivated the by-path self-ignore below).
+
 Run: pytest -q
 """
 from __future__ import annotations
@@ -147,7 +158,12 @@ MOVED_TO_METADATA_SYNC = (
 # Pre-existing suite size immediately before issue #82's first commit (measured at d986dae, the tip
 # of #79) -- bumped up from #70's original 432 so the floor reflects every test that existed before
 # this change, not a six-issues-stale figure. See module docstring's issue #82 section.
-PRE_CHANGE_TEST_COUNT = 988
+#
+# Re-bumped from 988 to 1167 for issue #84's own task 3/4 (rewiring test imports/mock targets from
+# agileplace to board_layout) -- comfortably below the ~1194 tests collected once that rewire lands,
+# with the same generous slack every prior bump here leaves. See module docstring's issue #84
+# section.
+PRE_CHANGE_TEST_COUNT = 1167
 
 # Issue #70's four new test files, plus issue #82's three (test_card_types.py,
 # test_sync_card_types.py, test_ghkit_issue_types.py). Invariant B's companion check asserts each is

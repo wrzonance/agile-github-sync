@@ -26,6 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agileplace  # noqa: E402
+import board_layout  # noqa: E402
 import ghproject  # noqa: E402
 import sync  # noqa: E402
 
@@ -110,8 +111,8 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     stack.set_item_status_mock = stack.enter_context(
         patch("ghproject.set_item_status", return_value=set_item_status_return))
     stack.enter_context(patch(
-        "agileplace.board_layout",
-        return_value=agileplace.BoardLayout(lanes=list(lanes_return), card_types=[]),
+        "board_layout.board_layout",
+        return_value=board_layout.BoardLayout(lanes=list(lanes_return), card_types=[]),
     ))
     cards = [card] if existing_cards is _UNSET else list(existing_cards)
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))
@@ -695,7 +696,7 @@ def test_zero_issue_linked_items_does_not_trip_zero_status_warn(tmp_path, capsys
     parsed: dict = {}  # ghproject.items resolved zero issue-linked items -- not a failure
     fake_lane = {"id": "L1", "title": "Planning"}
 
-    with patch("agileplace.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+    with patch("board_layout.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
         _, _, _, create_card_mock = _run_main_once(
             tmp_path, (parsed, raw_items), field_meta_return=None, existing_cards=[])
 
@@ -710,11 +711,11 @@ def test_zero_issue_linked_items_does_not_trip_zero_status_warn(tmp_path, capsys
 
 def test_new_card_lane_resolution_is_never_called_when_project_read_failed(tmp_path, capsys):
     """Pins the `if not project_read_failed:` gate directly on the new-card path, rather than relying
-    on agileplace.board_layout being mocked to []. resolve_lane_for_stage is mocked to return a REAL
+    on board_layout.board_layout being mocked to []. resolve_lane_for_stage is mocked to return a REAL
     lane -- if the gate were ever dropped (or turned into 'call it, then null the result'), this would
     fail even though board_layout is empty, unlike a test that only asserts the final lane_id."""
     fake_lane = {"id": "L1", "title": "Planning"}
-    with patch("agileplace.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+    with patch("board_layout.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
         _, _, _, create_card_mock = _run_main_once(
             tmp_path, _zero_status_inputs(), field_meta_return=None, existing_cards=[])
 
@@ -729,7 +730,7 @@ def test_existing_card_lane_resolution_is_never_called_when_project_read_failed(
     mocked to return a REAL lane, so a dropped/weakened gate would surface as a call that this test
     catches, unlike asserting patch_card_mock alone (which empty `lanes` already satisfies for free)."""
     fake_lane = {"id": "L1", "title": "Planning"}
-    with patch("agileplace.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+    with patch("board_layout.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
         _, _, patch_card_mock, _ = _run_main_once(
             tmp_path, _zero_status_inputs(), field_meta_return=None)
 

@@ -23,6 +23,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agileplace  # noqa: E402
+import board_layout  # noqa: E402
 import sync  # noqa: E402
 
 ISSUE_URL = "https://github.com/acme/repo/issues/1"
@@ -77,7 +78,7 @@ def _run_main(tmp_path, issue, card_types=(), existing_cards=None, seed_issues_s
 
     `online=False` drives main() down its unconfigured/offline branch (cfg's token/host/board_id all
     None) -- board_layout is never even called there (main() substitutes an empty BoardLayout
-    itself), so the mocked "agileplace.board_layout" return_value below is simply unused in that
+    itself), so the mocked "board_layout.board_layout" return_value below is simply unused in that
     case."""
     cfg = _cfg(tmp_path, online=online)
     state_file = tmp_path / ".sync-state.json"
@@ -94,8 +95,8 @@ def _run_main(tmp_path, issue, card_types=(), existing_cards=None, seed_issues_s
     stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
     stack.enter_context(patch("ghproject.configured", return_value=False))
     stack.enter_context(patch(
-        "agileplace.board_layout",
-        return_value=agileplace.BoardLayout(lanes=[], card_types=list(card_types)),
+        "board_layout.board_layout",
+        return_value=board_layout.BoardLayout(lanes=[], card_types=list(card_types)),
     ))
     cards = existing_cards if existing_cards is not None else []
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))

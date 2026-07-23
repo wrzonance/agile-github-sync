@@ -11,13 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import card_types  # noqa: E402
 from agileplace import (  # noqa: E402
-    BoardLayout,
-    _card_types_with_ids,
     _card_value_for_patch_path,
     _card_with_version,
     _planned_card_snapshot,
     api,
-    board_layout,
     card_external_urls,
     card_block_reason,
     card_is_blocked,
@@ -33,6 +30,11 @@ from agileplace import (  # noqa: E402
     ops_blocked,
     ops_tag_remove,
     patch_card,
+)
+from board_layout import (  # noqa: E402
+    BoardLayout,
+    _card_types_with_ids,
+    board_layout,
     resolve_lane_for_stage,
 )
 

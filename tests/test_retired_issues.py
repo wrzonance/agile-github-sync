@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agileplace  # noqa: E402
+import board_layout  # noqa: E402
 import ghkit  # noqa: E402
 import sync  # noqa: E402
 
@@ -66,8 +67,8 @@ def _run_main(tmp_path, monkeypatch, raw_issues, cards, blocked_by=None, lanes=(
     stack.enter_context(patch("ghproject.field_meta", return_value=None))
     stack.enter_context(patch("ghproject.hydrate_item_dates", return_value=project_snapshot))
     stack.enter_context(patch(
-        "agileplace.board_layout",
-        return_value=agileplace.BoardLayout(lanes=list(lanes), card_types=[]),
+        "board_layout.board_layout",
+        return_value=board_layout.BoardLayout(lanes=list(lanes), card_types=[]),
     ))
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))
     stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))

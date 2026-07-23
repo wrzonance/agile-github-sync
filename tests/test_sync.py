@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agileplace import resolve_lane_for_stage, stage_for_lane  # noqa: E402
+from board_layout import resolve_lane_for_stage, stage_for_lane  # noqa: E402
 from ghproject import parse_items  # noqa: E402
 from reconcile import reconcile, reconcile_value  # noqa: E402
 from stages import (STAGES, epic_key_for_task, issue_stage,  # noqa: E402
@@ -537,15 +537,15 @@ _STAGES_WITH_INTAKE = ("Intake", *_STAGES_WITHOUT_INTAKE)
 def test_intake_membership_is_inert_for_unmapped_stage_resolution():
     veto_lanes = [{"id": "review", "title": "Under Review", "cardStatus": "started"}]
 
-    with patch("agileplace.STAGES", _STAGES_WITHOUT_INTAKE):
+    with patch("board_layout.STAGES", _STAGES_WITHOUT_INTAKE):
         veto_without_intake = resolve_lane_for_stage(veto_lanes, "In progress", "")
-    with patch("agileplace.STAGES", _STAGES_WITH_INTAKE):
+    with patch("board_layout.STAGES", _STAGES_WITH_INTAKE):
         veto_with_intake = resolve_lane_for_stage(veto_lanes, "In progress", "")
     assert veto_with_intake == veto_without_intake
 
-    with patch("agileplace.STAGES", _STAGES_WITHOUT_INTAKE):
+    with patch("board_layout.STAGES", _STAGES_WITHOUT_INTAKE):
         backlog_without_intake = resolve_lane_for_stage(_board_lanes(), "Backlog", "")
-    with patch("agileplace.STAGES", _STAGES_WITH_INTAKE):
+    with patch("board_layout.STAGES", _STAGES_WITH_INTAKE):
         backlog_with_intake = resolve_lane_for_stage(_board_lanes(), "Backlog", "")
     assert backlog_with_intake == backlog_without_intake
 
@@ -553,9 +553,9 @@ def test_intake_membership_is_inert_for_unmapped_stage_resolution():
 def test_intake_membership_is_inert_for_mapped_stage_resolution():
     smap = {"Ready": ["New Requests", "Approved"]}
 
-    with patch("agileplace.STAGES", _STAGES_WITHOUT_INTAKE):
+    with patch("board_layout.STAGES", _STAGES_WITHOUT_INTAKE):
         without_intake = resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
-    with patch("agileplace.STAGES", _STAGES_WITH_INTAKE):
+    with patch("board_layout.STAGES", _STAGES_WITH_INTAKE):
         with_intake = resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
     assert with_intake == without_intake
 
