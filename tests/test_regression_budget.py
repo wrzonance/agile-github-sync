@@ -90,8 +90,15 @@ three files silently leaving discovery.
 Issue #84 (agileplace.py split: board topology extracted into board_layout.py) bumps
 PRE_CHANGE_TEST_COUNT again, from 988 to 1167 -- comfortably below the ~1194 tests collected
 immediately after task 3/4 rewired every test file's imports/mock targets from agileplace to
-board_layout, the same generous-slack convention every prior bump here follows. The companion
-"no stale import of a moved name" invariant for this issue lives in its own file,
+board_layout, the same generous-slack convention every prior bump here follows. NEW_TEST_FILES
+gains issue #84's three wholly new test files -- tests/test_board_layout.py,
+tests/test_board_layout_call_sites.py, and tests/test_board_layout_import_boundary.py -- for the
+same reason #70 and #82 tracked their own: a passed_count floor alone can't notice one of these
+three files silently leaving discovery, and the floor's own slack (1194 actual vs. 1167 baseline)
+is smaller than either test_board_layout.py's or test_board_layout_call_sites.py's individual test
+count, so without this companion check one of those files losing its tests entirely would still
+clear the floor undetected. The companion "no stale import of a moved name" invariant for this
+issue lives in its own file,
 tests/test_board_layout_import_boundary.py, rather than growing MOVED_TO_METADATA_SYNC-style here:
 that file's own module docstring explains why its "full suite stays green" check was deliberately
 *not* duplicated as a second subprocess-spawning test (two such tests in two different files would
@@ -198,9 +205,13 @@ MOVED_TO_METADATA_SYNC = (
 PRE_CHANGE_TEST_COUNT = 1167
 
 # Issue #70's four new test files, plus issue #82's three (test_card_types.py,
-# test_sync_card_types.py, test_ghkit_issue_types.py). Invariant B's companion check asserts each is
-# still collected (deleting/renaming/emptying one is exactly the silent-loss a >= baseline
-# pass-count floor misses).
+# test_sync_card_types.py, test_ghkit_issue_types.py), plus issue #84's three
+# (test_board_layout.py, test_board_layout_call_sites.py, test_board_layout_import_boundary.py).
+# Invariant B's companion check asserts each is still collected (deleting/renaming/emptying one is
+# exactly the silent-loss a >= baseline pass-count floor misses) -- without these three, the
+# passed_count >= PRE_CHANGE_TEST_COUNT floor alone would be the only safety net for them, and its
+# slack is smaller than either file's own test count, so one of them silently losing its tests
+# would not be caught.
 NEW_TEST_FILES = (
     "tests/test_card_coherence.py",
     "tests/test_sync_contested_cards.py",
@@ -209,6 +220,9 @@ NEW_TEST_FILES = (
     "tests/test_card_types.py",
     "tests/test_sync_card_types.py",
     "tests/test_ghkit_issue_types.py",
+    "tests/test_board_layout.py",
+    "tests/test_board_layout_call_sites.py",
+    "tests/test_board_layout_import_boundary.py",
 )
 
 

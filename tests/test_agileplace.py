@@ -31,12 +31,7 @@ from agileplace import (  # noqa: E402
     ops_tag_remove,
     patch_card,
 )
-from board_layout import (  # noqa: E402
-    BoardLayout,
-    _card_types_with_ids,
-    board_layout,
-    resolve_lane_for_stage,
-)
+from board_layout import resolve_lane_for_stage  # noqa: E402
 
 CFG = {"token": "t", "host": "h", "board_id": "b1"}
 
@@ -820,53 +815,13 @@ def test_connect_children_disconnect_children_create_card_have_no_version_header
     assert kwargs.get("headers") is None
 
 
-# --- issue #82: BoardLayout + card-types structural filter + typeId patch path --------------------
-
-def test_board_layout_returns_lanes_and_card_types_as_a_boardlayout():
-    """board_layout's return shape is now a BoardLayout(lanes, card_types) NamedTuple -- both fields
-    structurally filtered the same way lanes always were."""
-    response = {
-        "lanes": [{"id": "L1", "title": "Ready"}],
-        "cardTypes": [{"id": "T1", "title": "Bug", "isCardType": True}],
-    }
-    with patch("agileplace.api", return_value=response) as api_mock:
-        layout = board_layout(CFG)
-    api_mock.assert_called_once_with(CFG, "GET", "board/b1")
-    assert layout == BoardLayout(
-        lanes=[{"id": "L1", "title": "Ready"}],
-        card_types=[{"id": "T1", "title": "Bug", "isCardType": True}],
-    )
-
-
-def test_board_layout_defaults_missing_cardtypes_to_empty_list():
-    """A board response with no cardTypes key at all (older board / no card types configured) must
-    not raise -- card_types comes back as an empty list, same fail-open shape lanes already had."""
-    with patch("agileplace.api", return_value={"lanes": []}):
-        layout = board_layout(CFG)
-    assert layout == BoardLayout(lanes=[], card_types=[])
-
-
-def test_card_types_with_ids_skips_malformed_card_types(capsys):
-    """Mirrors _lanes_with_ids's structural contract: non-object entries, non-string titles, missing
-    ids, and unhashable ids are all skipped with one WARN each -- never raised."""
-    card_types = [
-        {"id": "valid", "title": "Bug"},
-        {"id": "bad-title", "title": {"text": "Bug"}},
-        {"id": ["bad-id"], "title": "Feature"},
-        {"title": "no-id"},
-        "not-a-dict",
-    ]
-
-    valid = _card_types_with_ids(card_types)
-
-    assert valid == [{"id": "valid", "title": "Bug"}]
-    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
-    assert len(warnings) == 4
-    assert any("bad-title" in line and "non-string" in line for line in warnings)
-    assert any("unhashable" in line for line in warnings)
-    assert any("no id" in line for line in warnings)
-    assert any("is not an object" in line for line in warnings)
-
+# --- issue #82: typeId patch path --------------------------------------------------------
+#
+# BoardLayout / _card_types_with_ids coverage moved to tests/test_board_layout.py (issue #84 split
+# board topology out of agileplace.py into board_layout.py) -- see review finding: these three tests
+# were left-over verbatim duplicates of test_board_layout.py's own copies, exercising the moved
+# functions from inside this file only for historical reasons. Keeping one copy avoids the two
+# silently diverging if one is ever edited.
 
 def test_card_value_for_patch_path_typeid_never_raises_regardless_of_card_shape():
     """Spike probe #2's four confirmed cases for the new typeId branch: identical nested type -> no
