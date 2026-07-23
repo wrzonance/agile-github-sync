@@ -96,7 +96,32 @@ tests/test_board_layout_import_boundary.py, rather than growing MOVED_TO_METADAT
 that file's own module docstring explains why its "full suite stays green" check was deliberately
 *not* duplicated as a second subprocess-spawning test (two such tests in two different files would
 recurse into each other indefinitely -- see that docstring, and the 149-orphaned-process incident
-that originally motivated the by-path self-ignore below).
+that originally motivated the by-path self-ignore below). For that same reason, this file does not
+grow its own MOVED_TO_BOARD_LAYOUT/test_no_test_file_imports_board_layout_names_from_agileplace
+pair -- test_board_layout_import_boundary.py's AST-walk test already pins that exact invariant (it
+is a pure collection-time parse, no subprocess involved), and duplicating it here would just be the
+same check maintained in two places for no added safety.
+
+Task 4/4 of issue #84 re-anchors PRE_CHANGE_AGILEPLACE_LINES a second time, in the opposite
+direction from #82's: where #82 could only budget *around* agileplace.py's pre-existing 805-line
+breach (a full-file refactor being out of scope for that feature PR), #84 *is* that refactor.
+Extracting the eleven board-topology symbols above into board_layout.py brought agileplace.py down
+to 672 lines (measured via `wc -l agileplace.py` immediately after task 3 landed) -- back under the
+repo's 800-line hard cap for the first time since #82. PRE_CHANGE_AGILEPLACE_LINES is re-pinned to
+that smaller, de-bloated figure (mirroring how #79 re-pinned PRE_CHANGE_SYNC_LINES to sync.py's own
+post-extraction size rather than the pre-extraction one), so future changes are budgeted against the
+leaner file instead of the debt #84 just paid off. AGILEPLACE_WIRING_BUDGET_LINES's value (70) is
+kept as-is and reframed as the same kind of generic per-change slack WIRING_BUDGET_LINES already is
+for sync.py -- it was never specific to #82's own delta, just first introduced alongside it.
+
+Because agileplace.py is now genuinely under the repo's 800-line convention rather than carrying
+pre-existing debt, test_agileplace_py_never_exceeds_repo_hard_cap becomes honest in a way it
+couldn't have been at #82: mirroring test_sync_py_never_exceeds_repo_hard_cap, it asserts the
+absolute 800-line ceiling independent of the moving PRE_CHANGE_AGILEPLACE_LINES baseline, so a
+future mis-anchored rebase of the wiring budget still can't let agileplace.py silently re-cross that
+line. #82 deliberately skipped this exact assertion because it would have failed immediately against
+debt that predated its own commits; #84 is the follow-up that clears that debt, so the assertion no
+longer fails against anything but genuinely new growth.
 
 Run: pytest -q
 """
@@ -128,18 +153,25 @@ WIRING_BUDGET_LINES = 40
 # of PRE_CHANGE_SYNC_LINES -- see module docstring.
 SYNC_PY_HARD_CAP_LINES = 800
 
-# agileplace.py's own baseline, measured at d986dae (the tip of #79, immediately before issue #82's
-# first commit) -- see module docstring's issue #82 section for why this file gets its own
-# wiring-only budget instead of an absolute hard-cap assertion.
-PRE_CHANGE_AGILEPLACE_LINES = 805
+# agileplace.py's own baseline, re-anchored to its post-extraction size measured at task 3 of issue
+# #84 (via `wc -l agileplace.py`, right after board_layout.py absorbed the eleven board-topology
+# symbols) -- see module docstring's issue #84 section for why this moves down from #82's 805,
+# mirroring how #79 re-pinned PRE_CHANGE_SYNC_LINES to sync.py's own post-extraction size.
+PRE_CHANGE_AGILEPLACE_LINES = 672
 
-# Wiring-only budget for issue #82's own agileplace.py additions: the BoardLayout NamedTuple, the
-# _card_types_with_ids structural filter, a new typeId branch inside the existing
-# _card_value_for_patch_path, and trailing optional type_id/type_title params on
-# create_card/_planned_card_snapshot. Actual measured delta was 59 lines (864 - 805); this budget
-# leaves generous slack over that for incidental docstring/blank-line drift without permitting a
-# re-inlining of logic that belongs elsewhere.
+# Generic per-change wiring-only slack for agileplace.py, reused across issues the same way
+# WIRING_BUDGET_LINES is for sync.py. First introduced alongside issue #82's own agileplace.py
+# additions (the BoardLayout NamedTuple, the _card_types_with_ids structural filter, a new typeId
+# branch inside the existing _card_value_for_patch_path, and trailing optional type_id/type_title
+# params on create_card/_planned_card_snapshot -- a measured delta of 59 lines), but not specific to
+# that addition; kept as-is for issue #84, which added no new agileplace.py lines of its own.
 AGILEPLACE_WIRING_BUDGET_LINES = 70
+
+# Repo-wide absolute ceiling (CLAUDE.md file-organization convention: "800 hard cap"), independent
+# of PRE_CHANGE_AGILEPLACE_LINES -- see module docstring's issue #84 section for why this assertion
+# is only honest starting now (agileplace.py carried pre-existing >800 debt at issue #82's time that
+# this exact check would have failed against).
+AGILEPLACE_HARD_CAP_LINES = 800
 
 # Names issue #79 moved out of sync.py into metadata_sync.py. sync_metadata/sync_dates are the two
 # public entry points (still reachable as `sync.sync_metadata` via sync.py's own import -- hence the
@@ -207,18 +239,36 @@ def test_sync_py_never_exceeds_repo_hard_cap():
 
 
 def test_agileplace_py_stays_within_wiring_only_line_budget():
-    """agileplace.py already exceeded the repo's 800-line hard cap (805 lines) before issue #82
-    started -- pre-existing debt, not this change's to fix (tracked as follow-up issue #84; see
-    module docstring). This test does not assert the 800-line cap itself; it pins issue #82's own
-    wiring-only delta on top of that pre-existing figure, so a future change can't silently pile
-    more bulk onto an already-over-budget file."""
+    """agileplace.py exceeded the repo's 800-line hard cap (805 lines) between issue #82 and issue
+    #84 -- #82's own pre-existing debt, cleared by #84's board_layout.py extraction (see module
+    docstring). PRE_CHANGE_AGILEPLACE_LINES is now re-anchored to the post-extraction, under-cap
+    figure; this test pins future changes' own wiring-only delta on top of that leaner baseline, so
+    a change can't silently pile bulk back onto the file issue #84 just de-bloated."""
     line_count = len(Path(REPO_ROOT / "agileplace.py").read_text().splitlines())
 
     assert line_count <= PRE_CHANGE_AGILEPLACE_LINES + AGILEPLACE_WIRING_BUDGET_LINES, (
         f"agileplace.py grew to {line_count} lines, past the wiring-only budget of "
         f"{PRE_CHANGE_AGILEPLACE_LINES + AGILEPLACE_WIRING_BUDGET_LINES} "
         f"({PRE_CHANGE_AGILEPLACE_LINES} pre-change baseline + {AGILEPLACE_WIRING_BUDGET_LINES} "
-        "budget). New decision logic belongs in card_types.py, not inlined into agileplace.py."
+        "budget). New decision logic belongs in its own module, not inlined into agileplace.py."
+    )
+
+
+def test_agileplace_py_never_exceeds_repo_hard_cap():
+    """Absolute ceiling, independent of the moving PRE_CHANGE_AGILEPLACE_LINES baseline above:
+    agileplace.py must never cross the repo's own stated 800-line file-organization hard cap,
+    regardless of what the wiring-budget arithmetic says. Mirrors
+    test_sync_py_never_exceeds_repo_hard_cap. Issue #82 deliberately skipped this exact assertion
+    for agileplace.py because it would have failed immediately against pre-existing debt (805
+    lines) that predated #82's own commits; issue #84's board_layout.py extraction paid that debt
+    down to 672 lines, so the assertion is only added now that it is honest -- it no longer fails
+    against anything but genuinely new growth past the cap."""
+    line_count = len(Path(REPO_ROOT / "agileplace.py").read_text().splitlines())
+
+    assert line_count <= AGILEPLACE_HARD_CAP_LINES, (
+        f"agileplace.py has grown to {line_count} lines, past the repo's own "
+        f"{AGILEPLACE_HARD_CAP_LINES}-line file-organization hard cap. Extract cohesive logic into "
+        "its own module rather than letting agileplace.py keep absorbing it."
     )
 
 
