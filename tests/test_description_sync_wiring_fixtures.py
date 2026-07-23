@@ -34,6 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # suites, all of which needed the same 'description' key fixture repair.
 WIRED_TEST_FILES = (
     "tests/test_sync_main.py",
+    "tests/test_sync_intake_call_site.py",
     "tests/test_vetting_latch.py",
     "tests/test_run.py",
     "tests/test_hierarchy_ownership.py",
