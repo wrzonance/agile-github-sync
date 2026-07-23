@@ -88,16 +88,16 @@ four, for the same reason #70 tracked its own: a passed_count floor alone can't 
 three files silently leaving discovery.
 
 Issue #84 (agileplace.py split: board topology extracted into board_layout.py) bumps
-PRE_CHANGE_TEST_COUNT again, from 988 to 1167 -- comfortably below the ~1194 tests collected
+PRE_CHANGE_TEST_COUNT again, from 988 to 1167 -- comfortably below the ~1198 tests collected
 immediately after task 3/4 rewired every test file's imports/mock targets from agileplace to
 board_layout, the same generous-slack convention every prior bump here follows. NEW_TEST_FILES
 gains issue #84's three wholly new test files -- tests/test_board_layout.py,
 tests/test_board_layout_call_sites.py, and tests/test_board_layout_import_boundary.py -- for the
 same reason #70 and #82 tracked their own: a passed_count floor alone can't notice one of these
-three files silently leaving discovery, and the floor's own slack (1194 actual vs. 1167 baseline)
-is smaller than either test_board_layout.py's or test_board_layout_call_sites.py's individual test
-count, so without this companion check one of those files losing its tests entirely would still
-clear the floor undetected. The companion "no stale import of a moved name" invariant for this
+three files silently leaving discovery, and the floor's own slack (1198 actual vs. 1167 baseline,
+i.e. 31) exceeds either test_board_layout.py's (21) or test_board_layout_call_sites.py's (11)
+individual test count, so without this companion check one of those files losing its tests entirely
+would still clear the floor undetected. The companion "no stale import of a moved name" invariant for this
 issue lives in its own file,
 tests/test_board_layout_import_boundary.py, rather than growing MOVED_TO_METADATA_SYNC-style here:
 that file's own module docstring explains why its "full suite stays green" check was deliberately
