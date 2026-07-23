@@ -159,13 +159,19 @@ def test_normalize_ap_comment_accepts_any_known_edited_key_alias(timestamp_key):
     assert result["edited"] == "2024-01-16T10:30:00Z"
 
 
-@pytest.mark.parametrize(
-    "garbage",
-    [None, "", "not-a-timestamp", "2024-13-45T99:99:99Z", 12345, [], {}],
-)
-def test_normalize_ap_comment_unparseable_created_degrades_to_none_never_raises(garbage):
-    result = _normalize_ap_comment({"id": 1, "createdOn": garbage})
+@pytest.mark.parametrize("blank_or_nonstring", [None, "", "   ", 12345, [], {}])
+def test_normalize_ap_comment_blank_or_nonstring_created_is_none_never_raises(blank_or_nonstring):
+    result = _normalize_ap_comment({"id": 1, "createdOn": blank_or_nonstring})
     assert result["created"] is None
+
+
+@pytest.mark.parametrize("unparseable", ["not-a-timestamp", "2024-13-45T99:99:99Z", "Tuesday"])
+def test_normalize_ap_comment_keeps_present_but_unparseable_created_raw(unparseable):
+    """A present-but-unparseable timestamp STRING is kept verbatim (not nulled) so the planner's
+    comment_sync._timestamp_warning can surface an unrecognized AgilePlace timestamp format (issue
+    #66 Codex P2 #8); every comparison site parses at use, so it's still excluded from drift."""
+    result = _normalize_ap_comment({"id": 1, "createdOn": unparseable})
+    assert result["created"] == unparseable
 
 
 def test_normalize_ap_comment_missing_created_and_edited_are_none():

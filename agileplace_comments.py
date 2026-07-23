@@ -22,7 +22,6 @@ from __future__ import annotations
 import urllib.parse
 
 import agileplace
-import comment_sync
 
 
 def _comment_collection_path(card_id) -> str:
@@ -141,13 +140,15 @@ def _first_present(raw: dict, *keys: str):
     return None
 
 
-def _valid_timestamp_or_none(raw_timestamp) -> str | None:
-    """Keeps the raw value verbatim (the ledger persists exact strings, see struct #1) when
-    comment_sync._parse_timestamp can parse it; degrades to None otherwise -- absent, garbage, or
-    simply the wrong type -- so a comment with an unparseable timestamp is excluded from drift/
-    adjacency comparisons instead of crashing the whole sync. Never raises, since _parse_timestamp
-    itself never raises."""
-    return raw_timestamp if comment_sync._parse_timestamp(raw_timestamp) is not None else None
+def _raw_timestamp(value) -> str | None:
+    """A comment timestamp kept as a raw string VERBATIM (the ledger persists exact strings, see
+    struct #1), or None for a blank/absent/non-string value. Deliberately NOT parse-validated here:
+    a present-but-unparseable value is kept so the planner's `comment_sync._timestamp_warning` can
+    surface an unrecognized AgilePlace timestamp format (issue #66 Codex P2 #8) instead of it
+    vanishing to None before the planner ever sees it. Every comparison site parses at use via
+    `comment_sync._parse_timestamp`, so a garbage value is still excluded from drift/adjacency --
+    just no longer silently. Mirrors ghkit._normalize_gh_comment's own raw-string pass-through."""
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def _coerce_comment_id(raw_id) -> int | None:
@@ -189,6 +190,6 @@ def _normalize_ap_comment(raw: dict) -> dict:
         "author_name": author_name,
         "author_email": author_email,
         "author_id": author_id,
-        "created": _valid_timestamp_or_none(created),
-        "edited": _valid_timestamp_or_none(edited),
+        "created": _raw_timestamp(created),
+        "edited": _raw_timestamp(edited),
     }

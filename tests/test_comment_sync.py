@@ -21,13 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import agileplace_comments  # noqa: E402
 import comment_sync  # noqa: E402
 import ghkit  # noqa: E402
+from comment_render import (  # noqa: E402
+    ProvenanceHeader,
+    build_provenance_prefix,
+    parse_provenance_prefix,
+)
 from comment_sync import (  # noqa: E402
     CommentAction,
     CommentSyncPlan,
-    ProvenanceHeader,
-    build_provenance_prefix,
     is_sync_authored,
-    parse_provenance_prefix,
     resolve_comment_sync,
 )
 
@@ -694,35 +696,52 @@ def test_adopt_orphan_origin_side_survives_id_collision_between_platforms():
 
     rows_by_key: dict = {}
     comment_sync._apply_ledger_effect(action, None, rows_by_key,
-                                      {42: gh_origin_candidate}, {42: ap_orphan_mirror})
+                                      {42: gh_origin_candidate}, {42: ap_orphan_mirror}, True)
 
     assert rows_by_key[(42, 42)]["origin"] == "gh"
 
 
-# --- confirmation refetch failure must never blank an already-known origin timestamp ------------
+# --- confirmation refetch failure: don't record unconfirmed writes as drift-triggering state ----
 
-def test_rebuild_ledger_falls_back_to_pre_write_snapshot_when_confirmation_refetch_fails(monkeypatch):
-    """Regression: when `_rebuild_ledger`'s post-write confirmation refetch fails, it used to fall
-    back to empty maps, hard-resetting the ORIGIN side's created/edited timestamps (already known
-    from the pre-write snapshot `sync_comments` fetched before executing the plan) to None. On the
-    next run, a None ledgered-edited value makes any live edited timestamp look like drift, risking
-    an `edit_mirror` that overwrites the genuine human origin comment. The fallback must be the
-    pre-write snapshot, not an empty one, so an already-known origin timestamp is never blanked."""
+def test_rebuild_ledger_leaves_new_mirror_unledgered_when_confirmation_refetch_fails(monkeypatch):
+    """Regression (issue #66 Codex P1 #3): a just-created mirror whose post-write refetch fails must
+    NOT be recorded with a None mirror-side edited baseline -- next run that baseline makes
+    `_side_drifted` misread the mirror's real edited timestamp as fresh drift and blind-write it back
+    over the origin. Instead the pair is left UNLEDGERED (the mirror carries a provenance prefix, so
+    the next run re-adopts it as an orphan, re-verifying both sides), rather than persisting an
+    unconfirmed guess as if it were confirmed state."""
     gh_origin = _gh(1, author="alice", body="origin text", created=_T0, edited=_T0)
-    fallback_gh_by_id = {1: gh_origin}
-    fallback_ap_by_id: dict = {}
     monkeypatch.setattr(comment_sync, "_fetch_both_sides", lambda cfg, number, card_id: None)
 
     action = CommentAction("mirror_new", "ap", (1, None), "rendered", None, (1, None))
     observed = {"id": 99}
 
     rows = comment_sync._rebuild_ledger(_cfg(), 1, "42", [], [(action, observed)],
-                                        fallback_gh_by_id, fallback_ap_by_id)
+                                        {1: gh_origin}, {})
+
+    assert rows == []  # unconfirmed create left unledgered -> re-adopted next run, never a phantom pair
+
+
+def test_rebuild_ledger_preserves_existing_origin_timestamps_on_refetch_failure(monkeypatch):
+    """The other half of the same invariant: for a row that ALREADY exists (here an edit_mirror on a
+    live pair), a failed confirmation refetch must fall back to the pre-write snapshot, NOT empty
+    maps -- so the already-known ORIGIN side's created/edited timestamps are never blanked to None
+    (a blank would make the next run misread a live edited timestamp as drift and overwrite the human
+    origin)."""
+    gh_origin = _gh(1, author="alice", body="origin text", created=_T0, edited=_T1)
+    ap_mirror = _ap(2, email="sync@example.com", body="<p>comment by alice on GitHub</p>x", edited=_T1)
+    monkeypatch.setattr(comment_sync, "_fetch_both_sides", lambda cfg, number, card_id: None)
+
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
+    action = CommentAction("edit_mirror", "ap", (1, 2), "rendered", 2, (1, 2))
+
+    rows = comment_sync._rebuild_ledger(_cfg(), 1, "42", ledger, [(action, None)],
+                                        {1: gh_origin}, {2: ap_mirror})
 
     assert len(rows) == 1
     row = rows[0]
-    assert row["gh_id"] == 1 and row["ap_id"] == 99
-    assert row["gh_created"] == _T0 and row["gh_edited"] == _T0
+    assert row["gh_id"] == 1 and row["ap_id"] == 2
+    assert row["gh_created"] == _T0 and row["gh_edited"] == _T1  # preserved from fallback, not blanked
 
 
 # --- exception boundary: a GitHub write can raise SystemExit too, not just AgilePlace -----------
@@ -771,3 +790,121 @@ def test_comment_sync_module_is_import_pure(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _boom)
     import importlib
     importlib.reload(comment_sync)
+
+
+# =================================================================================================
+# Draft-phase Codex-finding regressions (self-identity confirmed): #1 origin classification,
+# #2 reverse-edit prefix, #5 tombstone verify, #7 AP exception boundary, #8 unparseable-ts warning
+# =================================================================================================
+
+# Self-identity is the PRIMARY configuration: the identity map pairs the maintainer's OWN accounts
+# (design doc, e.g. thewrz <-> adam.wrzeski@jacobs.com), so the person who authors ordinary comments
+# IS the sync identity. The distinct-bot IDENTITY above is a valid SECONDARY config kept for the
+# other tests -- both must satisfy the same invariants.
+SELF_IDENTITY = {"gh_login": "maintainer", "ap_author": "maint@example.com"}
+
+
+def test_maintainer_own_unprefixed_comment_is_mirrored_as_origin():
+    """Issue #66 Codex P1 #1: a comment the maintainer posts under the configured identity, with NO
+    provenance prefix, is their own ordinary comment and MUST be mirrored like anyone else's --
+    previously it was silently dropped (identity-authored + no prefix), so the maintainer's own
+    comments never synced at all."""
+    gh_comments = [_gh(1, author="maintainer", body="my own note")]
+
+    plan = resolve_comment_sync(SELF_IDENTITY, [], gh_comments, [])
+
+    assert _kinds(plan) == ["mirror_new"]
+    action = plan.actions[0]
+    assert action.target_side == "ap"
+    assert action.ledger_key == (1, None)
+    assert "my own note" in action.rendered_body
+
+
+def test_identity_authored_comment_with_prefix_is_a_mirror_not_a_fresh_origin():
+    """The counterpart guard: identity-authored AND carrying a provenance prefix is a sync mirror
+    (echo), re-adopted as an orphan when unledgered -- never re-mirrored as a fresh origin."""
+    prefix = build_provenance_prefix("ap", "bob")
+    gh_comments = [_gh(5, author="maintainer", body=f"{prefix}\n\nHello")]
+    ap_comments = [_ap(10, name="bob", body="Hello")]
+
+    plan = resolve_comment_sync(SELF_IDENTITY, [], gh_comments, ap_comments)
+
+    assert _kinds(plan) == ["adopt_orphan"]
+    assert "mirror_new" not in _kinds(plan)
+    assert plan.actions[0].ledger_key == (5, 10)
+
+
+def test_reverse_edit_of_a_mirror_writes_the_origin_prefix_less_never_doubled():
+    """Issue #66 Codex P1 #2: when the MIRROR side drifts (a human edited the mirrored copy), the
+    edit propagates back to the prefix-less origin. The mirror's body already leads with a provenance
+    header; it must be STRIPPED before translating back, so the human origin never accumulates a
+    (doubled) `comment by ... on ...` header. Invariant: the prefix appears zero times in the origin
+    write."""
+    prefix = build_provenance_prefix("gh", "alice")  # origin is GH, mirror is AP
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
+    gh_comments = [_gh(1, author="alice", body="original", edited=_T0)]  # origin unchanged
+    ap_comments = [_ap(2, name="alice", body=f"<p>{prefix}</p><p>edited on the mirror</p>",
+                       edited=_T1)]  # mirror drifted
+
+    plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
+
+    assert _kinds(plan) == ["edit_mirror"]
+    action = plan.actions[0]
+    assert action.target_side == "gh"  # writing the origin
+    assert action.rendered_body.count("comment by alice on GitHub") == 0
+    assert "edited on the mirror" in action.rendered_body
+
+
+def test_delete_tombstone_is_skipped_when_the_mirror_is_still_present_on_readback(capsys):
+    """Issue #66 Codex P2 #5: the AgilePlace DELETE shape is speculative. A 2xx that didn't actually
+    remove the comment (mirror still present on the post-write refetch) must NOT tombstone the row --
+    that would strand the visible mirror, ids ignored forever. WARN and leave the row live to retry."""
+    action = CommentAction("delete_mirror_and_tombstone", "ap", (1, 2), None, 2, (1, 2))
+    rows_by_key = {(1, 2): _row(1, 2, "gh")}
+    still_present_ap = {2: _ap(2, name="alice", body="still here")}
+
+    comment_sync._apply_ledger_effect(action, None, rows_by_key, {1: _gh(1)}, still_present_ap, True)
+
+    assert rows_by_key[(1, 2)]["deleted"] is False  # not tombstoned
+    assert "WARN" in capsys.readouterr().err
+
+
+def test_delete_tombstone_applied_when_the_mirror_is_confirmed_gone():
+    """The confirmed-gone path: the mirror is absent from the post-write refetch -> tombstone it."""
+    action = CommentAction("delete_mirror_and_tombstone", "ap", (1, 2), None, 2, (1, 2))
+    rows_by_key = {(1, 2): _row(1, 2, "gh")}
+
+    comment_sync._apply_ledger_effect(action, None, rows_by_key, {1: _gh(1)}, {}, True)
+
+    assert rows_by_key[(1, 2)]["deleted"] is True
+
+
+def test_execute_one_action_warns_not_crashes_when_ap_response_shape_is_invalid(monkeypatch, capsys):
+    """Issue #66 Codex P2 #7: `agileplace_comments.create_comment` raises ValueError when the POST
+    response can't be normalized to an id (possibly AFTER the comment was created). That must be a
+    warned per-action skip, never re-raised past the AP branch to abort the whole run."""
+    action = CommentAction("mirror_new", "ap", (1, None), "rendered body", None, (1, None))
+
+    def _boom(cfg, apply, card_id, html):
+        raise ValueError("AgilePlace comment has an unusable id (None, expected an int or a digit string)")
+
+    monkeypatch.setattr(agileplace_comments, "create_comment", _boom)
+
+    ok, observed = comment_sync._execute_one_action(_cfg(), True, action, 1, "42")
+
+    assert ok is False
+    assert observed is None
+    assert "WARN" in capsys.readouterr().err
+
+
+def test_present_but_unparseable_ap_edited_timestamp_produces_a_plan_warning():
+    """Issue #66 Codex P2 #8: an unrecognized AgilePlace timestamp format is now surfaced. A live AP
+    comment whose `edited` is present but unparseable yields a planner WARNING (excluded from drift,
+    but no longer SILENTLY -- previously normalization nulled it before the planner could warn)."""
+    ledger = [_row(1, 2, "gh")]
+    gh_comments = [_gh(1, author="alice", edited=_T0)]
+    ap_comments = [_ap(2, name="alice", edited="not-an-iso-timestamp")]
+
+    plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
+
+    assert any("unparseable" in w for w in plan.warnings)

@@ -21,12 +21,16 @@ import json
 import subprocess
 import sys
 from datetime import datetime, timezone
-from re import compile as _re_compile
 from typing import Literal, NamedTuple
 
 import agileplace_comments
 import ghkit
-import richtext
+from comment_render import (
+    ProvenanceHeader,
+    parse_provenance_prefix,
+    render_drift_edit,
+    render_mirror_body,
+)
 
 
 def _parse_timestamp(raw: str | None) -> datetime | None:
@@ -50,75 +54,6 @@ def _parse_timestamp(raw: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
-
-
-# =================================================================================================
-# Provenance prefixes -- exact wording from the issue/design doc, pure build + tolerant parse
-# =================================================================================================
-
-_PROVENANCE_TEMPLATES = {
-    "gh": "comment by {author} on GitHub",
-    "ap": "comment by {author} on Agile Place",
-}
-_PROVENANCE_LEAD = "comment by "
-# Order matters: "on GitHub" is not a substring of "on Agile Place" or vice versa, so a first-match
-# scan is unambiguous regardless of dict order -- pinned by test_comment_sync's parser suite.
-_PROVENANCE_SUFFIXES = (
-    (" on GitHub", "gh"),
-    (" on Agile Place", "ap"),
-)
-# Strips leading whitespace and HTML wrapper tags (e.g. AP's "<p>") so an anchored match still finds
-# the prefix even though AP renders comment bodies as HTML. Only the *leading* wrapper is stripped --
-# trailing markup after the matched suffix is irrelevant since parsing stops at the first suffix hit.
-_LEADING_WRAPPER_RE = _re_compile(r"^(?:\s|<[^>]+>)+")
-
-
-class ProvenanceHeader(NamedTuple):
-    """A parsed `build_provenance_prefix` header: which side the comment ORIGINATED on, and the
-    origin author's display label (name/email/id -- whatever `_author_label` extracted at mirror
-    time)."""
-    origin_side: Literal["gh", "ap"]
-    author_label: str
-
-
-def build_provenance_prefix(origin_side: str, author_label: str) -> str:
-    """The exact leading text every mirrored comment carries, naming the platform the ORIGINAL
-    comment was written on -- not the platform this rendered text is about to be posted to. Pure,
-    total for any origin_side in {"gh", "ap"}; an unrecognized origin_side is a caller bug and
-    raises rather than emitting a header a parser could never round-trip."""
-    template = _PROVENANCE_TEMPLATES.get(origin_side)
-    if template is None:
-        raise ValueError(f"build_provenance_prefix: origin_side must be 'gh' or 'ap', got {origin_side!r}")
-    return template.format(author=author_label)
-
-
-def parse_provenance_prefix(text: str) -> ProvenanceHeader | None:
-    """Recovers the ProvenanceHeader from a rendered comment body, or None when `text` doesn't open
-    with a recognizable prefix (a genuine human comment, or garbage). Anchored at the start (after
-    stripping leading whitespace/HTML wrapper tags) rather than searched anywhere in the body, so a
-    human comment that merely *mentions* "comment by X on GitHub" mid-sentence never false-positives
-    as a mirror.
-
-    Author-label extraction is a first-occurrence-of-suffix-literal split: everything between the
-    "comment by " lead and the first matching " on GitHub"/" on Agile Place" suffix is the author
-    label, taken verbatim (not itself parsed further). This assumes an author label never contains
-    either suffix literal as a substring -- a near-zero-probability real-world case, accepted as-is
-    rather than hardened with a different delimiter scheme (design doc finding #4)."""
-    if not isinstance(text, str):
-        return None
-    stripped = _LEADING_WRAPPER_RE.sub("", text, count=1)
-    if not stripped.startswith(_PROVENANCE_LEAD):
-        return None
-    remainder = stripped[len(_PROVENANCE_LEAD):]
-    for suffix, origin_side in _PROVENANCE_SUFFIXES:
-        idx = remainder.find(suffix)
-        if idx == -1:
-            continue
-        author_label = remainder[:idx].strip()
-        if not author_label:
-            return None
-        return ProvenanceHeader(origin_side=origin_side, author_label=author_label)
-    return None
 
 
 def is_sync_authored(side: str, author_identifier: str | None, identity: dict | None) -> bool:
@@ -220,18 +155,6 @@ def _is_comment_sync_authored(side: str, comment: dict, identity: dict | None) -
     return any(is_sync_authored("ap", candidate, identity) for candidate in _ap_identity_candidates(comment))
 
 
-def _render_mirror_body(target_side: str, origin_side: str, author_label: str, source_body: str) -> str:
-    """Translate `source_body` (living, right now, on the platform opposite `target_side`) into
-    `target_side`'s format and prepend the provenance prefix naming `origin_side`/`author_label`.
-    Translation direction is fully determined by `target_side` alone -- source and target are always
-    opposite platforms at every call site (mirror_new, restore_mirror, and edit_mirror's
-    canonical-side content, whichever side that is)."""
-    prefix = build_provenance_prefix(origin_side, author_label)
-    if target_side == "ap":
-        return f"<p>{prefix}</p>{richtext.markdown_to_leankit_html(source_body)}"
-    return f"{prefix}\n\n{richtext.leankit_html_to_markdown(source_body)}"
-
-
 # =================================================================================================
 # Ledger-driven actions -- drift / delete / restore / tombstone for already-paired comments
 # =================================================================================================
@@ -252,7 +175,7 @@ def _plan_gone_or_present(row: dict, gh_id: int, ap_id: int, gh_comment: dict | 
                              mirror_id, (gh_id, ap_id))
     if mirror_comment is None:
         author_label = _author_label(origin_side, origin_comment)
-        rendered = _render_mirror_body(mirror_side, origin_side, author_label, _comment_body(origin_comment))
+        rendered = render_mirror_body(mirror_side, origin_side, author_label, _comment_body(origin_comment))
         return CommentAction("restore_mirror", mirror_side, (gh_id, ap_id), rendered, None, (gh_id, ap_id))
     return None
 
@@ -284,7 +207,8 @@ def _plan_drift(row: dict, gh_id: int, ap_id: int, gh_comment: dict, ap_comment:
     canonical_comment = gh_comment if canonical_side == "gh" else ap_comment
     origin_comment = gh_comment if origin_side == "gh" else ap_comment
     author_label = _author_label(origin_side, origin_comment)
-    rendered = _render_mirror_body(target_side, origin_side, author_label, _comment_body(canonical_comment))
+    rendered = render_drift_edit(origin_side, canonical_side, target_side, author_label,
+                                  _comment_body(canonical_comment))
     target_mirror_id = ap_id if target_side == "ap" else gh_id
     return CommentAction("edit_mirror", target_side, (gh_id, ap_id), rendered, target_mirror_id, (gh_id, ap_id))
 
@@ -341,12 +265,16 @@ def _plan_ledger_row(row: dict, gh_by_id: dict, ap_by_id: dict) -> CommentAction
 
 def _split_new_comments(side: str, comments: list[dict], ledgered_ids: set[int],
                         identity: dict | None) -> tuple[list[tuple[dict, ProvenanceHeader]], list[dict]]:
-    """Every comment on `side` whose id isn't already referenced by the ledger (live pair or
-    tombstone), split into orphan mirrors (sync-authored, parseable prefix -- candidates for
-    `_adopt_orphans`) and genuine new-origin comments (candidates for `_plan_mirror_new`). A
-    sync-authored comment WITHOUT a parseable prefix is neither -- a malformed/foreign write under
-    the sync's own identity -- and is excluded from both so it's never double-posted and never
-    mistaken for a human origin comment."""
+    """Every comment on `side` whose id isn't already ledgered (live pair or tombstone), split into
+    orphan mirrors (sync-authored AND carrying a parseable prefix -- for `_adopt_orphans`) and
+    new-origin comments (for `_plan_mirror_new`).
+
+    Only identity + a valid prefix marks a mirror. A sync-authored comment WITHOUT a prefix is the
+    MAINTAINER'S OWN ordinary comment -- the identity map pairs the maintainer's real accounts
+    (design doc: self-identity is primary), every mirror carries a prefix, and ledgered ids are
+    already filtered above -- so it's a genuine origin to mirror like any other author's, NOT a
+    malformed mirror to drop (dropping it silently stranded the maintainer's comments; Codex P1 #1).
+    Echo stays prevented by the ledger + the prefix on the mirror it produces."""
     orphans: list[tuple[dict, ProvenanceHeader]] = []
     origin_candidates: list[dict] = []
     for comment in comments:
@@ -359,7 +287,8 @@ def _split_new_comments(side: str, comments: list[dict], ledgered_ids: set[int],
             parsed = parse_provenance_prefix(_comment_body(comment))
             if parsed is not None:
                 orphans.append((comment, parsed))
-            continue
+                continue
+            # No prefix -> the maintainer's own origin comment; fall through to origin_candidates.
         origin_candidates.append(comment)
     return orphans, origin_candidates
 
@@ -432,7 +361,7 @@ def _plan_mirror_new(gh_candidates: list[dict], ap_candidates: list[dict]) -> li
     for side, comment in tagged:
         target_side = _other_side(side)
         author_label = _author_label(side, comment)
-        rendered = _render_mirror_body(target_side, side, author_label, _comment_body(comment))
+        rendered = render_mirror_body(target_side, side, author_label, _comment_body(comment))
         ids = _mirror_side_ids(side, comment.get("id"))
         actions.append(CommentAction("mirror_new", target_side, ids, rendered, None, ids))
     return actions
@@ -477,11 +406,14 @@ def resolve_comment_sync(identity: dict | None, ledger: list[dict], gh_comments:
 # Wiring layer (issue #66 Task 5) -- sync_comments entrypoint + _execute_action dispatch
 # =================================================================================================
 
-# ghkit's own I/O-error catch tuple (mirrors blocked_by_map/list_issue_comments exactly): any of
-# these from a GitHub write is a WARN, not a crash. Kept independent of ghkit's own private tuple --
-# only two modules would share it, and they have no existing import relationship to hang it on.
-_GH_IO_ERRORS = (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
-                 TypeError, ValueError)
+# Comment-write I/O errors -- a WARN, not a crash, for EITHER platform. GitHub's writes raise the
+# subprocess/json errors (mirrors ghkit's own blocked_by_map/list_issue_comments catch tuple);
+# AgilePlace's create_comment raises ValueError/TypeError when the POST response can't be normalized
+# to an id (issue #66 Codex P2 #7 -- that previously re-raised past the AP branch and aborted the
+# whole run). Both are per-action failures the loop skips over. Kept independent of ghkit's own
+# private tuple -- only two modules would share it, with no existing import relationship to hang it on.
+_COMMENT_IO_ERRORS = (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
+                      TypeError, ValueError)
 
 # Set True the first time sync_comments runs with no identity configured, so the self-disable WARN
 # prints at most once per process run (design finding #1) rather than once per issue. Module-level
@@ -591,27 +523,22 @@ _PLATFORM_LABELS = {"gh": "GitHub", "ap": "AgilePlace"}
 
 def _execute_one_action(cfg: dict, apply: bool, action: CommentAction, number: int,
                         card_id) -> tuple[bool, dict | None]:
-    """One action's execute-and-catch, with the exception boundary matched to `target_side`:
-    SystemExit for either platform's write -- both `agileplace_comments` AND ghkit's own
-    create_issue_comment/edit_issue_comment/delete_issue_comment raise SystemExit when their
-    respective repo/board context can't be resolved -- plus ghkit's I/O-error tuple, GH-only, for
-    the errors that surface below that context-resolution layer. Never a bare `except Exception`. A
-    caught failure is a WARN, not a crash: one bad comment must never abort the rest of the issue's
-    plan. An exception that doesn't match a real target_side (`target_side is None`, a ledger-only
-    action) re-raises rather than being silently swallowed."""
+    """One action's execute-and-catch. Both platforms' writes can fail two ways, and each is a WARN
+    that skips just this action -- never a crash and never a whole-run abort (matching the design's
+    "rest of the sync unaffected" contract): SystemExit when repo/board context can't be resolved
+    (both `agileplace_comments` and ghkit raise it), and `_COMMENT_IO_ERRORS` for the errors below
+    that -- GitHub's subprocess/json failures AND AgilePlace's response-normalization
+    ValueError/TypeError (issue #66 Codex P2 #7). Never a bare `except Exception`. Only an exception
+    on a ledger-only action (`target_side is None`, which does no I/O) re-raises -- that's a genuine
+    bug, not a write failure, and must surface rather than be swallowed."""
     try:
         return _execute_action(cfg, apply, action, number, card_id)
-    except SystemExit as exc:
+    except (SystemExit, *_COMMENT_IO_ERRORS) as exc:
         platform = _PLATFORM_LABELS.get(action.target_side)
         if platform is None:
             raise
         print(f"WARN  comment sync: {platform} write failed for {action.kind}: {exc}",
              file=sys.stderr)
-        return False, None
-    except _GH_IO_ERRORS as exc:
-        if action.target_side != "gh":
-            raise
-        print(f"WARN  comment sync: GitHub write failed for {action.kind}: {exc}", file=sys.stderr)
         return False, None
 
 
@@ -654,7 +581,7 @@ def _apply_edit_timestamps(row: dict, action: CommentAction, fresh_gh_by_id: dic
 
 
 def _apply_create_result(action: CommentAction, observed: dict | None, rows_by_key: dict,
-                         fresh_gh_by_id: dict, fresh_ap_by_id: dict) -> None:
+                         fresh_gh_by_id: dict, fresh_ap_by_id: dict, confirmed: bool) -> None:
     """Persists the newly created mirror's id alongside the preserved origin id. `origin_side` is
     derived from `action.target_side` -- the mirror side, always set to `_other_side(origin_side)`
     at plan time for both `mirror_new` (`_plan_mirror_new`) and `restore_mirror`
@@ -665,28 +592,60 @@ def _apply_create_result(action: CommentAction, observed: dict | None, rows_by_k
     'gh'. `action.ledger_key` (the OLD pairing, identical to `origin_ids` for `restore_mirror`,
     non-existent for `mirror_new`) is evicted first so a restore never leaves the stale row keyed on
     the now-dead mirror id sitting alongside the new one -- an evict-then-insert with the SAME key
-    for a `mirror_new` is a harmless no-op."""
+    for a `mirror_new` is a harmless no-op.
+
+    `confirmed=False` (post-write refetch failed) leaves the pair UNLEDGERED (evict, don't insert)
+    rather than recording a None mirror-side edited baseline -- that baseline makes the next run's
+    `_side_drifted` misread the mirror's real timestamp as drift and blind-write it over the origin
+    (issue #66 Codex P1 #3). The mirror's prefix lets the next run re-adopt it as an orphan; id
+    completeness is deferred to that adoption, not guessed from unconfirmed state."""
     if observed is None:
+        return
+    rows_by_key.pop(action.ledger_key, None)
+    if not confirmed:
         return
     origin_side = _other_side(action.target_side)
     origin_id = action.origin_ids[0] if origin_side == "gh" else action.origin_ids[1]
     new_id = observed["id"]
     gh_id = origin_id if origin_side == "gh" else new_id
     ap_id = new_id if origin_side == "gh" else origin_id
-    rows_by_key.pop(action.ledger_key, None)
     rows_by_key[(gh_id, ap_id)] = _row_from_ids(gh_id, ap_id, origin_side,
                                                 fresh_gh_by_id.get(gh_id), fresh_ap_by_id.get(ap_id))
 
 
+def _apply_delete_tombstone(action: CommentAction, rows_by_key: dict, fresh_gh_by_id: dict,
+                            fresh_ap_by_id: dict) -> None:
+    """Tombstone a `delete_mirror_and_tombstone` row -- but only after confirming on the post-write
+    refetch that the mirror is actually GONE. The AgilePlace DELETE shape is speculative
+    (API-VALIDATION.md): a 2xx that didn't truly remove the comment would otherwise strand it -- the
+    tombstone makes both ids ignored forever and the delete is never retried (issue #66 Codex P2 #5).
+    If the mirror is still present -- or the refetch failed, so the fallback pre-write snapshot still
+    shows it -- WARN and leave the row live for the next run to retry."""
+    row = rows_by_key.get(action.ledger_key)
+    if row is None:
+        return
+    by_id = fresh_gh_by_id if action.target_side == "gh" else fresh_ap_by_id
+    if action.existing_mirror_id in by_id:
+        print(f"WARN  comment sync: delete of {action.target_side} comment "
+             f"{action.existing_mirror_id} left it still present on readback -- not tombstoning; "
+             f"will retry next run", file=sys.stderr)
+        return
+    row["deleted"] = True
+
+
 def _apply_ledger_effect(action: CommentAction, observed: dict | None, rows_by_key: dict,
-                         fresh_gh_by_id: dict, fresh_ap_by_id: dict) -> None:
+                         fresh_gh_by_id: dict, fresh_ap_by_id: dict, confirmed: bool) -> None:
     """Mutates `rows_by_key` (a fresh working dict built fresh per run -- never the caller's own
-    ledger objects) with one succeeded action's effect."""
+    ledger objects) with one succeeded action's effect. `confirmed` is False when the post-write
+    refetch failed (see `_rebuild_ledger`)."""
     kind = action.kind
-    if kind in ("tombstone_both_gone", "delete_mirror_and_tombstone"):
+    if kind == "tombstone_both_gone":
         row = rows_by_key.get(action.ledger_key)
         if row is not None:
             row["deleted"] = True
+        return
+    if kind == "delete_mirror_and_tombstone":
+        _apply_delete_tombstone(action, rows_by_key, fresh_gh_by_id, fresh_ap_by_id)
         return
     if kind == "drop_unpairable_orphan":
         return
@@ -700,7 +659,8 @@ def _apply_ledger_effect(action: CommentAction, observed: dict | None, rows_by_k
         if row is not None:
             _apply_edit_timestamps(row, action, fresh_gh_by_id, fresh_ap_by_id)
         return
-    _apply_create_result(action, observed, rows_by_key, fresh_gh_by_id, fresh_ap_by_id)  # mirror_new/restore_mirror
+    # mirror_new / restore_mirror
+    _apply_create_result(action, observed, rows_by_key, fresh_gh_by_id, fresh_ap_by_id, confirmed)
 
 
 def _rebuild_ledger(cfg: dict, number: int, card_id, ledger: list[dict],
@@ -716,15 +676,18 @@ def _rebuild_ledger(cfg: dict, number: int, card_id, ledger: list[dict],
     origin side's created/edited timestamps must never be blanked to None just because the
     confirmation refetch hiccuped -- a blanked ledgered-edited value makes the NEXT run's
     `_side_drifted` misread any live edited timestamp as fresh drift, risking an `edit_mirror` that
-    overwrites the genuine human origin comment. Only a just-created/restored mirror's OWN
-    timestamps (which the pre-write snapshot could never have contained, since it didn't exist yet)
-    stay unconfirmed until a later successful run -- id-completeness still holds via `observed`."""
+    overwrites the genuine human origin comment. When the refetch fails (`confirmed=False`) a
+    just-created/restored mirror is instead left UNLEDGERED (see `_apply_create_result`) so its
+    unknowable timestamps can't masquerade as drift next run -- the mirror's provenance prefix lets
+    the next run re-adopt it as an orphan -- and a delete is left un-tombstoned for retry (see
+    `_apply_delete_tombstone`), since the fallback snapshot can't confirm the mirror is gone."""
     fresh = _fetch_both_sides(cfg, number, card_id)
-    fresh_gh_by_id = _by_id_map(fresh[0]) if fresh is not None else fallback_gh_by_id
-    fresh_ap_by_id = _by_id_map(fresh[1]) if fresh is not None else fallback_ap_by_id
+    confirmed = fresh is not None
+    fresh_gh_by_id = _by_id_map(fresh[0]) if confirmed else fallback_gh_by_id
+    fresh_ap_by_id = _by_id_map(fresh[1]) if confirmed else fallback_ap_by_id
     rows_by_key = {(r.get("gh_id"), r.get("ap_id")): dict(r) for r in ledger if isinstance(r, dict)}
     for action, observed in succeeded:
-        _apply_ledger_effect(action, observed, rows_by_key, fresh_gh_by_id, fresh_ap_by_id)
+        _apply_ledger_effect(action, observed, rows_by_key, fresh_gh_by_id, fresh_ap_by_id, confirmed)
     return list(rows_by_key.values())
 
 
