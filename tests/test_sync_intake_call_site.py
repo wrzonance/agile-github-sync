@@ -21,6 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import agileplace  # noqa: E402
 import intake  # noqa: E402
 import sync  # noqa: E402
 
@@ -70,7 +71,10 @@ def _run_main(tmp_path, promote_return, lanes=(), cards=None):
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
     stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
     stack.enter_context(patch("ghproject.configured", return_value=False))
-    stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes)))
+    stack.enter_context(patch(
+        "agileplace.board_layout",
+        return_value=agileplace.BoardLayout(lanes=list(lanes), card_types=[]),
+    ))
     stack.enter_context(patch("agileplace.list_cards", return_value=cards if cards is not None else [_card()]))
     stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
     stack.enter_context(patch("agileplace.patch_card"))
@@ -151,7 +155,10 @@ def test_main_runs_intake_only_after_the_fail_closed_identity_check(tmp_path):
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
     stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
     stack.enter_context(patch("ghproject.configured", return_value=False))
-    stack.enter_context(patch("agileplace.board_layout", return_value=[]))
+    stack.enter_context(patch(
+        "agileplace.board_layout",
+        return_value=agileplace.BoardLayout(lanes=[], card_types=[]),
+    ))
     stack.enter_context(patch("agileplace.list_cards", return_value=[url_card, cid_card]))
     stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
     stack.enter_context(patch("agileplace.patch_card"))

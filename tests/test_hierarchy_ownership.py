@@ -78,7 +78,10 @@ def _run_hierarchy(tmp_path: Path, monkeypatch, issues: list[dict], cards: list[
     monkeypatch.setattr(ghkit, "sub_issue_numbers", lambda *_args: sub_issue_numbers)
     monkeypatch.setattr(ghkit, "blocked_by_map", lambda *_args: {})
     monkeypatch.setattr(ghproject, "configured", lambda _cfg: False)
-    monkeypatch.setattr(agileplace, "board_layout", lambda _cfg: [])
+    monkeypatch.setattr(
+        agileplace, "board_layout",
+        lambda _cfg: agileplace.BoardLayout(lanes=[], card_types=[]),
+    )
     monkeypatch.setattr(agileplace, "list_cards", lambda _cfg: cards)
     monkeypatch.setattr(agileplace, "card_child_ids", child_reads)
     monkeypatch.setattr(agileplace, "card_dependencies", lambda *_args: [])
