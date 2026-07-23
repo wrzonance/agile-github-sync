@@ -24,6 +24,12 @@ DEFAULT_IGNORE = ("agent:in-progress", "agent:in-review", "agent:ready")
 # over-abstraction for no benefit.
 _ENV_LOADER_BLOCKLIST = frozenset({"GH_REPO", "GH_HOST"})
 
+# AgilePlace's `description` field length limit is undocumented (VALIDATE LIVE -- see
+# API-VALIDATION.md); this is a conservative ceiling picked to stay well under every publicly
+# documented LeanKit/AgilePlace card-field limit we could find. description_sync truncates (with
+# TRUNCATION_MARKER appended) rather than risking a write-time 4xx from an oversized description.
+DEFAULT_AP_DESCRIPTION_MAX_LENGTH = 20000
+
 
 def load_env_file() -> None:
     """Load KEY=VALUE lines from ./.env; real environment variables win over it. GH_REPO/GH_HOST are
@@ -64,6 +70,26 @@ def parse_stage_lane_map(raw: str) -> dict[str, list[str]]:
     return mapping
 
 
+def _parse_ap_description_max_length(raw: str | None) -> int:
+    """AP_DESCRIPTION_MAX_LENGTH from .env/environment, falling back to
+    DEFAULT_AP_DESCRIPTION_MAX_LENGTH (with one WARN) on anything that isn't a positive int -- a
+    malformed override must never silently disable truncation (e.g. becoming 0/negative) or crash
+    env_config() outright."""
+    if raw is None or not raw.strip():
+        return DEFAULT_AP_DESCRIPTION_MAX_LENGTH
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        print(f"WARN  AP_DESCRIPTION_MAX_LENGTH={raw!r} is not an integer -- using default "
+              f"{DEFAULT_AP_DESCRIPTION_MAX_LENGTH}")
+        return DEFAULT_AP_DESCRIPTION_MAX_LENGTH
+    if value <= 0:
+        print(f"WARN  AP_DESCRIPTION_MAX_LENGTH={raw!r} must be a positive integer -- using default "
+              f"{DEFAULT_AP_DESCRIPTION_MAX_LENGTH}")
+        return DEFAULT_AP_DESCRIPTION_MAX_LENGTH
+    return value
+
+
 def env_config() -> dict:
     """token/host/board_id are None when absent (offline dry run). target_repo_path is the local clone
     every `gh` call runs against."""
@@ -78,6 +104,8 @@ def env_config() -> dict:
         "target_repo_path": Path(target).expanduser() if target else None,
         "label_sync_ignore": frozenset(DEFAULT_IGNORE) | frozenset(extra),
         "stage_lane_map": parse_stage_lane_map(os.environ.get("STAGE_LANE_MAP", "")),
+        "ap_description_max_length": _parse_ap_description_max_length(
+            os.environ.get("AP_DESCRIPTION_MAX_LENGTH")),
         "gh_project": {
             "owner": os.environ.get("GH_PROJECT_OWNER") or None,
             "number": os.environ.get("GH_PROJECT_NUMBER") or None,
