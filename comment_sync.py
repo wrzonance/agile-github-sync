@@ -152,13 +152,18 @@ class CommentAction(NamedTuple):
     that only touch the ledger (`tombstone_both_gone`, `adopt_orphan`, `drop_unpairable_orphan`).
     `existing_mirror_id` is the CURRENT id of the comment `target_side` must edit/delete, or (for
     `adopt_orphan`/`drop_unpairable_orphan`) the orphan mirror's own id, informationally; None when
-    no such id exists yet."""
+    no such id exists yet. `origin_side` is set (only by `_adopt_orphans`, for `adopt_orphan`) to the
+    side the orphan's own provenance prefix names as its origin -- ledger persistence must read this
+    field directly rather than re-derive origin_side from `existing_mirror_id`/`ledger_key`, since gh
+    ids and ap ids are independent numeric spaces that can coincidentally collide. None for every
+    other action kind, which already have another way to determine origin_side."""
     kind: CommentActionKind
     target_side: Literal["gh", "ap"] | None
     ledger_key: tuple[int | None, int | None]
     rendered_body: str | None
     existing_mirror_id: int | None
     origin_ids: tuple[int | None, int | None]
+    origin_side: Literal["gh", "ap"] | None = None
 
 
 class CommentSyncPlan(NamedTuple):
@@ -410,7 +415,8 @@ def _adopt_orphans(mirror_side: str, orphans: list[tuple[dict, ProvenanceHeader]
         pool = [c for c in pool if c is not candidate]
         candidate_id = candidate.get("id")
         paired_ids = (candidate_id, mirror_id) if origin_side == "gh" else (mirror_id, candidate_id)
-        actions.append(CommentAction("adopt_orphan", None, paired_ids, None, mirror_id, paired_ids))
+        actions.append(CommentAction("adopt_orphan", None, paired_ids, None, mirror_id, paired_ids,
+                                     origin_side=origin_side))
     return actions, pool
 
 
@@ -580,19 +586,26 @@ def _execute_action(cfg: dict, apply: bool, action: CommentAction, number: int,
     raise ValueError(f"_execute_action: unhandled action kind {action.kind!r}")
 
 
+_PLATFORM_LABELS = {"gh": "GitHub", "ap": "AgilePlace"}
+
+
 def _execute_one_action(cfg: dict, apply: bool, action: CommentAction, number: int,
                         card_id) -> tuple[bool, dict | None]:
     """One action's execute-and-catch, with the exception boundary matched to `target_side`:
-    SystemExit for an AgilePlace write, ghkit's I/O-error tuple for a GitHub write -- never a bare
-    `except Exception`. A caught failure is a WARN, not a crash: one bad comment must never abort
-    the rest of the issue's plan. An exception that doesn't match the acting side's own boundary
-    re-raises rather than being mis-attributed to the wrong platform."""
+    SystemExit for either platform's write -- both `agileplace_comments` AND ghkit's own
+    create_issue_comment/edit_issue_comment/delete_issue_comment raise SystemExit when their
+    respective repo/board context can't be resolved -- plus ghkit's I/O-error tuple, GH-only, for
+    the errors that surface below that context-resolution layer. Never a bare `except Exception`. A
+    caught failure is a WARN, not a crash: one bad comment must never abort the rest of the issue's
+    plan. An exception that doesn't match a real target_side (`target_side is None`, a ledger-only
+    action) re-raises rather than being silently swallowed."""
     try:
         return _execute_action(cfg, apply, action, number, card_id)
     except SystemExit as exc:
-        if action.target_side != "ap":
+        platform = _PLATFORM_LABELS.get(action.target_side)
+        if platform is None:
             raise
-        print(f"WARN  comment sync: AgilePlace write failed for {action.kind}: {exc}",
+        print(f"WARN  comment sync: {platform} write failed for {action.kind}: {exc}",
              file=sys.stderr)
         return False, None
     except _GH_IO_ERRORS as exc:
@@ -679,9 +692,8 @@ def _apply_ledger_effect(action: CommentAction, observed: dict | None, rows_by_k
         return
     if kind == "adopt_orphan":
         gh_id, ap_id = action.ledger_key
-        origin_side = "ap" if action.existing_mirror_id == gh_id else "gh"
         rows_by_key[action.ledger_key] = _row_from_ids(
-            gh_id, ap_id, origin_side, fresh_gh_by_id.get(gh_id), fresh_ap_by_id.get(ap_id))
+            gh_id, ap_id, action.origin_side, fresh_gh_by_id.get(gh_id), fresh_ap_by_id.get(ap_id))
         return
     if kind == "edit_mirror":
         row = rows_by_key.get(action.ledger_key)
@@ -692,18 +704,24 @@ def _apply_ledger_effect(action: CommentAction, observed: dict | None, rows_by_k
 
 
 def _rebuild_ledger(cfg: dict, number: int, card_id, ledger: list[dict],
-                    succeeded: list[tuple[CommentAction, dict | None]]) -> list[dict]:
+                    succeeded: list[tuple[CommentAction, dict | None]],
+                    fallback_gh_by_id: dict, fallback_ap_by_id: dict) -> list[dict]:
     """The new persisted ledger after a run that wrote something. Refetches both sides ONCE more
     (echo prevention: the sync's own writes must be recorded with their true, platform-assigned
     timestamps, never a local guess, so the NEXT run's drift check can't mistake this run's own
     write for a fresh human edit) and applies every succeeded action's effect to a fresh copy of
-    the ledger -- the caller's own `ledger` rows are never mutated. Falls back to an empty fresh
-    snapshot (timestamps degrade to None, never crash) when the confirmation refetch itself fails;
-    id-completeness still holds via `observed`, and any missed timestamp reconciles on a later
-    successful run."""
+    the ledger -- the caller's own `ledger` rows are never mutated. Falls back to `fallback_gh_by_id`/
+    `fallback_ap_by_id` (the PRE-write snapshot `sync_comments` already fetched before executing the
+    plan) when the confirmation refetch itself fails, rather than to empty maps: an already-known
+    origin side's created/edited timestamps must never be blanked to None just because the
+    confirmation refetch hiccuped -- a blanked ledgered-edited value makes the NEXT run's
+    `_side_drifted` misread any live edited timestamp as fresh drift, risking an `edit_mirror` that
+    overwrites the genuine human origin comment. Only a just-created/restored mirror's OWN
+    timestamps (which the pre-write snapshot could never have contained, since it didn't exist yet)
+    stay unconfirmed until a later successful run -- id-completeness still holds via `observed`."""
     fresh = _fetch_both_sides(cfg, number, card_id)
-    fresh_gh_by_id = _by_id_map(fresh[0]) if fresh is not None else {}
-    fresh_ap_by_id = _by_id_map(fresh[1]) if fresh is not None else {}
+    fresh_gh_by_id = _by_id_map(fresh[0]) if fresh is not None else fallback_gh_by_id
+    fresh_ap_by_id = _by_id_map(fresh[1]) if fresh is not None else fallback_ap_by_id
     rows_by_key = {(r.get("gh_id"), r.get("ap_id")): dict(r) for r in ledger if isinstance(r, dict)}
     for action, observed in succeeded:
         _apply_ledger_effect(action, observed, rows_by_key, fresh_gh_by_id, fresh_ap_by_id)
@@ -739,4 +757,4 @@ def sync_comments(cfg: dict, apply: bool, issue: dict, card: dict, issues_state:
     gh_by_id, ap_by_id = _by_id_map(gh_comments), _by_id_map(ap_comments)
     succeeded = _run_plan(cfg, apply, plan, number, card_id, gh_by_id, ap_by_id, identity)
     if apply and succeeded:
-        row["comments"] = _rebuild_ledger(cfg, number, card_id, ledger, succeeded)
+        row["comments"] = _rebuild_ledger(cfg, number, card_id, ledger, succeeded, gh_by_id, ap_by_id)

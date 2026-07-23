@@ -668,6 +668,84 @@ def test_adopt_orphan_persists_full_pair_with_timestamps_through_wiring(monkeypa
     assert row["ap_created"] == _T0 and row["ap_edited"] == _T1
 
 
+# --- adopt_orphan origin_side must not be inferred from an id-equality heuristic ----------------
+
+def test_adopt_orphan_origin_side_survives_id_collision_between_platforms():
+    """Regression: `_apply_ledger_effect`'s adopt_orphan branch used to infer origin_side via
+    `existing_mirror_id == gh_id`, which only happens to be correct when the mirror sits on the GH
+    side (existing_mirror_id IS gh_id by construction there). When the mirror instead sits on the AP
+    side, that heuristic is silently wrong if the AP mirror's own id numerically collides with the
+    unrelated GH origin candidate's id -- two independent id spaces that can coincide. The action's
+    own explicit `origin_side` field (set at plan time, where the true origin side is known) must be
+    used instead, so an id collision can never flip which side is treated as the protected,
+    human-authored origin."""
+    prefix = build_provenance_prefix("gh", "alice")
+    ap_orphan_mirror = _ap(42, email="sync@example.com", body=f"<p>{prefix}</p>Hello", created=_T0)
+    gh_origin_candidate = _gh(42, author="alice", body="Hello", created=_T0)
+
+    plan = resolve_comment_sync(IDENTITY, [], [gh_origin_candidate], [ap_orphan_mirror])
+
+    adopt_actions = [a for a in plan.actions if a.kind == "adopt_orphan"]
+    assert len(adopt_actions) == 1
+    action = adopt_actions[0]
+    assert action.ledger_key == (42, 42)
+    assert action.existing_mirror_id == 42
+    assert action.origin_side == "gh"
+
+    rows_by_key: dict = {}
+    comment_sync._apply_ledger_effect(action, None, rows_by_key,
+                                      {42: gh_origin_candidate}, {42: ap_orphan_mirror})
+
+    assert rows_by_key[(42, 42)]["origin"] == "gh"
+
+
+# --- confirmation refetch failure must never blank an already-known origin timestamp ------------
+
+def test_rebuild_ledger_falls_back_to_pre_write_snapshot_when_confirmation_refetch_fails(monkeypatch):
+    """Regression: when `_rebuild_ledger`'s post-write confirmation refetch fails, it used to fall
+    back to empty maps, hard-resetting the ORIGIN side's created/edited timestamps (already known
+    from the pre-write snapshot `sync_comments` fetched before executing the plan) to None. On the
+    next run, a None ledgered-edited value makes any live edited timestamp look like drift, risking
+    an `edit_mirror` that overwrites the genuine human origin comment. The fallback must be the
+    pre-write snapshot, not an empty one, so an already-known origin timestamp is never blanked."""
+    gh_origin = _gh(1, author="alice", body="origin text", created=_T0, edited=_T0)
+    fallback_gh_by_id = {1: gh_origin}
+    fallback_ap_by_id: dict = {}
+    monkeypatch.setattr(comment_sync, "_fetch_both_sides", lambda cfg, number, card_id: None)
+
+    action = CommentAction("mirror_new", "ap", (1, None), "rendered", None, (1, None))
+    observed = {"id": 99}
+
+    rows = comment_sync._rebuild_ledger(_cfg(), 1, "42", [], [(action, observed)],
+                                        fallback_gh_by_id, fallback_ap_by_id)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["gh_id"] == 1 and row["ap_id"] == 99
+    assert row["gh_created"] == _T0 and row["gh_edited"] == _T0
+
+
+# --- exception boundary: a GitHub write can raise SystemExit too, not just AgilePlace -----------
+
+def test_execute_one_action_warns_not_crashes_when_gh_write_raises_systemexit(monkeypatch, capsys):
+    """Regression: `ghkit.create_issue_comment`/`edit_issue_comment`/`delete_issue_comment` all raise
+    SystemExit when `_repo_context()` fails to resolve the target repo -- the same tri-state idiom
+    `agileplace_comments` uses. `_execute_one_action`'s SystemExit handler only forgave the AP side,
+    re-raising for GH and crashing the whole sync run instead of downgrading to a WARN."""
+    action = CommentAction("mirror_new", "gh", (None, 2), "rendered body", None, (None, 2))
+
+    def _boom(cfg, apply, number, body):
+        raise SystemExit("create_issue_comment: repo context unavailable for issue #1")
+
+    monkeypatch.setattr(ghkit, "create_issue_comment", _boom)
+
+    ok, observed = comment_sync._execute_one_action(_cfg(), True, action, 1, "42")
+
+    assert ok is False
+    assert observed is None
+    assert "WARN" in capsys.readouterr().err
+
+
 # --- restore_mirror reproduces mirror_new's body byte-for-byte ----------------------------------
 
 def test_restore_mirror_reproduces_a_fresh_mirror_new_body_byte_identically():
