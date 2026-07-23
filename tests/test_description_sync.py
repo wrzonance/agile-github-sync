@@ -5,6 +5,7 @@ invariants. Run: pytest -q
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -13,9 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import richtext  # noqa: E402
 from description_sync import (  # noqa: E402
+    TRUNCATION_MARKER,
     DescriptionResolution,
     _canonicalize_ap_description,
     _canonicalize_gh_body,
+    _truncate_for_agileplace,
     resolve_description,
 )
 
@@ -157,3 +160,74 @@ def test_canonicalize_ap_description_is_not_self_composition_idempotent():
     once = _canonicalize_ap_description(html)
     naive_twice = _canonicalize_ap_description(once)
     assert once != naive_twice
+
+
+# =====================================================================================
+# _truncate_for_agileplace -- binary-search truncation (spike finding #1: replaces an O(n^2)
+# per-word shrink loop that took 52+s on a 25k-char body). Pins: under-limit passthrough,
+# over-limit truncation that fits max_length with TRUNCATION_MARKER appended, graceful
+# degeneration on a tiny max_length, and an O(log n)-renders wall-clock bound on a >=20k body.
+# =====================================================================================
+
+def test_truncate_under_limit_returns_full_html_unchanged():
+    markdown = "A short description that is well under any reasonable limit."
+    full_html = richtext.markdown_to_leankit_html(markdown)
+    html, was_truncated = _truncate_for_agileplace(markdown, max_length=len(full_html) + 100)
+    assert html == full_html
+    assert was_truncated is False
+
+
+def test_truncate_exactly_at_limit_returns_full_html_unchanged():
+    markdown = "Exactly at the boundary."
+    full_html = richtext.markdown_to_leankit_html(markdown)
+    html, was_truncated = _truncate_for_agileplace(markdown, max_length=len(full_html))
+    assert html == full_html
+    assert was_truncated is False
+
+
+def test_truncate_over_limit_fits_max_length_and_appends_marker():
+    markdown = " ".join(f"word{i}" for i in range(2000))
+    max_length = 500
+    html, was_truncated = _truncate_for_agileplace(markdown, max_length=max_length)
+    assert was_truncated is True
+    assert len(html) <= max_length
+    assert html.endswith(TRUNCATION_MARKER)
+
+
+def test_truncate_never_negative_length_slices_on_tiny_input():
+    # A single "word" with no whitespace at all -- snapping to a whitespace boundary must degrade
+    # to an empty prefix rather than slicing with a negative index.
+    markdown = "x" * 50
+    html, was_truncated = _truncate_for_agileplace(markdown, max_length=10)
+    assert was_truncated is True
+    assert html.endswith(TRUNCATION_MARKER)
+
+
+def test_truncate_degenerate_tiny_max_length_degrades_to_marker_only():
+    markdown = "Several words that would normally survive truncation easily here."
+    html, was_truncated = _truncate_for_agileplace(markdown, max_length=1)
+    assert was_truncated is True
+    # Even a budget smaller than the marker itself must terminate and produce the marker-only
+    # result, never raise and never loop forever.
+    assert html == TRUNCATION_MARKER
+
+
+def test_truncate_result_never_exceeds_max_length_when_achievable():
+    markdown = "Alpha beta gamma delta epsilon zeta eta theta iota kappa. " * 20
+    max_length = 200
+    html, was_truncated = _truncate_for_agileplace(markdown, max_length=max_length)
+    assert was_truncated is True
+    assert len(html) <= max_length
+
+
+def test_truncate_large_body_completes_in_low_single_digit_seconds():
+    # Pins the O(log n) fix: the spike's O(n^2) per-word shrink loop took 52+s on a 25k-char body.
+    # GH issue bodies run up to 65,536 chars. A handful of renders (~log2(n)) must stay fast.
+    markdown = ("The quick brown fox jumps over the lazy dog. " * 1500)
+    assert len(markdown) >= 20_000
+    start = time.monotonic()
+    html, was_truncated = _truncate_for_agileplace(markdown, max_length=5000)
+    elapsed = time.monotonic() - start
+    assert was_truncated is True
+    assert len(html) <= 5000
+    assert elapsed < 5.0, f"truncation took {elapsed:.2f}s -- the O(n^2) regression may have returned"

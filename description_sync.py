@@ -21,6 +21,11 @@ from typing import NamedTuple
 
 import richtext
 
+# Appended to a truncated AgilePlace description so a reader knows the full text lives on GitHub.
+# Exact text pinned by the issue #65 design doc -- config.py's DEFAULT_AP_DESCRIPTION_MAX_LENGTH
+# docstring references this same constant by name.
+TRUNCATION_MARKER = "…[truncated by sync — full text on GitHub]"
+
 
 class DescriptionResolution(NamedTuple):
     """Result of one resolve_description() call.
@@ -105,3 +110,50 @@ def _canonicalize_ap_description(description: str | None) -> str:
     -- re-rendering the canonical Markdown back to HTML and canonicalizing THAT reproduces the
     same canonical Markdown."""
     return richtext.leankit_html_to_markdown(description or "")
+
+
+def _snap_to_whitespace_boundary(markdown: str, index: int) -> int:
+    """Snap a candidate cut `index` down to the nearest whitespace boundary at or before it, so a
+    truncation cut never splits a word. Clamped to [0, len(markdown)] first, so callers can pass
+    any binary-search midpoint without pre-validating it. Returns 0 when no whitespace precedes
+    `index` (e.g. one giant unbroken token) -- a zero-length prefix is a valid degenerate result,
+    never a negative slice."""
+    index = max(0, min(index, len(markdown)))
+    while index > 0 and not markdown[index - 1].isspace():
+        index -= 1
+    return index
+
+
+def _truncate_for_agileplace(markdown: str, max_length: int) -> tuple[str, bool]:
+    """Render `markdown` to AgilePlace HTML, truncating at a clean word boundary with
+    TRUNCATION_MARKER appended if the render exceeds `max_length` characters. Returns
+    (html, was_truncated).
+
+    Binary-searches the markdown cut-length against rendered-HTML length (each candidate cut
+    snapped to its preceding whitespace boundary, re-rendered once, with TRUNCATION_MARKER's
+    length folded into the same length check) instead of shrinking one word at a time -- O(log n)
+    renders instead of O(n). That distinction is the difference between milliseconds and 50+
+    seconds on a realistically large GH issue body (up to 65,536 chars): a prior per-word shrink
+    loop re-rendered the whole prefix on every single word removed.
+
+    Never negative-length slices (see _snap_to_whitespace_boundary). A max_length too small to fit
+    even TRUNCATION_MARKER degrades to a marker-only result rather than looping forever or raising
+    -- the search floor is always a zero-length markdown prefix, which still renders cleanly."""
+    full_html = richtext.markdown_to_leankit_html(markdown)
+    if len(full_html) <= max_length:
+        return full_html, False
+
+    lo, hi = 0, len(markdown)
+    best_cut = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        cut = _snap_to_whitespace_boundary(markdown, mid)
+        candidate_len = len(richtext.markdown_to_leankit_html(markdown[:cut])) + len(TRUNCATION_MARKER)
+        if candidate_len <= max_length:
+            best_cut = cut
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    final_html = richtext.markdown_to_leankit_html(markdown[:best_cut]) + TRUNCATION_MARKER
+    return final_html, True
