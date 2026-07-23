@@ -21,6 +21,7 @@ import tempfile
 from collections.abc import Mapping
 
 import agileplace
+import board_layout
 import card_types
 import ghkit
 import ghproject
@@ -362,7 +363,7 @@ def _protect_open_pr_stage(stage: str, current_lane_id: str, lanes: list, milest
     freezes one already there). Every other case passes `stage` through unchanged."""
     if not open_pr_read_failed or has_explicit_status or issue_closed or stage == "In review":
         return stage
-    _, acceptable = agileplace.resolve_lane_for_stage(lanes, "In review", milestone, stage_map, quiet=True)
+    _, acceptable = board_layout.resolve_lane_for_stage(lanes, "In review", milestone, stage_map, quiet=True)
     if str(current_lane_id) in {str(i) for i in acceptable}:
         return "In review"
     return stage
@@ -380,11 +381,11 @@ def _apply_lane_move(cfg: dict, apply: bool, issue: dict, card: dict, key: str, 
                                         open_pr_read_failed=open_pr_read_failed,
                                         has_explicit_status=has_explicit_status,
                                         issue_closed=str(issue.get("state", "")).upper() == "CLOSED")
-    target_lane, acceptable = agileplace.resolve_lane_for_stage(
+    target_lane, acceptable = board_layout.resolve_lane_for_stage(
         lanes, lane_stage, issue.get("milestone") or "", stage_map)
     if target_lane and current not in {str(i) for i in acceptable}:
-        queue(card, [agileplace.op_lane(target_lane["id"])], f"lane->{agileplace.lane_title(target_lane)}")
-        print(f"{'move ' if apply else 'DRY  '} [{key}] -> '{agileplace.lane_title(target_lane)}' (stage {lane_stage})")
+        queue(card, [agileplace.op_lane(target_lane["id"])], f"lane->{board_layout.lane_title(target_lane)}")
+        print(f"{'move ' if apply else 'DRY  '} [{key}] -> '{board_layout.lane_title(target_lane)}' (stage {lane_stage})")
 
 
 def _retire_card(issue: dict, card: dict, lanes: list, stage_map: dict | None,
@@ -397,14 +398,14 @@ def _retire_card(issue: dict, card: dict, lanes: list, stage_map: dict | None,
         return
 
     current = str(card.get("laneId") or (card.get("lane") or {}).get("id") or "")
-    target, acceptable = agileplace.resolve_lane_for_stage(
+    target, acceptable = board_layout.resolve_lane_for_stage(
         lanes, "Done", issue.get("milestone") or "", stage_map)
     ops, actions = [], []
     if target and current not in {str(lane_id) for lane_id in acceptable}:
         ops.append(agileplace.op_lane(target["id"]))
-        actions.append(f"-> '{agileplace.lane_title(target)}'")
+        actions.append(f"-> '{board_layout.lane_title(target)}'")
     elif target:
-        actions.append(f"already '{agileplace.lane_title(target)}'")
+        actions.append(f"already '{board_layout.lane_title(target)}'")
     else:
         print(f"WARN  [{key}] cannot retire to Done: no unambiguous Done lane ({reason})")
     if ops:
@@ -492,7 +493,7 @@ def _ensure_cards_for_syncable_issues(cfg: dict, apply: bool, syncable_issues: l
         stage = resolve_issue_stage(issue, project_status, project_items, stage_map)
         lane = None
         if not project_read_failed:
-            lane, _ = agileplace.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", stage_map)
+            lane, _ = board_layout.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", stage_map)
         derived_type = card_types.derive_card_type_name(issue)
         type_id = type_by_name.get(derived_type) if derived_type else None
         created = agileplace.create_card(cfg, apply, issue_card_title(issue), key, issue["url"],
@@ -504,7 +505,7 @@ def _ensure_cards_for_syncable_issues(cfg: dict, apply: bool, syncable_issues: l
             card_by_url[issue["url"]] = created
             if key:
                 card_by_cid[key] = created
-        lane_note = (f" lane={agileplace.lane_title(lane)}" if lane
+        lane_note = (f" lane={board_layout.lane_title(lane)}" if lane
                      else " lane=deferred (Projects v2 read failed)" if project_read_failed else "")
         print(f"{'made ' if apply else 'DRY  '} card [{key}] stage={stage}{lane_note}")
 
@@ -585,7 +586,7 @@ def main() -> None:
 
     # --- issue #82: card-types wiring (comment-banner delimited -- #65 is expected to touch this
     # same `lanes = ...` line, so this is flagged as a likely merge conflict up front) ---
-    layout = agileplace.board_layout(cfg) if online else agileplace.BoardLayout(lanes=[], card_types=[])
+    layout = board_layout.board_layout(cfg) if online else board_layout.BoardLayout(lanes=[], card_types=[])
     lanes = layout.lanes
     resolved = card_types.resolve_card_type_ids(layout.card_types)
     if online:
