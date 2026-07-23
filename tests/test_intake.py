@@ -534,7 +534,7 @@ def test_promote_creates_only_the_first_of_two_candidates_sharing_a_title_derive
     monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
     created_titles = []
 
-    def fake_create(cfg, apply, title, body):
+    def fake_create(cfg, apply, title, body, issue_type=None):
         created_titles.append(title)
         n = 100 + len(created_titles)
         return {"number": n, "url": f"https://github.com/o/r/issues/{n}"}
