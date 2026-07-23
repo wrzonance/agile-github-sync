@@ -164,8 +164,13 @@ class CommentAction(NamedTuple):
 class CommentSyncPlan(NamedTuple):
     """`actions` are ordered: ledger-driven actions first (ledger order), then orphan
     adopt/drop actions, then brand-new mirrors -- the latter chronologically ordered across
-    interleaved GH/AP sources (design doc: "new mirrors post in chronological order")."""
+    interleaved GH/AP sources (design doc: "new mirrors post in chronological order"). `warnings`
+    are plain, pre-built message strings for anomalies the planner noticed but stayed silent about
+    while planning (e.g. `_parse_timestamp`'s totality contract: "excluded ... with a WARN") --
+    building a string is not I/O, so the planning core stays pure; only `sync_comments` (wiring)
+    actually prints them."""
     actions: list[CommentAction]
+    warnings: tuple[str, ...] = ()
 
 
 def _other_side(side: str) -> str:
@@ -277,6 +282,34 @@ def _plan_drift(row: dict, gh_id: int, ap_id: int, gh_comment: dict, ap_comment:
     rendered = _render_mirror_body(target_side, origin_side, author_label, _comment_body(canonical_comment))
     target_mirror_id = ap_id if target_side == "ap" else gh_id
     return CommentAction("edit_mirror", target_side, (gh_id, ap_id), rendered, target_mirror_id, (gh_id, ap_id))
+
+
+def _timestamp_warning(side: str, comment_id: int | None, raw) -> str | None:
+    """The (pure, no I/O) WARN text for a comment whose `edited` timestamp is PRESENT but fails to
+    parse -- the exact case `_side_drifted` silently excludes from the drift decision. `None` when
+    there's nothing to warn about: a comment that was simply never edited (`raw is None`) is normal,
+    not an anomaly, and would otherwise spam a WARN for the overwhelmingly common case."""
+    if raw is None or _parse_timestamp(raw) is not None:
+        return None
+    return (f"comment sync: unparseable edited timestamp on {side} comment {comment_id!r} "
+           f"({raw!r}) -- excluded from drift comparison")
+
+
+def _row_timestamp_warnings(row: dict, gh_by_id: dict, ap_by_id: dict) -> list[str]:
+    """Warnings for one live ledger row's freshly fetched gh/ap comments, if either side's live
+    `edited` timestamp is present but unparseable. `[]` for a tombstoned/malformed row, or a row
+    with nothing to warn about -- never raises."""
+    if row.get("deleted") is True:
+        return []
+    gh_id, ap_id = row.get("gh_id"), row.get("ap_id")
+    if not _valid_id(gh_id) or not _valid_id(ap_id):
+        return []
+    gh_comment, ap_comment = gh_by_id.get(gh_id), ap_by_id.get(ap_id)
+    candidates = (
+        _timestamp_warning("gh", gh_id, gh_comment.get("edited")) if gh_comment is not None else None,
+        _timestamp_warning("ap", ap_id, ap_comment.get("edited")) if ap_comment is not None else None,
+    )
+    return [w for w in candidates if w is not None]
 
 
 def _plan_ledger_row(row: dict, gh_by_id: dict, ap_by_id: dict) -> CommentAction | None:
@@ -414,6 +447,8 @@ def resolve_comment_sync(identity: dict | None, ledger: list[dict], gh_comments:
     ap_by_id = {c["id"]: c for c in ap_comments if isinstance(c, dict) and _valid_id(c.get("id"))}
     ledger_actions = [action for row in ledger if isinstance(row, dict)
                       and (action := _plan_ledger_row(row, gh_by_id, ap_by_id)) is not None]
+    ledger_warnings = [warning for row in ledger if isinstance(row, dict)
+                       for warning in _row_timestamp_warnings(row, gh_by_id, ap_by_id)]
 
     ledgered_gh_ids = {row.get("gh_id") for row in ledger if isinstance(row, dict) and _valid_id(row.get("gh_id"))}
     ledgered_ap_ids = {row.get("ap_id") for row in ledger if isinstance(row, dict) and _valid_id(row.get("ap_id"))}
@@ -423,10 +458,13 @@ def resolve_comment_sync(identity: dict | None, ledger: list[dict], gh_comments:
     gh_adopt_actions, ap_candidates = _adopt_orphans("gh", gh_orphans, ap_candidates)
     ap_adopt_actions, gh_candidates = _adopt_orphans("ap", ap_orphans, gh_candidates)
 
-    return CommentSyncPlan(actions=[
-        *ledger_actions, *gh_adopt_actions, *ap_adopt_actions,
-        *_plan_mirror_new(gh_candidates, ap_candidates),
-    ])
+    return CommentSyncPlan(
+        actions=[
+            *ledger_actions, *gh_adopt_actions, *ap_adopt_actions,
+            *_plan_mirror_new(gh_candidates, ap_candidates),
+        ],
+        warnings=tuple(ledger_warnings),
+    )
 
 
 # =================================================================================================
@@ -604,13 +642,25 @@ def _apply_edit_timestamps(row: dict, action: CommentAction, fresh_gh_by_id: dic
 
 def _apply_create_result(action: CommentAction, observed: dict | None, rows_by_key: dict,
                          fresh_gh_by_id: dict, fresh_ap_by_id: dict) -> None:
+    """Persists the newly created mirror's id alongside the preserved origin id. `origin_side` is
+    derived from `action.target_side` -- the mirror side, always set to `_other_side(origin_side)`
+    at plan time for both `mirror_new` (`_plan_mirror_new`) and `restore_mirror`
+    (`_plan_gone_or_present`) -- rather than from `origin_ids[0] is not None`, which only
+    discriminates correctly for `mirror_new` (where exactly one id is populated). For
+    `restore_mirror`, `origin_ids` is the ledger row's pre-existing (gh_id, ap_id) pair -- BOTH
+    already non-None regardless of which side originated -- so that heuristic always resolved to
+    'gh'. `action.ledger_key` (the OLD pairing, identical to `origin_ids` for `restore_mirror`,
+    non-existent for `mirror_new`) is evicted first so a restore never leaves the stale row keyed on
+    the now-dead mirror id sitting alongside the new one -- an evict-then-insert with the SAME key
+    for a `mirror_new` is a harmless no-op."""
     if observed is None:
         return
-    origin_side = "gh" if action.origin_ids[0] is not None else "ap"
+    origin_side = _other_side(action.target_side)
     origin_id = action.origin_ids[0] if origin_side == "gh" else action.origin_ids[1]
     new_id = observed["id"]
     gh_id = origin_id if origin_side == "gh" else new_id
     ap_id = new_id if origin_side == "gh" else origin_id
+    rows_by_key.pop(action.ledger_key, None)
     rows_by_key[(gh_id, ap_id)] = _row_from_ids(gh_id, ap_id, origin_side,
                                                 fresh_gh_by_id.get(gh_id), fresh_ap_by_id.get(ap_id))
 
@@ -682,6 +732,8 @@ def sync_comments(cfg: dict, apply: bool, issue: dict, card: dict, issues_state:
     row = issues_state.setdefault(issue["url"], {})
     ledger = row.setdefault("comments", [])
     plan = resolve_comment_sync(identity, ledger, gh_comments, ap_comments)
+    for message in plan.warnings:
+        print(f"WARN  {message}", file=sys.stderr)
     if not plan.actions:
         return
     gh_by_id, ap_by_id = _by_id_map(gh_comments), _by_id_map(ap_comments)

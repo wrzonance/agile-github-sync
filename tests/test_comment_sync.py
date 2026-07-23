@@ -313,7 +313,9 @@ def test_resolve_comment_sync_never_raises_on_malformed_data(ledger, gh_comments
 
 def test_unparseable_live_timestamp_excludes_that_side_from_drift():
     """A comment whose current edited-timestamp doesn't parse must be excluded from the drift
-    decision (with a WARN, at the wiring layer) rather than being treated as drifted."""
+    decision (with a WARN, at the wiring layer) rather than being treated as drifted. The plan
+    itself carries the (pure, I/O-free) warning text -- `sync_comments` is what actually prints it,
+    per `test_sync_comments_warns_on_stderr_for_unparseable_live_timestamp`."""
     ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
     gh_comments = [_gh(1, author="alice", body="v1", edited="not-a-timestamp")]
     ap_comments = [_ap(2, name="alice", body="v1", edited=_T0)]
@@ -321,6 +323,8 @@ def test_unparseable_live_timestamp_excludes_that_side_from_drift():
     plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
 
     assert plan.actions == []
+    assert len(plan.warnings) == 1
+    assert "gh" in plan.warnings[0] and "1" in plan.warnings[0]
 
 
 # =================================================================================================
@@ -481,6 +485,23 @@ def test_sync_comments_self_disable_warn_fires_at_most_once_per_run(monkeypatch,
     assert err.count("WARN") == 1
 
 
+def test_sync_comments_warns_on_stderr_for_unparseable_live_timestamp(monkeypatch, capsys):
+    """The plan-level warning built by `resolve_comment_sync` (see
+    `test_unparseable_live_timestamp_excludes_that_side_from_drift`) must actually reach the
+    operator: `sync_comments` prints it to stderr, even on a run whose plan has zero actions."""
+    issues_state = {ISSUE_URL: {"comments": [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]}}
+    monkeypatch.setattr(ghkit, "list_issue_comments",
+                        lambda cfg, number: [_gh(1, author="alice", body="v1", edited="garbage")])
+    monkeypatch.setattr(agileplace_comments, "list_comments",
+                        lambda cfg, card_id: [_ap(2, name="alice", body="v1", edited=_T0)])
+
+    comment_sync.sync_comments(_cfg(), True, _issue(), _card(), issues_state)
+
+    err = capsys.readouterr().err
+    assert "WARN" in err
+    assert "unparseable" in err
+
+
 def test_sync_comments_noop_on_plan_only_card(monkeypatch):
     monkeypatch.setattr(ghkit, "list_issue_comments",
                         lambda *a, **k: pytest.fail("must not fetch a plan-only card's comments"))
@@ -561,6 +582,90 @@ def test_sync_run_ledger_never_leaves_a_partial_pair_and_every_origin_has_one_mi
 
     live_pairs = {(r["gh_id"], r["ap_id"]) for r in rows if not r["deleted"]}
     assert live_pairs == {(1, 2), (10, 50)}
+
+    # Echo prevention: the edited row's own persisted timestamps must be the FRESH, post-write
+    # values (both sides now report _T1) -- not the stale pre-write ledgered value. A bug in
+    # `_apply_edit_timestamps` that failed to refresh a side (or swapped gh/ap) would leave this
+    # stuck at _T0, and the next run's drift check would re-plan an edit_mirror for a comment that
+    # never actually changed.
+    row_1_2 = next(r for r in rows if r["gh_id"] == 1 and r["ap_id"] == 2)
+    assert row_1_2["gh_edited"] == _T1
+    assert row_1_2["ap_edited"] == _T1
+
+    # Re-running the pure planner against the rebuilt ledger and the post-write live state must
+    # find a steady state (no actions) -- the strongest possible confirmation that every succeeded
+    # action's effect (edit/delete/tombstone/mirror_new) was correctly reconciled into the ledger.
+    steady_plan = resolve_comment_sync(IDENTITY, rows, [dict(c) for c in gh_state],
+                                       [dict(c) for c in ap_state])
+    assert steady_plan.actions == []
+
+
+# --- restore_mirror when origin is on AP: must not misattribute origin_side --------------------
+
+def test_restore_mirror_from_ap_origin_replaces_stale_row_not_duplicate(monkeypatch):
+    """Regression for origin_side misattribution in `_apply_create_result`: when the ORIGIN comment
+    lives on AP and its GH mirror was deleted, `restore_mirror`'s `origin_ids` is the ledger row's
+    full pre-existing (gh_id, ap_id) pair -- BOTH already non-None -- so a heuristic keyed on
+    `origin_ids[0] is not None` always (wrongly) resolves to origin_side='gh'. After a successful
+    restore, the persisted ledger must carry exactly ONE live row for this origin: the stale row
+    (keyed on the now-dead gh_id) replaced by a new row keyed on the freshly created gh_id and the
+    SAME preserved ap_id -- never both rows coexisting."""
+    issues_state = {ISSUE_URL: {"comments": [_row(100, 555, "ap")]}}
+    gh_state: list[dict] = []  # GH mirror #100 was deleted by a human
+    ap_state = [_ap(555, name="alice", body="origin text on AP")]
+
+    monkeypatch.setattr(ghkit, "list_issue_comments", lambda cfg, number: [dict(c) for c in gh_state])
+    monkeypatch.setattr(agileplace_comments, "list_comments",
+                        lambda cfg, card_id: [dict(c) for c in ap_state])
+
+    def _create_gh(cfg, apply, number, body):
+        if not apply:
+            return None
+        new_id = 999
+        gh_state.append({"id": new_id, "author": "syncbot", "body": body,
+                         "created": _T1, "edited": _T1})
+        return new_id
+
+    monkeypatch.setattr(ghkit, "create_issue_comment", _create_gh)
+
+    comment_sync.sync_comments(_cfg(), True, _issue(), _card(), issues_state)
+
+    rows = issues_state[ISSUE_URL]["comments"]
+    live_rows = [r for r in rows if not r["deleted"]]
+    assert len(live_rows) == 1, rows
+    assert live_rows[0]["gh_id"] == 999
+    assert live_rows[0]["ap_id"] == 555
+    assert live_rows[0]["origin"] == "ap"
+    assert not any(r["gh_id"] == 100 for r in rows), rows
+
+
+# --- adopt_orphan through the full wiring pipeline -----------------------------------------------
+
+def test_adopt_orphan_persists_full_pair_with_timestamps_through_wiring(monkeypatch):
+    """The adopt_orphan ledger-persistence effect (`_apply_ledger_effect`'s adopt_orphan branch)
+    exercised through the full sync_comments -> _run_plan -> _rebuild_ledger pipeline -- every other
+    test that reaches this branch stops at the pure `resolve_comment_sync` plan. A sync-authored,
+    prefix-carrying GH mirror with no ledger row, paired against its unledgered AP origin, must land
+    in the persisted ledger with BOTH ids and BOTH sides' created/edited timestamps populated from
+    the fresh fetch -- never left as a partial pair or with swapped/missing timestamps."""
+    prefix = build_provenance_prefix("ap", "bob")
+    issues_state = {ISSUE_URL: {"comments": []}}
+    gh_comments = [_gh(5, author="syncbot", body=f"{prefix}\n\nHello", created=_T0, edited=_T0)]
+    ap_comments = [_ap(10, name="bob", body="Hello", created=_T0, edited=_T1)]
+
+    monkeypatch.setattr(ghkit, "list_issue_comments", lambda cfg, number: [dict(c) for c in gh_comments])
+    monkeypatch.setattr(agileplace_comments, "list_comments",
+                        lambda cfg, card_id: [dict(c) for c in ap_comments])
+
+    comment_sync.sync_comments(_cfg(), True, _issue(), _card(), issues_state)
+
+    rows = issues_state[ISSUE_URL]["comments"]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["gh_id"] == 5 and row["ap_id"] == 10
+    assert row["deleted"] is False
+    assert row["gh_created"] == _T0 and row["gh_edited"] == _T0
+    assert row["ap_created"] == _T0 and row["ap_edited"] == _T1
 
 
 # --- restore_mirror reproduces mirror_new's body byte-for-byte ----------------------------------
