@@ -1,11 +1,13 @@
 """Two-way GitHub issue <-> AgilePlace card comment sync (issue #66).
 
-This module carries the shared timestamp-normalization helper (Task 1) plus the pure planning core
+This module carries the shared timestamp-normalization helper (Task 1), the pure planning core
 (Task 4): provenance-prefix build/parse, sync-identity check, and `resolve_comment_sync` -- the
 planner that turns (identity, ledger, gh_comments, ap_comments) into a `CommentSyncPlan` of
-`CommentAction`s. Everything in this module is pure -- no network/subprocess/filesystem I/O, either
-at import time or at plan time. I/O modules (`agileplace_comments`, `ghkit`) and the wiring
-entrypoint (`sync_comments`, a later task) execute the plan this module produces.
+`CommentAction`s -- plus the wiring layer (Task 5): `sync_comments`, the one-call-per-issue
+entrypoint, and `_execute_action`, the dispatcher that turns one planned action into a real
+`agileplace_comments`/`ghkit` write. The planning core stays pure -- no network/subprocess/
+filesystem I/O at import or plan time; only the wiring layer performs I/O, and only inside
+`sync_comments`/`_execute_action`'s own call graph.
 
 Ledger rows (see sync.py's issues_state[url]["comments"]) are the CommentLedgerEntry shape:
 ``{"gh_id": int|None, "ap_id": int|None, "origin": "gh"|"ap", "gh_created": str|None,
@@ -15,10 +17,15 @@ ids kept forever, content never stored, so a stale re-read can never resurrect i
 """
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from re import compile as _re_compile
 from typing import Literal, NamedTuple
 
+import agileplace_comments
+import ghkit
 import richtext
 
 
@@ -420,3 +427,264 @@ def resolve_comment_sync(identity: dict | None, ledger: list[dict], gh_comments:
         *ledger_actions, *gh_adopt_actions, *ap_adopt_actions,
         *_plan_mirror_new(gh_candidates, ap_candidates),
     ])
+
+
+# =================================================================================================
+# Wiring layer (issue #66 Task 5) -- sync_comments entrypoint + _execute_action dispatch
+# =================================================================================================
+
+# ghkit's own I/O-error catch tuple (mirrors blocked_by_map/list_issue_comments exactly): any of
+# these from a GitHub write is a WARN, not a crash. Kept independent of ghkit's own private tuple --
+# only two modules would share it, and they have no existing import relationship to hang it on.
+_GH_IO_ERRORS = (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
+                 TypeError, ValueError)
+
+# Set True the first time sync_comments runs with no identity configured, so the self-disable WARN
+# prints at most once per process run (design finding #1) rather than once per issue. Module-level
+# by design: env_config() stays a pure parse (see config._parse_comment_sync_identity), so this is
+# the only place left to hold "have we already told the user" state.
+_warned_disabled = False
+
+
+def _warn_comment_sync_disabled() -> None:
+    """Emits the self-disable WARN to stderr (ghkit's WARN convention), exactly once per process
+    run, lazily -- only once comment sync is actually invoked with no identity configured."""
+    global _warned_disabled
+    if _warned_disabled:
+        return
+    _warned_disabled = True
+    print("WARN  comment sync disabled: set both COMMENT_SYNC_GH_LOGIN and COMMENT_SYNC_AP_AUTHOR "
+         "to enable", file=sys.stderr)
+
+
+def _fetch_both_sides(cfg: dict, number: int, card_id) -> tuple[list[dict], list[dict]] | None:
+    """Both sides' comment snapshots for one issue/card pair. None when EITHER read fails, so a
+    broken side never plans against a stale/empty snapshot of the other -- mirrors the read
+    tri-state contract at the wiring layer: `ghkit.list_issue_comments` already returns None on
+    failure; `agileplace_comments.list_comments` raises SystemExit instead (its own tri-state
+    idiom), caught here."""
+    gh_comments = ghkit.list_issue_comments(cfg, number)
+    if gh_comments is None:
+        print(f"WARN  issue #{number} comment sync skipped: GitHub comment read failed",
+             file=sys.stderr)
+        return None
+    try:
+        ap_comments = agileplace_comments.list_comments(cfg, card_id)
+    except SystemExit as exc:
+        print(f"WARN  issue #{number} comment sync skipped: AgilePlace comment read failed: {exc}",
+             file=sys.stderr)
+        return None
+    return gh_comments, ap_comments
+
+
+def _by_id_map(comments: list[dict]) -> dict:
+    return {c["id"]: c for c in comments if isinstance(c, dict) and _valid_id(c.get("id"))}
+
+
+def _delete_target_authored_by_sync(action: CommentAction, gh_by_id: dict, ap_by_id: dict,
+                                    identity: dict) -> bool:
+    """Defense-in-depth guard for `delete_mirror_and_tombstone`: re-confirms, against the freshly
+    fetched comment (not just the ledger's say-so), that the comment about to be hard-deleted is
+    actually sync-authored on its own target_side -- the design doc's own invariant, by name: 'no
+    code path ever deletes a human-authored origin comment.' Every other action kind is trivially
+    safe (True) -- only a delete touches a human-writable resource destructively."""
+    if action.kind != "delete_mirror_and_tombstone":
+        return True
+    by_id = gh_by_id if action.target_side == "gh" else ap_by_id
+    comment = by_id.get(action.existing_mirror_id)
+    return comment is not None and _is_comment_sync_authored(action.target_side, comment, identity)
+
+
+def _execute_create(cfg: dict, apply: bool, action: CommentAction, number: int,
+                    card_id) -> tuple[bool, dict | None]:
+    if action.target_side == "ap":
+        result = agileplace_comments.create_comment(cfg, apply, card_id, action.rendered_body)
+        new_id = result.get("id") if isinstance(result, dict) else None
+    else:
+        new_id = ghkit.create_issue_comment(cfg, apply, number, action.rendered_body)
+    if new_id is None:
+        return False, None
+    return True, {"id": new_id}
+
+
+def _execute_edit(cfg: dict, apply: bool, action: CommentAction, number: int, card_id) -> bool:
+    if action.target_side == "ap":
+        return agileplace_comments.update_comment(cfg, apply, card_id, action.existing_mirror_id,
+                                                   action.rendered_body)
+    return ghkit.edit_issue_comment(cfg, apply, action.existing_mirror_id, action.rendered_body)
+
+
+def _execute_delete(cfg: dict, apply: bool, action: CommentAction, number: int, card_id) -> bool:
+    if action.target_side == "ap":
+        return agileplace_comments.delete_comment(cfg, apply, card_id, action.existing_mirror_id)
+    return ghkit.delete_issue_comment(cfg, apply, action.existing_mirror_id)
+
+
+def _execute_action(cfg: dict, apply: bool, action: CommentAction, number: int,
+                    card_id) -> tuple[bool, dict | None]:
+    """Dispatches one CommentAction to the correct I/O module by kind. Never catches internally --
+    the caller (`_execute_one_action`) owns the exception boundary. Returns `(succeeded, observed)`:
+    `succeeded` is True only when apply=True AND the write actually happened; `observed` carries the
+    freshly assigned `{"id": ...}` for a `mirror_new`/`restore_mirror` action, None for every other
+    kind. Deviates from a bare `-> bool` for exactly that reason: ledger writeback needs the newly
+    created id, and rediscovering it via a second live lookup would either double-post or need an
+    extra full-fetch this return value already avoids. `number`/`card_id` are threaded in beyond the
+    three params the design blurb names, since neither the GitHub nor the AgilePlace write is
+    addressable without them and `CommentAction` itself carries no per-issue/card context."""
+    if action.target_side is None:
+        return apply, None
+    if action.kind in ("mirror_new", "restore_mirror"):
+        return _execute_create(cfg, apply, action, number, card_id)
+    if action.kind == "edit_mirror":
+        return _execute_edit(cfg, apply, action, number, card_id), None
+    if action.kind == "delete_mirror_and_tombstone":
+        return _execute_delete(cfg, apply, action, number, card_id), None
+    raise ValueError(f"_execute_action: unhandled action kind {action.kind!r}")
+
+
+def _execute_one_action(cfg: dict, apply: bool, action: CommentAction, number: int,
+                        card_id) -> tuple[bool, dict | None]:
+    """One action's execute-and-catch, with the exception boundary matched to `target_side`:
+    SystemExit for an AgilePlace write, ghkit's I/O-error tuple for a GitHub write -- never a bare
+    `except Exception`. A caught failure is a WARN, not a crash: one bad comment must never abort
+    the rest of the issue's plan. An exception that doesn't match the acting side's own boundary
+    re-raises rather than being mis-attributed to the wrong platform."""
+    try:
+        return _execute_action(cfg, apply, action, number, card_id)
+    except SystemExit as exc:
+        if action.target_side != "ap":
+            raise
+        print(f"WARN  comment sync: AgilePlace write failed for {action.kind}: {exc}",
+             file=sys.stderr)
+        return False, None
+    except _GH_IO_ERRORS as exc:
+        if action.target_side != "gh":
+            raise
+        print(f"WARN  comment sync: GitHub write failed for {action.kind}: {exc}", file=sys.stderr)
+        return False, None
+
+
+def _run_plan(cfg: dict, apply: bool, plan: CommentSyncPlan, number: int, card_id, gh_by_id: dict,
+             ap_by_id: dict, identity: dict) -> list[tuple[CommentAction, dict | None]]:
+    """Executes every action in `plan`, in order, each behind its own exception boundary so one
+    failed action never aborts the rest of the issue's plan. Returns the actions that actually
+    succeeded (apply=True and the write, if any, landed) paired with their `observed` payload, for
+    `_rebuild_ledger`. The delete-safety guard runs before dispatch, never after."""
+    succeeded: list[tuple[CommentAction, dict | None]] = []
+    for action in plan.actions:
+        if not _delete_target_authored_by_sync(action, gh_by_id, ap_by_id, identity):
+            print(f"WARN  comment sync: refusing to delete comment {action.existing_mirror_id} on "
+                 f"{action.target_side} -- not sync-authored", file=sys.stderr)
+            continue
+        ok, observed = _execute_one_action(cfg, apply, action, number, card_id)
+        if ok:
+            succeeded.append((action, observed))
+    return succeeded
+
+
+def _row_from_ids(gh_id: int, ap_id: int, origin_side: str, gh_comment: dict | None,
+                  ap_comment: dict | None) -> dict:
+    return {
+        "gh_id": gh_id, "ap_id": ap_id, "origin": origin_side,
+        "gh_created": (gh_comment or {}).get("created"), "gh_edited": (gh_comment or {}).get("edited"),
+        "ap_created": (ap_comment or {}).get("created"), "ap_edited": (ap_comment or {}).get("edited"),
+        "deleted": False,
+    }
+
+
+def _apply_edit_timestamps(row: dict, action: CommentAction, fresh_gh_by_id: dict,
+                           fresh_ap_by_id: dict) -> None:
+    gh_id, ap_id = action.ledger_key
+    gh_comment, ap_comment = fresh_gh_by_id.get(gh_id), fresh_ap_by_id.get(ap_id)
+    if gh_comment is not None:
+        row["gh_created"], row["gh_edited"] = gh_comment.get("created"), gh_comment.get("edited")
+    if ap_comment is not None:
+        row["ap_created"], row["ap_edited"] = ap_comment.get("created"), ap_comment.get("edited")
+
+
+def _apply_create_result(action: CommentAction, observed: dict | None, rows_by_key: dict,
+                         fresh_gh_by_id: dict, fresh_ap_by_id: dict) -> None:
+    if observed is None:
+        return
+    origin_side = "gh" if action.origin_ids[0] is not None else "ap"
+    origin_id = action.origin_ids[0] if origin_side == "gh" else action.origin_ids[1]
+    new_id = observed["id"]
+    gh_id = origin_id if origin_side == "gh" else new_id
+    ap_id = new_id if origin_side == "gh" else origin_id
+    rows_by_key[(gh_id, ap_id)] = _row_from_ids(gh_id, ap_id, origin_side,
+                                                fresh_gh_by_id.get(gh_id), fresh_ap_by_id.get(ap_id))
+
+
+def _apply_ledger_effect(action: CommentAction, observed: dict | None, rows_by_key: dict,
+                         fresh_gh_by_id: dict, fresh_ap_by_id: dict) -> None:
+    """Mutates `rows_by_key` (a fresh working dict built fresh per run -- never the caller's own
+    ledger objects) with one succeeded action's effect."""
+    kind = action.kind
+    if kind in ("tombstone_both_gone", "delete_mirror_and_tombstone"):
+        row = rows_by_key.get(action.ledger_key)
+        if row is not None:
+            row["deleted"] = True
+        return
+    if kind == "drop_unpairable_orphan":
+        return
+    if kind == "adopt_orphan":
+        gh_id, ap_id = action.ledger_key
+        origin_side = "ap" if action.existing_mirror_id == gh_id else "gh"
+        rows_by_key[action.ledger_key] = _row_from_ids(
+            gh_id, ap_id, origin_side, fresh_gh_by_id.get(gh_id), fresh_ap_by_id.get(ap_id))
+        return
+    if kind == "edit_mirror":
+        row = rows_by_key.get(action.ledger_key)
+        if row is not None:
+            _apply_edit_timestamps(row, action, fresh_gh_by_id, fresh_ap_by_id)
+        return
+    _apply_create_result(action, observed, rows_by_key, fresh_gh_by_id, fresh_ap_by_id)  # mirror_new/restore_mirror
+
+
+def _rebuild_ledger(cfg: dict, number: int, card_id, ledger: list[dict],
+                    succeeded: list[tuple[CommentAction, dict | None]]) -> list[dict]:
+    """The new persisted ledger after a run that wrote something. Refetches both sides ONCE more
+    (echo prevention: the sync's own writes must be recorded with their true, platform-assigned
+    timestamps, never a local guess, so the NEXT run's drift check can't mistake this run's own
+    write for a fresh human edit) and applies every succeeded action's effect to a fresh copy of
+    the ledger -- the caller's own `ledger` rows are never mutated. Falls back to an empty fresh
+    snapshot (timestamps degrade to None, never crash) when the confirmation refetch itself fails;
+    id-completeness still holds via `observed`, and any missed timestamp reconciles on a later
+    successful run."""
+    fresh = _fetch_both_sides(cfg, number, card_id)
+    fresh_gh_by_id = _by_id_map(fresh[0]) if fresh is not None else {}
+    fresh_ap_by_id = _by_id_map(fresh[1]) if fresh is not None else {}
+    rows_by_key = {(r.get("gh_id"), r.get("ap_id")): dict(r) for r in ledger if isinstance(r, dict)}
+    for action, observed in succeeded:
+        _apply_ledger_effect(action, observed, rows_by_key, fresh_gh_by_id, fresh_ap_by_id)
+    return list(rows_by_key.values())
+
+
+def sync_comments(cfg: dict, apply: bool, issue: dict, card: dict, issues_state: dict) -> None:
+    """Wiring entrypoint: one call per issue, after `sync_description(...)`. No-ops on a dry-run-
+    only planned card (``card["_planOnly"]`` -- no server-side id yet, same convention
+    `sync_description` follows) and when comment sync is self-disabled (no identity configured),
+    emitting the self-disable WARN at most once per process run. Otherwise fetches both sides,
+    plans via `resolve_comment_sync`, executes each action through the verified exception boundary,
+    and -- only for a run that actually wrote something -- persists the reconciled ledger back onto
+    `issues_state`."""
+    if card.get("_planOnly"):
+        return
+    identity = cfg.get("comment_sync_identity")
+    if identity is None:
+        _warn_comment_sync_disabled()
+        return
+    number, card_id = issue["number"], card.get("id")
+    fetched = _fetch_both_sides(cfg, number, card_id)
+    if fetched is None:
+        return
+    gh_comments, ap_comments = fetched
+    row = issues_state.setdefault(issue["url"], {})
+    ledger = row.setdefault("comments", [])
+    plan = resolve_comment_sync(identity, ledger, gh_comments, ap_comments)
+    if not plan.actions:
+        return
+    gh_by_id, ap_by_id = _by_id_map(gh_comments), _by_id_map(ap_comments)
+    succeeded = _run_plan(cfg, apply, plan, number, card_id, gh_by_id, ap_by_id, identity)
+    if apply and succeeded:
+        row["comments"] = _rebuild_ledger(cfg, number, card_id, ledger, succeeded)

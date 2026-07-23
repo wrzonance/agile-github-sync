@@ -1,7 +1,9 @@
-"""Unit tests for comment_sync.py (issue #66): Task 1's shared timestamp-normalization helper, plus
+"""Unit tests for comment_sync.py (issue #66): Task 1's shared timestamp-normalization helper,
 Task 4's pure planning core -- provenance-prefix build/parse, sync-identity check, and
-`resolve_comment_sync`, the load-bearing invariant suite for the whole feature's planning logic
-before any real I/O module is wired in.
+`resolve_comment_sync`, the load-bearing invariant suite for the whole feature's planning logic --
+plus Task 5's wiring layer: `sync_comments` (the per-issue entrypoint) and `_execute_action` (the
+kind/target_side dispatcher it drives), with the verified exception boundary between the two I/O
+modules.
 
 Run: pytest -q
 """
@@ -16,7 +18,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import agileplace_comments  # noqa: E402
 import comment_sync  # noqa: E402
+import ghkit  # noqa: E402
 from comment_sync import (  # noqa: E402
     CommentAction,
     CommentSyncPlan,
@@ -434,6 +438,142 @@ def test_steady_state_no_drift_produces_no_action():
     plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
 
     assert plan.actions == []
+
+
+# =================================================================================================
+# sync_comments / _execute_action -- wiring entrypoint + dispatch (issue #66 Task 5/8)
+# =================================================================================================
+
+ISSUE_URL = "https://github.com/acme/widgets/issues/1"
+
+
+def _cfg(identity=IDENTITY) -> dict:
+    return {"comment_sync_identity": identity}
+
+
+def _issue(number=1, url=ISSUE_URL) -> dict:
+    return {"number": number, "url": url}
+
+
+def _card(card_id="42", plan_only=False) -> dict:
+    card = {"id": card_id}
+    if plan_only:
+        card["_planOnly"] = True
+    return card
+
+
+def _reset_warned_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(comment_sync, "_warned_disabled", False)
+
+
+# --- self-disable WARN: at most once per process run -------------------------------------------
+
+def test_sync_comments_self_disable_warn_fires_at_most_once_per_run(monkeypatch, capsys):
+    _reset_warned_disabled(monkeypatch)
+    monkeypatch.setattr(ghkit, "list_issue_comments",
+                        lambda *a, **k: pytest.fail("must not fetch when self-disabled"))
+    cfg = _cfg(identity=None)
+
+    comment_sync.sync_comments(cfg, True, _issue(1, ISSUE_URL), _card(), {})
+    comment_sync.sync_comments(cfg, True, _issue(2, ISSUE_URL + "-2"), _card(), {})
+
+    err = capsys.readouterr().err
+    assert err.count("WARN") == 1
+
+
+def test_sync_comments_noop_on_plan_only_card(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_comments",
+                        lambda *a, **k: pytest.fail("must not fetch a plan-only card's comments"))
+    issues_state = {}
+
+    comment_sync.sync_comments(_cfg(), True, _issue(), _card(plan_only=True), issues_state)
+
+    assert issues_state == {}
+
+
+# --- delete safety: never delete a comment the sync did not author -----------------------------
+
+def test_delete_flow_never_targets_a_comment_that_is_not_sync_authored(monkeypatch, capsys):
+    issues_state = {ISSUE_URL: {"comments": [_row(1, 2, "gh")]}}
+    monkeypatch.setattr(ghkit, "list_issue_comments", lambda cfg, number: [])
+    monkeypatch.setattr(agileplace_comments, "list_comments",
+                        lambda cfg, card_id: [_ap(2, name="a human", body="mirrored text")])
+    delete_calls = []
+    monkeypatch.setattr(agileplace_comments, "delete_comment",
+                        lambda cfg, apply, card_id, comment_id: delete_calls.append(comment_id) or True)
+
+    comment_sync.sync_comments(_cfg(), True, _issue(), _card(), issues_state)
+
+    assert delete_calls == []
+    assert issues_state[ISSUE_URL]["comments"][0] == _row(1, 2, "gh")
+    assert "not sync-authored" in capsys.readouterr().err
+
+
+# --- full-run ledger invariants: no partial pair, exactly one live mirror per live origin -------
+
+def test_sync_run_ledger_never_leaves_a_partial_pair_and_every_origin_has_one_mirror(monkeypatch):
+    """One run exercising edit_mirror, delete_mirror_and_tombstone, tombstone_both_gone, and
+    mirror_new together: after a successful apply=True run, every persisted row must have both
+    ids (a live pair) or be tombstoned (never exactly one id with deleted=False), and every living
+    origin comment must have picked up exactly one living mirror."""
+    issues_state = {ISSUE_URL: {"comments": [
+        _row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0),  # will drift gh->ap, edit_mirror
+        _row(3, 4, "ap"),                               # ap origin gone -> delete gh mirror
+        _row(5, 6, "gh"),                               # both gone -> tombstone
+    ]}}
+    gh_state = [_gh(1, author="alice", body="updated text", edited=_T1),
+               _gh(3, author="syncbot", body="mirror of the ap origin"),
+               _gh(10, author="alice", body="brand new gh comment", created=_T0, edited=_T0)]
+    ap_state = [_ap(2, name="alice", body="stale mirror text", edited=_T0)]
+
+    monkeypatch.setattr(ghkit, "list_issue_comments", lambda cfg, number: [dict(c) for c in gh_state])
+    monkeypatch.setattr(agileplace_comments, "list_comments",
+                        lambda cfg, card_id: [dict(c) for c in ap_state])
+
+    def _update_ap(cfg, apply, card_id, comment_id, html):
+        for c in ap_state:
+            if c["id"] == comment_id:
+                c["body"], c["edited"] = html, _T1
+        return apply
+
+    def _create_ap(cfg, apply, card_id, html):
+        if not apply:
+            return None
+        new = _ap(50, name=None, body=html, created=_T0, edited=_T0)
+        ap_state.append(new)
+        return new
+
+    def _delete_gh(cfg, apply, comment_id):
+        if apply:
+            gh_state[:] = [c for c in gh_state if c["id"] != comment_id]
+        return apply
+
+    monkeypatch.setattr(agileplace_comments, "update_comment", _update_ap)
+    monkeypatch.setattr(agileplace_comments, "create_comment", _create_ap)
+    monkeypatch.setattr(ghkit, "delete_issue_comment", _delete_gh)
+
+    comment_sync.sync_comments(_cfg(), True, _issue(), _card(), issues_state)
+
+    rows = issues_state[ISSUE_URL]["comments"]
+    for row in rows:
+        both_ids_present = row["gh_id"] is not None and row["ap_id"] is not None
+        assert both_ids_present or row["deleted"] is True, row
+
+    live_pairs = {(r["gh_id"], r["ap_id"]) for r in rows if not r["deleted"]}
+    assert live_pairs == {(1, 2), (10, 50)}
+
+
+# --- restore_mirror reproduces mirror_new's body byte-for-byte ----------------------------------
+
+def test_restore_mirror_reproduces_a_fresh_mirror_new_body_byte_identically():
+    gh_comments = [_gh(1, author="alice", body="original text")]
+
+    restore_plan = resolve_comment_sync(IDENTITY, [_row(1, 2, "gh")], gh_comments, [])
+    fresh_plan = resolve_comment_sync(IDENTITY, [], gh_comments, [])
+
+    assert _kinds(restore_plan) == ["restore_mirror"]
+    assert _kinds(fresh_plan) == ["mirror_new"]
+    assert restore_plan.actions[0].rendered_body == fresh_plan.actions[0].rendered_body
 
 
 # =================================================================================================
