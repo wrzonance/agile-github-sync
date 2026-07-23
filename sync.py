@@ -588,8 +588,9 @@ def main() -> None:
     layout = agileplace.board_layout(cfg) if online else agileplace.BoardLayout(lanes=[], card_types=[])
     lanes = layout.lanes
     resolved = card_types.resolve_card_type_ids(layout.card_types)
-    for line in resolved.warnings:
-        print(line)
+    if online:
+        for line in resolved.warnings:
+            print(line)
     # --- end issue #82 card-types wiring ---
     cards = agileplace.list_cards(cfg) if online else []
     smap = cfg.get("stage_lane_map")

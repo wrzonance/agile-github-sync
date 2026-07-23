@@ -920,7 +920,9 @@ def test_create_card_apply_mode_omits_typeid_when_not_supplied():
 
 def test_planned_card_snapshot_type_title_never_reaches_the_post_body():
     """type_title only feeds the dry-run snapshot's read-back shape; it must never leak into the
-    real POST body even when supplied alongside type_id."""
+    real POST body even when supplied alongside type_id -- under ANY key, not just the literal
+    "type_title" key (which create_card never writes regardless, so asserting only its absence is
+    vacuous and can never fail)."""
     snapshot = _planned_card_snapshot("Title", "CID-1", "https://example.com", None,
                                       type_id="42", type_title="Bug")
     assert snapshot["type"] == {"id": "42", "title": "Bug"}
@@ -928,5 +930,8 @@ def test_planned_card_snapshot_type_title_never_reaches_the_post_body():
         create_card(CFG, True, "Title", "CID-1", "https://example.com", None,
                     type_id="42", type_title="Bug")
     _, kwargs = api_mock.call_args
-    assert "type_title" not in kwargs["body"]
-    assert "title" in kwargs["body"] and kwargs["body"]["title"] == "Title"
+    body = kwargs["body"]
+    assert set(body.keys()) == {"boardId", "title", "customId", "externalLink", "typeId"}
+    assert body["title"] == "Title"
+    assert body["typeId"] == "42"
+    assert "Bug" not in body.values()
