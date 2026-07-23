@@ -1,12 +1,13 @@
-"""Unit tests for comment_sync.py's module scaffold (issue #66 Task 1): the shared timestamp
-normalization helper that both the drift check and orphan-adjacency gap computation funnel through
-before ever comparing two comment timestamps. Pins one invariant at the boundary: totality --
-_parse_timestamp never raises for any input, degrading unparseable/absent input to None instead.
+"""Unit tests for comment_sync.py (issue #66): Task 1's shared timestamp-normalization helper, plus
+Task 4's pure planning core -- provenance-prefix build/parse, sync-identity check, and
+`resolve_comment_sync`, the load-bearing invariant suite for the whole feature's planning logic
+before any real I/O module is wired in.
 
 Run: pytest -q
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import comment_sync  # noqa: E402
+from comment_sync import (  # noqa: E402
+    CommentAction,
+    CommentSyncPlan,
+    ProvenanceHeader,
+    build_provenance_prefix,
+    is_sync_authored,
+    parse_provenance_prefix,
+    resolve_comment_sync,
+)
 
 
 # --- totality: never raises, whatever shape shows up -------------------------------------------
@@ -74,3 +84,367 @@ def test_parse_timestamp_two_equivalent_instants_compare_equal_after_parsing():
     ap_side = comment_sync._parse_timestamp("2024-01-15T05:30:00-05:00")
 
     assert gh_side == ap_side
+
+
+# =================================================================================================
+# Fixture builders (issue #66 Task 4)
+# =================================================================================================
+
+IDENTITY = {"gh_login": "syncbot", "ap_author": "sync@example.com"}
+_T0 = "2024-01-01T00:00:00Z"
+_T1 = "2024-01-02T00:00:00Z"
+
+
+def _gh(id, author=None, body="", created=_T0, edited=_T0):
+    return {"id": id, "author": author, "body": body, "created": created, "edited": edited}
+
+
+def _ap(id, name=None, email=None, aid=None, body="", created=_T0, edited=_T0):
+    return {"id": id, "body": body, "author_name": name, "author_email": email, "author_id": aid,
+            "created": created, "edited": edited}
+
+
+def _row(gh_id, ap_id, origin, gh_created=_T0, gh_edited=_T0, ap_created=_T0, ap_edited=_T0,
+        deleted=False):
+    return {"gh_id": gh_id, "ap_id": ap_id, "origin": origin, "gh_created": gh_created,
+            "gh_edited": gh_edited, "ap_created": ap_created, "ap_edited": ap_edited,
+            "deleted": deleted}
+
+
+def _kinds(plan: CommentSyncPlan) -> list[str]:
+    return [action.kind for action in plan.actions]
+
+
+# =================================================================================================
+# build_provenance_prefix / parse_provenance_prefix
+# =================================================================================================
+
+def test_build_provenance_prefix_gh_origin_exact_wording():
+    assert build_provenance_prefix("gh", "alice") == "comment by alice on GitHub"
+
+
+def test_build_provenance_prefix_ap_origin_exact_wording():
+    assert build_provenance_prefix("ap", "bob") == "comment by bob on Agile Place"
+
+
+def test_build_provenance_prefix_rejects_unknown_side():
+    with pytest.raises(ValueError):
+        build_provenance_prefix("bogus", "alice")
+
+
+def test_parse_provenance_prefix_round_trips_gh_origin():
+    header = parse_provenance_prefix(build_provenance_prefix("gh", "alice"))
+    assert header == ProvenanceHeader(origin_side="gh", author_label="alice")
+
+
+def test_parse_provenance_prefix_round_trips_ap_origin():
+    header = parse_provenance_prefix(build_provenance_prefix("ap", "bob"))
+    assert header == ProvenanceHeader(origin_side="ap", author_label="bob")
+
+
+def test_parse_provenance_prefix_tolerant_of_ap_html_wrapping():
+    """AP renders comment bodies as HTML -- the parser must still find an anchored prefix under a
+    leading <p> wrapper and surrounding whitespace."""
+    wrapped = "  <p>comment by alice on GitHub</p><p>the rest of the comment</p>"
+    assert parse_provenance_prefix(wrapped) == ProvenanceHeader(origin_side="gh", author_label="alice")
+
+
+def test_parse_provenance_prefix_none_for_plain_human_comment():
+    assert parse_provenance_prefix("just a regular reply, thanks!") is None
+
+
+def test_parse_provenance_prefix_none_for_non_string_input():
+    assert parse_provenance_prefix(None) is None
+    assert parse_provenance_prefix(12345) is None
+
+
+def test_parse_provenance_prefix_requires_anchored_match_not_mid_sentence():
+    """A human comment that merely mentions the phrase must never false-positive as a mirror."""
+    assert parse_provenance_prefix("I saw a comment by alice on GitHub yesterday") is None
+
+
+def test_parse_provenance_prefix_first_occurrence_suffix_assumption_pinned():
+    """Design doc finding #4, accepted as-is: the parser splits on the FIRST occurrence of the
+    suffix literal, so an author label that itself contains " on GitHub" degrades the round-trip
+    (near-zero-probability real-world case, not hardened with a different delimiter scheme)."""
+    author_label = "Bot on GitHub Actions"
+    rendered = build_provenance_prefix("gh", author_label)
+
+    header = parse_provenance_prefix(rendered)
+
+    assert header.author_label != author_label
+    assert header == ProvenanceHeader(origin_side="gh", author_label="Bot")
+
+
+# =================================================================================================
+# is_sync_authored
+# =================================================================================================
+
+def test_is_sync_authored_gh_matches_case_insensitively():
+    assert is_sync_authored("gh", "SyncBot", IDENTITY) is True
+
+
+def test_is_sync_authored_ap_matches_exact():
+    assert is_sync_authored("ap", "sync@example.com", IDENTITY) is True
+
+
+def test_is_sync_authored_false_for_different_author():
+    assert is_sync_authored("gh", "alice", IDENTITY) is False
+
+
+def test_is_sync_authored_false_when_identity_is_none():
+    assert is_sync_authored("gh", "syncbot", None) is False
+
+
+def test_is_sync_authored_false_when_author_identifier_is_none():
+    assert is_sync_authored("gh", None, IDENTITY) is False
+
+
+def test_is_sync_authored_never_raises_on_malformed_inputs():
+    assert is_sync_authored("bogus-side", "syncbot", IDENTITY) is False
+    assert is_sync_authored("gh", 12345, IDENTITY) is False
+    assert is_sync_authored("gh", "syncbot", {"gh_login": 12345}) is False
+
+
+# =================================================================================================
+# resolve_comment_sync -- required invariants
+# =================================================================================================
+
+def test_identity_none_yields_an_empty_plan():
+    ledger = [_row(1, 2, "gh")]
+    plan = resolve_comment_sync(None, ledger, [_gh(1)], [_ap(2)])
+
+    assert plan == CommentSyncPlan(actions=[])
+
+
+def test_echo_prevention_ledgered_sync_authored_prefixed_comment_is_never_remirrored():
+    """A comment that is sync-authored AND carries a valid provenance prefix AND already has a
+    ledger entry must never produce a new mirror_new/adopt_orphan action for that pair -- it's
+    simply the steady-state mirror, found via the ledger row's own ids."""
+    prefix = build_provenance_prefix("ap", "bob")
+    ledger = [_row(1, 2, "ap")]
+    gh_comments = [_gh(1, author="syncbot", body=f"{prefix}\n\nHello")]
+    ap_comments = [_ap(2, name="bob", body="Hello")]
+
+    plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
+
+    assert plan.actions == []
+    assert "mirror_new" not in _kinds(plan)
+    assert "adopt_orphan" not in _kinds(plan)
+
+
+def test_orphan_mirror_is_readopted_never_double_posted():
+    """The crash-between-post-and-state-write case: a sync-authored, prefix-carrying GH comment
+    with NO ledger row, whose AP origin also has no ledger row. Must be re-adopted into the ledger
+    via a single adopt_orphan action -- never posted again as a fresh mirror_new."""
+    prefix = build_provenance_prefix("ap", "bob")
+    orphan_mirror = _gh(5, author="syncbot", body=f"{prefix}\n\nHello", created=_T0)
+    origin_candidate = _ap(10, name="bob", body="Hello", created=_T0)
+
+    plan = resolve_comment_sync(IDENTITY, [], [orphan_mirror], [origin_candidate])
+
+    assert _kinds(plan) == ["adopt_orphan"]
+    action = plan.actions[0]
+    assert action.ledger_key == (5, 10)
+    assert action.target_side is None
+    assert action.existing_mirror_id == 5
+    assert "mirror_new" not in _kinds(plan)
+
+
+def test_orphan_adjacency_picks_the_closest_candidate_by_created_timestamp():
+    """Struct #3's "orphan-adjacency gap computation": when several unledgered origin-side comments
+    share the orphan's author label, the one whose created timestamp is closest wins. The unmatched
+    "far" candidate is a genuinely separate, still-unledgered comment -- it correctly gets its own
+    mirror_new rather than vanishing."""
+    prefix = build_provenance_prefix("ap", "bob")
+    orphan_mirror = _gh(5, author="syncbot", body=f"{prefix}\n\nHi", created="2024-01-05T00:00:00Z")
+    far_candidate = _ap(100, name="bob", body="Hi", created="2024-01-01T00:00:00Z")
+    near_candidate = _ap(101, name="bob", body="Hi", created="2024-01-05T00:00:05Z")
+
+    plan = resolve_comment_sync(IDENTITY, [], [orphan_mirror], [far_candidate, near_candidate])
+
+    adopt_actions = [a for a in plan.actions if a.kind == "adopt_orphan"]
+    assert len(adopt_actions) == 1
+    assert adopt_actions[0].ledger_key == (5, 101)
+    mirror_new_actions = [a for a in plan.actions if a.kind == "mirror_new"]
+    assert [a.ledger_key for a in mirror_new_actions] == [(None, 100)]
+
+
+def test_tombstoned_row_never_produces_mirror_new_adopt_or_restore_for_that_pair():
+    """Tombstoned rows are inert forever, even if a stale read still turns up one side's id."""
+    ledger = [_row(1, 2, "gh", deleted=True)]
+    gh_comments = [_gh(1, author="alice", body="original text")]
+    ap_comments = []
+
+    plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
+
+    assert plan.actions == []
+
+
+def test_resolve_comment_sync_is_deterministic():
+    ledger = [_row(1, 2, "gh")]
+    gh_comments = [_gh(1, author="alice", body="v2", edited=_T1)]
+    ap_comments = [_ap(2, name="alice", body="v1")]
+
+    first = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
+    second = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
+
+    assert first == second
+
+
+@pytest.mark.parametrize(
+    "ledger,gh_comments,ap_comments",
+    [
+        ([{"gh_id": "not-an-int", "ap_id": 2, "origin": "gh"}], [], []),
+        ([{"gh_id": 1, "ap_id": 2, "origin": "bogus"}], [_gh(1)], [_ap(2)]),
+        (["not-a-dict"], [_gh(1)], [_ap(2)]),
+        ([], ["not-a-dict"], [_ap(2)]),
+        ([], [{"id": "not-an-int", "author": "alice"}], []),
+        ("not-a-list", [_gh(1)], [_ap(2)]),
+    ],
+)
+def test_resolve_comment_sync_never_raises_on_malformed_data(ledger, gh_comments, ap_comments):
+    resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)  # must not raise
+
+
+def test_unparseable_live_timestamp_excludes_that_side_from_drift():
+    """A comment whose current edited-timestamp doesn't parse must be excluded from the drift
+    decision (with a WARN, at the wiring layer) rather than being treated as drifted."""
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
+    gh_comments = [_gh(1, author="alice", body="v1", edited="not-a-timestamp")]
+    ap_comments = [_ap(2, name="alice", body="v1", edited=_T0)]
+
+    plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
+
+    assert plan.actions == []
+
+
+# =================================================================================================
+# resolve_comment_sync -- one test per CommentAction kind
+# =================================================================================================
+
+def test_mirror_new_for_a_genuine_unledgered_origin_comment():
+    gh_comments = [_gh(1, author="alice", body="Hello **world**", created=_T0)]
+
+    plan = resolve_comment_sync(IDENTITY, [], gh_comments, [])
+
+    assert _kinds(plan) == ["mirror_new"]
+    action = plan.actions[0]
+    assert action.target_side == "ap"
+    assert action.ledger_key == (1, None)
+    assert action.rendered_body.startswith("<p>comment by alice on GitHub</p>")
+    assert "<strong>world</strong>" in action.rendered_body
+
+
+def test_mirror_new_actions_are_chronologically_ordered_across_interleaved_sources():
+    gh_comments = [_gh(1, author="alice", body="third", created="2024-01-03T00:00:00Z")]
+    ap_comments = [
+        _ap(10, name="bob", body="first", created="2024-01-01T00:00:00Z"),
+        _ap(11, name="bob", body="second", created="2024-01-02T00:00:00Z"),
+    ]
+
+    plan = resolve_comment_sync(IDENTITY, [], gh_comments, ap_comments)
+
+    assert [a.ledger_key for a in plan.actions] == [(None, 10), (None, 11), (1, None)]
+
+
+def test_edit_mirror_when_origin_side_drifted():
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
+    gh_comments = [_gh(1, author="alice", body="updated text", edited=_T1)]
+    ap_comments = [_ap(2, name="alice", body="stale mirror text", edited=_T0)]
+
+    plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
+
+    assert _kinds(plan) == ["edit_mirror"]
+    action = plan.actions[0]
+    assert action.target_side == "ap"
+    assert action.existing_mirror_id == 2
+    assert "comment by alice on GitHub" in action.rendered_body
+    assert "updated text" in action.rendered_body
+
+
+def test_both_sides_drifted_most_recent_edit_wins():
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
+    gh_comments = [_gh(1, author="alice", body="gh edit", edited=_T1)]
+    ap_comments = [_ap(2, name="alice", body="ap edit, more recent", edited="2024-01-03T00:00:00Z")]
+
+    plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
+
+    assert _kinds(plan) == ["edit_mirror"]
+    action = plan.actions[0]
+    assert action.target_side == "gh"
+    assert "ap edit, more recent" in action.rendered_body
+
+
+def test_delete_mirror_and_tombstone_when_origin_side_gone():
+    ledger = [_row(1, 2, "gh")]
+    ap_comments = [_ap(2, name="alice", body="mirrored text")]
+
+    plan = resolve_comment_sync(IDENTITY, ledger, [], ap_comments)
+
+    assert _kinds(plan) == ["delete_mirror_and_tombstone"]
+    action = plan.actions[0]
+    assert action.target_side == "ap"
+    assert action.existing_mirror_id == 2
+    assert action.ledger_key == (1, 2)
+
+
+def test_restore_mirror_when_mirror_side_gone():
+    ledger = [_row(1, 2, "gh")]
+    gh_comments = [_gh(1, author="alice", body="original text")]
+
+    plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, [])
+
+    assert _kinds(plan) == ["restore_mirror"]
+    action = plan.actions[0]
+    assert action.target_side == "ap"
+    assert action.existing_mirror_id is None
+    assert "comment by alice on GitHub" in action.rendered_body
+    assert "original text" in action.rendered_body
+
+
+def test_tombstone_both_gone_when_neither_side_present():
+    ledger = [_row(1, 2, "gh")]
+
+    plan = resolve_comment_sync(IDENTITY, ledger, [], [])
+
+    assert _kinds(plan) == ["tombstone_both_gone"]
+    action = plan.actions[0]
+    assert action.target_side is None
+    assert action.ledger_key == (1, 2)
+
+
+def test_drop_unpairable_orphan_when_no_origin_candidate_matches():
+    prefix = build_provenance_prefix("ap", "ghost")
+    orphan_mirror = _gh(5, author="syncbot", body=f"{prefix}\n\nHello")
+
+    plan = resolve_comment_sync(IDENTITY, [], [orphan_mirror], [])
+
+    assert _kinds(plan) == ["drop_unpairable_orphan"]
+    action = plan.actions[0]
+    assert action.existing_mirror_id == 5
+    assert action.target_side is None
+
+
+def test_steady_state_no_drift_produces_no_action():
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
+    gh_comments = [_gh(1, author="alice", body="unchanged", edited=_T0)]
+    ap_comments = [_ap(2, name="alice", body="unchanged mirror", edited=_T0)]
+
+    plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
+
+    assert plan.actions == []
+
+
+# =================================================================================================
+# Module import purity
+# =================================================================================================
+
+def test_comment_sync_module_is_import_pure(monkeypatch):
+    """No network/subprocess/filesystem I/O may run merely from importing comment_sync."""
+    def _boom(*args, **kwargs):
+        raise AssertionError("comment_sync must not invoke subprocess at import time")
+
+    monkeypatch.setattr(subprocess, "run", _boom)
+    import importlib
+    importlib.reload(comment_sync)
