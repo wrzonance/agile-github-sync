@@ -361,10 +361,13 @@ def edit_issue_body(cfg: dict, apply: bool, number: int, body: str) -> bool:
     return True
 
 
-# GitHub's own native issue-type set -- the only three values `gh issue create --type` ever accepts,
-# regardless of which of them any given org has actually enabled (that's org_issue_types's job to
-# probe). create_issue validates against this fixed literal set as a schema/boundary check; it does
-# NOT re-probe org enablement, which is the caller's responsibility (see intake.promote()).
+# GitHub's three DEFAULT native issue types -- NOT the full universe of `--type` values: an org can
+# rename or disable these and define custom types of its own. This repo's reverse-seed table
+# (card_types.REVERSE_SEED_BY_CARD_TYPE) only ever emits "Bug" today, so this literal set is a
+# deliberate scope limiter for create_issue's schema/boundary check; it does NOT re-probe org
+# enablement, which is the caller's responsibility (see intake.promote()). Extending the reverse-
+# seed table to a custom org type requires widening this set too, or create_issue will reject a
+# type the org has actually enabled.
 _GH_ISSUE_TYPES = frozenset({"Task", "Bug", "Feature"})
 
 
@@ -401,8 +404,9 @@ def create_issue(cfg: dict, apply: bool, title: str, body: str,
     exception nothing upstream catches, crashing the entire sync run for one bad title. Raises
     ValueError with the offending value for context, matching edit_label's own boundary-validation
     convention (unsafe label names). `issue_type`, when not None, is validated the same way against
-    GitHub's own fixed three-value set (_GH_ISSUE_TYPES) -- a schema check, not an org-enablement
-    check (that's the caller's job, via validate_reverse_issue_type)."""
+    the _GH_ISSUE_TYPES allowlist (GitHub's default types -- see its comment for the custom-org-
+    type caveat) -- a schema check, not an org-enablement check (that's the caller's job, via
+    validate_reverse_issue_type)."""
     if not isinstance(title, str) or not title.strip():
         raise ValueError(f"create_issue: title must be a non-empty string, got {title!r}")
     if issue_type is not None and issue_type not in _GH_ISSUE_TYPES:
