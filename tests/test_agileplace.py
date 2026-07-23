@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import card_types  # noqa: E402
 from agileplace import (  # noqa: E402
     BoardLayout,
     _card_types_with_ids,
@@ -881,10 +882,16 @@ def test_card_value_for_patch_path_typeid_never_raises_regardless_of_card_shape(
 def test_create_card_dry_run_snapshot_type_title_reads_back_exactly():
     """A card created via create_card(..., type_id=X, type_title=Y) in the same dry-run pass, when
     later read back through its planned snapshot's nested type.title, returns exactly Y -- this is
-    what prevents create_card + sync_card_type from double-queuing the same-pass typeId patch."""
+    what prevents create_card + sync_card_type from double-queuing the same-pass typeId patch.
+
+    Reads the snapshot through card_types.card_type_title() itself (the same reader
+    sync_card_type's same-pass current==derived check actually calls) rather than asserting on the
+    raw snapshot dict shape -- so this test would catch a future divergence in card_type_title's own
+    normalization (e.g. trimming/casing), not just a change to _planned_card_snapshot's literal
+    shape."""
     snapshot = create_card(CFG, False, "Title", "CID-1", "https://example.com", None,
                            type_id="42", type_title="Bug")
-    assert snapshot["type"] == {"id": "42", "title": "Bug"}
+    assert card_types.card_type_title(snapshot) == "Bug"
 
 
 def test_create_card_dry_run_snapshot_omits_type_when_type_id_not_supplied():

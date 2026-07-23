@@ -57,10 +57,15 @@ def _cfg(tmp_path):
 
 
 def _run_main(tmp_path, issue, card_types=(), existing_cards=None, seed_issues_state=None,
-             apply=True):
+             apply=True, create_card_return=None, get_card_return=None):
     """ExitStack covering every I/O boundary main() touches, with card_types under caller control
     (test_sync_main._mock_io hardcodes card_types=[] -- this file's whole point is exercising it
-    non-empty). Returns the patch_card and create_card mocks for call-site assertions."""
+    non-empty). Returns the patch_card and create_card mocks for call-site assertions.
+
+    `create_card_return`/`get_card_return` let a caller simulate a REALISTIC create response (an id,
+    optionally refetched into a full card) instead of the bare `{}` every other test here uses --
+    `{}` never registers into card_by_url/card_by_cid (no "id" key), so it can't exercise the
+    same-pass create-then-sync_card_type wiring at all."""
     cfg = _cfg(tmp_path)
     state_file = tmp_path / ".sync-state.json"
     if seed_issues_state is not None:
@@ -83,7 +88,11 @@ def _run_main(tmp_path, issue, card_types=(), existing_cards=None, seed_issues_s
     stack.enter_context(patch("agileplace.list_cards", return_value=cards))
     stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
     patch_card_mock = stack.enter_context(patch("agileplace.patch_card"))
-    create_card_mock = stack.enter_context(patch("agileplace.create_card", return_value={}))
+    create_card_mock = stack.enter_context(
+        patch("agileplace.create_card", return_value=create_card_return
+              if create_card_return is not None else {}))
+    if get_card_return is not None:
+        stack.enter_context(patch("agileplace.get_card", return_value=get_card_return))
 
     argv = ["sync.py", "--apply"] if apply else ["sync.py"]
     with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
@@ -195,4 +204,29 @@ def test_main_does_not_requeue_once_the_cards_type_already_matches(tmp_path):
     patch_card_mock, _, _ = _run_main(
         tmp_path, issue, card_types=[_BUG_CARD_TYPE], existing_cards=[card])
 
+    patch_card_mock.assert_not_called()
+
+
+def test_main_does_not_double_queue_a_typeid_patch_for_a_card_created_this_same_pass(tmp_path):
+    """Regression coverage for the create_card -> card_by_url -> card_for -> sync_card_type wiring
+    chain (review finding on issue #82): every other test in this file mocks create_card to return a
+    bare `{}`, which has no "id" key, so _ensure_cards_for_syncable_issues never registers the
+    created card into card_by_url and step 2's card_types.sync_card_type never even sees it -- that
+    starves the exact invariant the module docstring promises (a same-pass create must not also
+    double-queue a typeId patch for the card it just made).
+
+    Here create_card returns a realistic sparse response (just an id) and agileplace.get_card's
+    refetch (issue #55's _created_card_snapshot) returns the full card echoing the typeId that was
+    sent at create time -- current==derived once sync_card_type runs, so no /typeId patch is queued
+    against the card this same pass just created."""
+    issue = _issue(issue_type="Bug")
+    created_sparse = {"id": "C-NEW"}
+    refetched_full = _card(type_obj={"id": "CT-BUG", "title": "Bug"}, id="C-NEW", version=2)
+
+    patch_card_mock, create_card_mock, _ = _run_main(
+        tmp_path, issue, card_types=[_BUG_CARD_TYPE], existing_cards=[],
+        create_card_return=created_sparse, get_card_return=refetched_full)
+
+    create_card_mock.assert_called_once()
+    assert create_card_mock.call_args.kwargs == {"type_id": "CT-BUG", "type_title": "Bug"}
     patch_card_mock.assert_not_called()

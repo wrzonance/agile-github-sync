@@ -90,6 +90,8 @@ def resolve_card_type_ids(card_types: list) -> ResolvedCardTypes:
     needed_names = sorted({rule.target for rule in CARD_TYPE_RULES})
     ids_by_title: dict[str, list] = {}
     for card_type in card_types:
+        if not isinstance(card_type, dict):
+            continue
         if not card_type.get("isCardType"):
             continue
         title = (card_type.get("title") or "").strip()
