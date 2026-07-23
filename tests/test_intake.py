@@ -904,3 +904,137 @@ def test_prescan_failed_matches_list_issue_bodies_tri_state(monkeypatch, bodies_
     result = intake.promote({}, False, cards, _lanes(), _stage_map(), _issues())
 
     assert result.prescan_failed is expected_prescan_failed
+
+
+# ================================================================================
+# Task 6/9: reverse-seed hookup at promotion, with dry-run-safe org-type gating
+#
+# These tests pin the boundary invariants:
+#   (1) ghkit.org_issue_types(cfg) is called AT MOST ONCE per promote() invocation, and EXACTLY
+#       ZERO times when apply is False -- preserving the two existing dry-run transport-call-count
+#       tests above (test_promote_dry_run_never_reaches_the_transport_write_boundary and its
+#       create-path counterpart).
+#   (2) card_types.validate_reverse_issue_type is fail-closed at this boundary: when the org
+#       issue-types probe fails/is unavailable (None), a card whose derived card type would
+#       otherwise reverse-seed a native issue type must still create -- just typeless, never
+#       raising and never passing an unconfirmed type to ghkit.create_issue.
+#   (3) A resumed (already-marked) candidate is never reseeded -- no org-types probe, no
+#       create_issue call, no edit_label call -- only its existing writeback re-runs.
+# ================================================================================
+
+def test_promote_calls_org_issue_types_at_most_once_for_multiple_creates(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
+    probe_calls = []
+    monkeypatch.setattr(ghkit, "org_issue_types",
+                         lambda cfg: probe_calls.append(cfg) or frozenset({"Bug"}))
+    created_titles = []
+
+    def fake_create(cfg, apply, title, body, issue_type=None):
+        created_titles.append(title)
+        n = 200 + len(created_titles)
+        return {"number": n, "url": f"https://github.com/o/r/issues/{n}"}
+
+    monkeypatch.setattr(ghkit, "create_issue", fake_create)
+    monkeypatch.setattr(intake, "_writeback", lambda *a, **k: None)
+    cards = [
+        {"id": "card-1", "laneId": "lane-intake", "title": "Card One"},
+        {"id": "card-2", "laneId": "lane-intake", "title": "Card Two"},
+    ]
+
+    result = intake.promote({}, True, cards, _lanes(), _stage_map(), _issues())
+
+    assert result.created == 2
+    assert len(probe_calls) == 1
+
+
+def test_promote_never_probes_org_issue_types_when_apply_is_false(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
+    monkeypatch.setattr(ghkit, "org_issue_types", lambda cfg: (_ for _ in ()).throw(
+        AssertionError("dry run must never probe org issue types")))
+    monkeypatch.setattr(ghkit, "create_issue", lambda *a, **k: None)  # dry-run plan only
+    cards = [_card("card-1")]
+
+    result = intake.promote({}, False, cards, _lanes(), _stage_map(), _issues())
+
+    assert result.candidates == 1
+    assert result.created == 0
+
+
+def test_promote_reverse_seed_falls_back_typeless_when_org_probe_fails(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
+    monkeypatch.setattr(ghkit, "org_issue_types", lambda cfg: None)  # probe failed/unavailable
+    seen_issue_types = []
+
+    def fake_create(cfg, apply, title, body, issue_type=None):
+        seen_issue_types.append(issue_type)
+        return {"number": 101, "url": "https://github.com/o/r/issues/101"}
+
+    monkeypatch.setattr(ghkit, "create_issue", fake_create)
+    monkeypatch.setattr(intake, "_writeback", lambda *a, **k: None)
+    card = {"id": "card-1", "laneId": "lane-intake", "title": "Card One",
+            "type": {"title": "Bug"}}  # would reverse-seed issue_type="Bug" if confirmed
+
+    result = intake.promote({}, True, [card], _lanes(), _stage_map(), _issues())
+
+    assert result.created == 1
+    assert seen_issue_types == [None]
+
+
+def test_promote_passes_a_confirmed_reverse_seed_issue_type_to_create_issue(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
+    monkeypatch.setattr(ghkit, "org_issue_types", lambda cfg: frozenset({"Bug"}))
+    seen_issue_types = []
+
+    def fake_create(cfg, apply, title, body, issue_type=None):
+        seen_issue_types.append(issue_type)
+        return {"number": 60, "url": "https://github.com/o/r/issues/60"}
+
+    monkeypatch.setattr(ghkit, "create_issue", fake_create)
+    monkeypatch.setattr(intake, "_writeback", lambda *a, **k: None)
+    card = {"id": "card-1", "laneId": "lane-intake", "title": "Card One",
+            "type": {"title": "Bug"}}
+
+    result = intake.promote({}, True, [card], _lanes(), _stage_map(), _issues())
+
+    assert result.created == 1
+    assert seen_issue_types == ["Bug"]
+
+
+def test_promote_applies_a_reverse_seed_label_after_a_successful_create(monkeypatch):
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [])
+    monkeypatch.setattr(ghkit, "org_issue_types", lambda cfg: frozenset({"Bug"}))
+    monkeypatch.setattr(ghkit, "create_issue",
+                         lambda *a, **k: {"number": 55, "url": "https://github.com/o/r/issues/55"})
+    monkeypatch.setattr(intake, "_writeback", lambda *a, **k: None)
+    edit_label_calls = []
+    monkeypatch.setattr(
+        ghkit, "edit_label",
+        lambda cfg, apply, number, label, *, add: edit_label_calls.append((number, label, add)))
+    card = {"id": "card-1", "laneId": "lane-intake", "title": "Card One",
+            "type": {"title": "Improvement"}}  # reverse-seeds label="enhancement"
+
+    result = intake.promote({}, True, [card], _lanes(), _stage_map(), _issues())
+
+    assert result.created == 1
+    assert edit_label_calls == [(55, "enhancement", True)]
+
+
+def test_promote_never_reseeds_a_resumed_candidate(monkeypatch):
+    card_id = "card-1"
+    marker = intake.marker_for_card(card_id)
+    monkeypatch.setattr(ghkit, "list_issue_bodies", lambda *a, **k: [
+        _issue_with_body(7, "https://github.com/o/r/issues/7", marker)])
+    monkeypatch.setattr(ghkit, "create_issue", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("resume must never call create_issue")))
+    monkeypatch.setattr(ghkit, "org_issue_types", lambda cfg: (_ for _ in ()).throw(
+        AssertionError("resume must never probe org issue types")))
+    monkeypatch.setattr(ghkit, "edit_label", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("resume must never apply a reverse-seed label")))
+    monkeypatch.setattr(intake, "_writeback", lambda *a, **k: None)
+    card = {"id": card_id, "laneId": "lane-intake", "title": "Card One",
+            "type": {"title": "Improvement"}}
+
+    result = intake.promote({}, True, [card], _lanes(), _stage_map(), _issues())
+
+    assert result.resumed == 1
+    assert result.created == 0
