@@ -798,10 +798,10 @@ def test_comment_sync_module_is_import_pure(monkeypatch):
 # =================================================================================================
 
 # Self-identity is the PRIMARY configuration: the identity map pairs the maintainer's OWN accounts
-# (design doc, e.g. thewrz <-> adam.wrzeski@jacobs.com), so the person who authors ordinary comments
+# (design doc, e.g. thewrz <-> maintainer@example.com), so the person who authors ordinary comments
 # IS the sync identity. The distinct-bot IDENTITY above is a valid SECONDARY config kept for the
 # other tests -- both must satisfy the same invariants.
-SELF_IDENTITY = {"gh_login": "maintainer", "ap_author": "maint@example.com"}
+SELF_IDENTITY = {"gh_login": "maintainer", "ap_author": "maintainer@example.com"}
 
 
 def test_maintainer_own_unprefixed_comment_is_mirrored_as_origin():

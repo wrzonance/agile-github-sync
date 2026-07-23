@@ -143,7 +143,7 @@ def _author_label(side: str, comment: dict) -> str:
 
 def _ap_identity_candidates(comment: dict) -> list[str]:
     """Every AP field that could plausibly match COMMENT_SYNC_AP_AUTHOR, in priority order -- email
-    is the documented example (`adam.wrzeski@jacobs.com`), name/id are defensive fallbacks for
+    is the documented example (`maintainer@example.com`), name/id are defensive fallbacks for
     boards that configure identity differently."""
     return [v for v in (comment.get("author_email"), comment.get("author_name"), comment.get("author_id"))
             if isinstance(v, str) and v.strip()]
