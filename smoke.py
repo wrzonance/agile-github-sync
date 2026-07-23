@@ -3,9 +3,9 @@
 Reads .env exactly like sync.py, previews the target board (title, lanes, existing cards), and only
 after an explicit confirmation creates two clearly-marked throwaway cards, exercises every write
 shape the sync uses -- card create, versioned PATCH tag add/remove, externalLink add on a bare card,
-connect/disconnect children, and a deliberately stale-version PATCH that MUST be rejected -- then
-deletes both cards and confirms they are gone. The steps mirror the ``[live-check]`` items in
-API-VALIDATION.md so one confirmed run retires them.
+connect/disconnect children, description write + length probe (issue #65), and a deliberately
+stale-version PATCH that MUST be rejected -- then deletes both cards and confirms they are gone. The
+steps mirror the ``[live-check]`` items in API-VALIDATION.md so one confirmed run retires them.
 
 GitHub is never touched (dry run already exercises every gh read live), and the sync state file is
 never read or written. Every server rejection is printed with its full, untruncated response body so
@@ -280,6 +280,48 @@ def _check_dependencies(cfg: dict, parent_id: str, child_id: str, results: list)
                     f"incoming read back: {sorted(incoming) if incoming is not None else 'unavailable'}"))
 
 
+def _check_description(cfg: dict, parent_id: str, results: list) -> None:
+    """Steps 14-15: agileplace.op_description's exact write shape through the same versioned-PATCH
+    path (patch_card) the sync itself uses (description_sync.sync_description), then a
+    fact-finding probe of the configured ap_description_max_length against the live server (the
+    issue #65 design doc's "max-length probe": cross-check config.DEFAULT_AP_DESCRIPTION_MAX_LENGTH
+    -- or its .env override -- against what the real API actually accepts).
+
+    NOTE -- untested replace-vs-remove uncertainty (issue #65 design decision #7): op_description
+    always issues an RFC-6902 "replace", including when description_sync writes "" to clear a
+    card's description. Other fields that need clearing (planned dates, blocked-state) use a
+    dedicated "remove" op instead of a replace-to-null/empty -- see steps 5-6's live-validated
+    contract above -- but whether AgilePlace's PATCH endpoint honors a replace-to-"" the same way
+    for /description has never been checked against the real API. This step only validates a
+    non-empty replace round-trips correctly; it deliberately does NOT exercise clearing to "", so
+    that uncertainty stays open (tracked in the design doc) until a live run confirms one way or
+    the other."""
+    _step(14, "description write via op_description through patch_card")
+    fresh = agileplace.get_card(cfg, parent_id)
+    html = "<p>SMOKE description write</p>"
+    agileplace.patch_card(cfg, True, fresh, [agileplace.op_description(html)])
+    readback = agileplace.card_description(cfg, agileplace.get_card(cfg, parent_id))
+    results.append(("description write round-trip (op_description via patch_card)",
+                    readback == html, f"description now {readback!r}"))
+
+    _step(15, "description length probe (fact-finding, not pass/fail)")
+    limit = cfg["ap_description_max_length"]
+    probe_html = f"<p>{'x' * limit}</p>"
+    fresh = agileplace.get_card(cfg, parent_id)
+    try:
+        agileplace.patch_card(cfg, True, fresh, [agileplace.op_description(probe_html)])
+    except SystemExit as exc:
+        _print_http_failure(exc)
+        results.append(("description length probe", None,
+                        f"server REJECTED a {len(probe_html)}-char description "
+                        f"(configured max_length={limit}): {exc}"))
+        return
+    readback = agileplace.card_description(cfg, agileplace.get_card(cfg, parent_id))
+    results.append(("description length probe", None,
+                    f"sent {len(probe_html)} chars, server stored {len(readback)} chars back "
+                    f"(configured max_length={limit})"))
+
+
 def _check_stale_patch(cfg: dict, parent_id: str, stale_version: str, results: list) -> None:
     """Step 13: a stale x-lk-resource-version PATCH must be rejected, not silently applied."""
     _step(13, "deliberately stale-version PATCH (the server MUST reject this)")
@@ -338,6 +380,7 @@ def _run_checks(cfg: dict, lane_id: str | None, run_id: str, created: list[str],
     child_id = _check_child_and_link(cfg, lane_id, CHILD_CUSTOM_ID_PREFIX + run_id, created, results)
     _check_connections(cfg, parent_id, child_id, results)
     _check_dependencies(cfg, parent_id, child_id, results)
+    _check_description(cfg, parent_id, results)
     _check_stale_patch(cfg, parent_id, baseline_version, results)
 
 
