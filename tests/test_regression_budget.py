@@ -57,6 +57,36 @@ instead of metadata_sync.py, the module that actually owns the logic now. MS_PRE
 private helpers are not re-exported from sync.py at all, so an import of those would fail loudly --
 but sync_metadata/sync_dates need the explicit check.
 
+Issue #82 (card-type sync + reverse-intake seeding) re-measured both budgeted files immediately
+before its own first commit (d986dae, the tip of #79): sync.py was 726 lines -- exactly the figure
+already pinned above, so PRE_CHANGE_SYNC_LINES needs no re-anchor this time; issue #82's own sync.py
+wiring (importing card_types, resolving card-type ids once in main(), and one new per-issue
+sync_card_type() call) added ~20 lines, comfortably inside WIRING_BUDGET_LINES. agileplace.py,
+however, was already 805 lines at that same commit -- past the repo's 800-line convention for that
+file too, and not issue #82's fault. Issue #82's own agileplace.py additions (the BoardLayout
+return-shape, the _card_types_with_ids structural filter, a new typeId branch inside the existing
+_card_value_for_patch_path, and trailing optional type_id/type_title params on
+create_card/_planned_card_snapshot) were deliberately minimized -- card_type_title/op_type were
+placed in the new card_types.py module instead, specifically to avoid growing agileplace.py further
+-- but still landed at 864 lines. Per issue #82's design (decision #16), that pre-existing >800
+breach is not silently absorbed: PRE_CHANGE_AGILEPLACE_LINES/AGILEPLACE_WIRING_BUDGET_LINES below
+pin agileplace.py's *own* wiring-only delta the same way PRE_CHANGE_SYNC_LINES/WIRING_BUDGET_LINES
+pin sync.py's, so a future PR can't silently pile more bulk onto an already-over-budget file. An
+absolute hard-cap assertion (mirroring test_sync_py_never_exceeds_repo_hard_cap) is deliberately
+*not* added for agileplace.py here -- it would fail immediately against debt that predates issue
+#82's own commits, and a full-file refactor to clear that debt is out of scope for this feature PR.
+That refactor is tracked instead as its own follow-up: issue #84.
+
+Issue #82 also added three wholly new test files -- tests/test_card_types.py,
+tests/test_sync_card_types.py, and tests/test_ghkit_issue_types.py -- covering the new card_types.py
+module, sync.py's new per-issue card-type drift sync, and ghkit.py's new org_issue_types() probe,
+respectively. PRE_CHANGE_TEST_COUNT is bumped from 432 to 988 -- the full suite's own passing count
+measured at d986dae, immediately before issue #82's first commit -- rather than left at #70's
+original figure, so the floor actually reflects "every test that existed before this change" rather
+than a six-issues-stale number. NEW_TEST_FILES gains issue #82's three files alongside #70's original
+four, for the same reason #70 tracked its own: a passed_count floor alone can't notice one of these
+three files silently leaving discovery.
+
 Run: pytest -q
 """
 from __future__ import annotations
@@ -87,6 +117,19 @@ WIRING_BUDGET_LINES = 40
 # of PRE_CHANGE_SYNC_LINES -- see module docstring.
 SYNC_PY_HARD_CAP_LINES = 800
 
+# agileplace.py's own baseline, measured at d986dae (the tip of #79, immediately before issue #82's
+# first commit) -- see module docstring's issue #82 section for why this file gets its own
+# wiring-only budget instead of an absolute hard-cap assertion.
+PRE_CHANGE_AGILEPLACE_LINES = 805
+
+# Wiring-only budget for issue #82's own agileplace.py additions: the BoardLayout NamedTuple, the
+# _card_types_with_ids structural filter, a new typeId branch inside the existing
+# _card_value_for_patch_path, and trailing optional type_id/type_title params on
+# create_card/_planned_card_snapshot. Actual measured delta was 59 lines (864 - 805); this budget
+# leaves generous slack over that for incidental docstring/blank-line drift without permitting a
+# re-inlining of logic that belongs elsewhere.
+AGILEPLACE_WIRING_BUDGET_LINES = 70
+
 # Names issue #79 moved out of sync.py into metadata_sync.py. sync_metadata/sync_dates are the two
 # public entry points (still reachable as `sync.sync_metadata` via sync.py's own import -- hence the
 # explicit no-stale-import check); the rest are metadata_sync-private and would fail an import
@@ -101,18 +144,23 @@ MOVED_TO_METADATA_SYNC = (
     "_stale_milestone_tags",
 )
 
-# Pre-existing suite size before issue #70's own test files
-# (test_card_coherence.py, test_sync_contested_cards.py, test_sync_lane_conflict.py,
-# test_sync_card_coherence.py) were added.
-PRE_CHANGE_TEST_COUNT = 432
+# Pre-existing suite size immediately before issue #82's first commit (measured at d986dae, the tip
+# of #79) -- bumped up from #70's original 432 so the floor reflects every test that existed before
+# this change, not a six-issues-stale figure. See module docstring's issue #82 section.
+PRE_CHANGE_TEST_COUNT = 988
 
-# Issue #70's four new test files. Invariant B's companion check asserts each is still collected
-# (deleting/renaming/emptying one is exactly the silent-loss a >= baseline pass-count floor misses).
+# Issue #70's four new test files, plus issue #82's three (test_card_types.py,
+# test_sync_card_types.py, test_ghkit_issue_types.py). Invariant B's companion check asserts each is
+# still collected (deleting/renaming/emptying one is exactly the silent-loss a >= baseline
+# pass-count floor misses).
 NEW_TEST_FILES = (
     "tests/test_card_coherence.py",
     "tests/test_sync_contested_cards.py",
     "tests/test_sync_lane_conflict.py",
     "tests/test_sync_card_coherence.py",
+    "tests/test_card_types.py",
+    "tests/test_sync_card_types.py",
+    "tests/test_ghkit_issue_types.py",
 )
 
 
@@ -139,6 +187,22 @@ def test_sync_py_never_exceeds_repo_hard_cap():
         f"sync.py has grown to {line_count} lines, past the repo's own {SYNC_PY_HARD_CAP_LINES}-line "
         "file-organization hard cap. Extract cohesive logic into its own module rather than letting "
         "sync.py keep absorbing it."
+    )
+
+
+def test_agileplace_py_stays_within_wiring_only_line_budget():
+    """agileplace.py already exceeded the repo's 800-line hard cap (805 lines) before issue #82
+    started -- pre-existing debt, not this change's to fix (tracked as follow-up issue #84; see
+    module docstring). This test does not assert the 800-line cap itself; it pins issue #82's own
+    wiring-only delta on top of that pre-existing figure, so a future change can't silently pile
+    more bulk onto an already-over-budget file."""
+    line_count = len(Path(REPO_ROOT / "agileplace.py").read_text().splitlines())
+
+    assert line_count <= PRE_CHANGE_AGILEPLACE_LINES + AGILEPLACE_WIRING_BUDGET_LINES, (
+        f"agileplace.py grew to {line_count} lines, past the wiring-only budget of "
+        f"{PRE_CHANGE_AGILEPLACE_LINES + AGILEPLACE_WIRING_BUDGET_LINES} "
+        f"({PRE_CHANGE_AGILEPLACE_LINES} pre-change baseline + {AGILEPLACE_WIRING_BUDGET_LINES} "
+        "budget). New decision logic belongs in card_types.py, not inlined into agileplace.py."
     )
 
 
