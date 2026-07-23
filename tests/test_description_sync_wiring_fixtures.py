@@ -18,15 +18,27 @@ per-file card builders in the hierarchy/retired/coherence/contested-card suites)
 each file as its own subprocess and requires zero failures/errors: the same boundary the
 spike's regression was actually caught at.
 
+Also guards issue #66's design decision that comment-sync adds ZERO lines to agileplace.py (new
+comment I/O lives in agileplace_comments.py instead, depending only on agileplace.api/mutate/
+get_card): a content-hash pin, checked at the repo boundary rather than via git history (which
+would be fragile across a squash-merge or shallow clone).
+
 Run: pytest -q tests/test_description_sync_wiring_fixtures.py
 """
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Captured via `sha256sum agileplace.py` immediately after issue #66's own commits landed (the file
+# was already confirmed byte-for-byte unchanged from before those commits, via `git diff`). A
+# mismatch means new code reached back into agileplace.py instead of staying in
+# agileplace_comments.py -- the module split this feature's design record requires.
+AGILEPLACE_PY_SHA256 = "c3fb07615550c503fdb7766864b394d1c79ca32f9473eeb2b1b33ca14a05f95e"
 
 # Every file whose card fixtures reach sync.main()'s per-issue loop -- and therefore
 # sync_description's agileplace_description.card_description() call -- belongs here. This
@@ -66,4 +78,20 @@ def test_no_wired_test_file_lets_a_card_fixture_reach_real_agileplace_api():
         "one or more wired test files let a card fixture reach sync_description's "
         "agileplace_description.card_description() fallback (real agileplace.api() call) -- give the fixture "
         "a 'description' key or explicitly mock agileplace.get_card:\n\n" + "\n\n".join(failures)
+    )
+
+
+def test_agileplace_py_is_byte_for_byte_unchanged_by_issue_66():
+    """Issue #66's comment-sync feature depends entirely on agileplace.api/mutate/get_card; new
+    comment I/O (list/create/update/delete) lives in agileplace_comments.py instead, so
+    agileplace.py itself must never grow or change one byte across this feature's commits (design
+    doc decision: 'zero lines added to agileplace.py'). Confirmed via `git diff` immediately before
+    this test was added; pinned here as a content hash so a later change that reaches back into
+    agileplace.py to inline comment support gets caught at the repo boundary, not just noticed in
+    review."""
+    content = (REPO_ROOT / "agileplace.py").read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    assert digest == AGILEPLACE_PY_SHA256, (
+        f"agileplace.py changed (sha256 {digest}, expected {AGILEPLACE_PY_SHA256}) -- comment-sync "
+        "I/O belongs in agileplace_comments.py, never inlined into agileplace.py"
     )

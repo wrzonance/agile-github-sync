@@ -3,11 +3,12 @@
 Reads .env exactly like sync.py, previews the target board (title, lanes, existing cards), and only
 after an explicit confirmation creates clearly-marked throwaway cards, exercises every write shape
 the sync uses -- card create, versioned PATCH tag add/remove, externalLink add on a bare card,
-connect/disconnect children, description write + length probe (issue #65), a typeId replace and a
-typed card create (each verified via refetch, skipped as informational when the board has no
-eligible card type configured), and a deliberately stale-version PATCH that MUST be rejected -- then
-deletes every throwaway card and confirms they are gone. The steps mirror the ``[live-check]`` items
-in API-VALIDATION.md so one confirmed run retires them.
+connect/disconnect children, description write + length probe (issue #65), a comment create/list/
+edit/delete round-trip (issue #66 -- the delete shape is speculative, never exposed by the web UI),
+a typeId replace and a typed card create (each verified via refetch, skipped as informational when
+the board has no eligible card type configured), and a deliberately stale-version PATCH that MUST be
+rejected -- then deletes every throwaway card and confirms they are gone. The steps mirror the
+``[live-check]`` items in API-VALIDATION.md so one confirmed run retires them.
 
 GitHub is never touched (dry run already exercises every gh read live), and the sync state file is
 never read or written. Every server rejection is printed with its full, untruncated response body so
@@ -21,6 +22,7 @@ import secrets
 import sys
 
 import agileplace
+import agileplace_comments
 import agileplace_description
 import board_layout
 import card_types
@@ -337,10 +339,64 @@ def _check_description(cfg: dict, parent_id: str, results: list) -> None:
                     f"(configured max_length={limit})"))
 
 
+def _find_comment(comments: list[dict], comment_id: int) -> dict | None:
+    return next((comment for comment in comments if comment.get("id") == comment_id), None)
+
+
+def _check_comments(cfg: dict, parent_id: str, results: list) -> None:
+    """Steps 15-18: agileplace_comments' full CRUD surface. Create, then a list-readback (the
+    per-comment author/timestamp field names are VALIDATE LIVE per the issue #66 design doc --
+    reported informational, not pass/fail, until a real tenant confirms them), an edit whose body
+    round-trips (edited-timestamp movement is also informational), and finally the DELETE, whose
+    shape is speculative -- the web UI never exposed comment deletion -- so the readback-confirms-
+    gone check is a hard PASS/FAIL, mirroring the externalLink-add and tag-add checks above: a 2xx
+    response alone is never proof a write actually happened."""
+    _step(15, "create a comment via agileplace_comments.create_comment")
+    comment = agileplace_comments.create_comment(cfg, True, parent_id, "<p>SMOKE comment</p>")
+    comment_id = comment.get("id") if comment else None
+    if comment_id is None:
+        raise SystemExit(f"comment create response has no usable id ({comment!r}) -- cannot continue")
+    print(f"      created comment {comment_id}")
+    results.append(("comment create returns a usable id", True, f"id={comment_id}"))
+
+    _step(16, "list comments, confirm the readback shape (author/timestamp fields are fact-finding)")
+    comments = agileplace_comments.list_comments(cfg, parent_id)
+    found = _find_comment(comments, comment_id)
+    results.append(("comment list readback finds the created comment", found is not None,
+                    f"{len(comments)} comment(s) now on the card"))
+    edited_before = found.get("edited") if found else None
+    if found is not None:
+        results.append(("comment author-field shape (fact-finding)", None,
+                        f"author_name={found['author_name']!r} author_email={found['author_email']!r} "
+                        f"author_id={found['author_id']!r}"))
+        results.append(("comment created/edited timestamp shape (fact-finding)", None,
+                        f"created={found['created']!r} edited={edited_before!r}"))
+
+    _step(17, "edit the comment via agileplace_comments.update_comment")
+    edited_html = "<p>SMOKE comment (edited)</p>"
+    agileplace_comments.update_comment(cfg, True, parent_id, comment_id, edited_html)
+    comments = agileplace_comments.list_comments(cfg, parent_id)
+    found_after_edit = _find_comment(comments, comment_id)
+    body_matches = found_after_edit is not None and found_after_edit["body"] == edited_html
+    results.append(("comment edit round-trip (PUT)", body_matches,
+                    f"body now {found_after_edit['body']!r}" if found_after_edit
+                    else "comment vanished after edit"))
+    edited_after = found_after_edit.get("edited") if found_after_edit else None
+    results.append(("comment edited timestamp moves after PUT (fact-finding)", None,
+                    f"before={edited_before!r} after={edited_after!r}"))
+
+    _step(18, "delete the comment (speculative shape), then confirm it is gone on readback")
+    agileplace_comments.delete_comment(cfg, True, parent_id, comment_id)
+    comments = agileplace_comments.list_comments(cfg, parent_id)
+    gone = _find_comment(comments, comment_id) is None
+    results.append(("comment delete + readback gone (speculative shape)", gone,
+                    f"{len(comments)} comment(s) remain"))
+
+
 def _check_type_id_roundtrip(cfg: dict, parent_id: str, card_type: dict, results: list) -> None:
-    """Step 15: card_types.op_type's /typeId replace on the existing parent card, then read the
+    """Step 19: card_types.op_type's /typeId replace on the existing parent card, then read the
     nested type back -- the same shape sync_card_type queues for a derived-type drift fix."""
-    _step(15, "typeId replace via one versioned PATCH, then read the type back")
+    _step(19, "typeId replace via one versioned PATCH, then read the type back")
     type_id = str(card_type["id"])
     fresh = agileplace.get_card(cfg, parent_id)
     agileplace.patch_card(cfg, True, fresh, [card_types.op_type(type_id)])
@@ -352,10 +408,10 @@ def _check_type_id_roundtrip(cfg: dict, parent_id: str, card_type: dict, results
 
 def _check_create_with_type_id(cfg: dict, lane_id: str | None, custom_id: str, card_type: dict,
                                created: list[str], results: list) -> None:
-    """Step 16: create a card with typeId set, then refetch it. The create response is confirmed
+    """Step 20: create a card with typeId set, then refetch it. The create response is confirmed
     sparse (no customId/laneId echo, no version -- see API-VALIDATION.md 2026-07-21), so this
     checks the refetch, never the create response itself."""
-    _step(16, "create card with typeId, verified via refetch (create response is sparse)")
+    _step(20, "create card with typeId, verified via refetch (create response is sparse)")
     type_id = str(card_type["id"])
     type_title = (card_type.get("title") or "").strip()
     card = agileplace.create_card(cfg, True, TYPED_TITLE, custom_id, "", lane_id,
@@ -373,7 +429,7 @@ def _check_create_with_type_id(cfg: dict, lane_id: str | None, custom_id: str, c
 
 def _check_type_id_writes(cfg: dict, lane_id: str | None, parent_id: str, run_id: str,
                           created: list[str], results: list) -> None:
-    """Steps 15-16, gated on the board actually having an eligible card type configured: neither
+    """Steps 19-20, gated on the board actually having an eligible card type configured: neither
     step is a sync precondition (a board with no card types configured never derives one), so a
     board without one reports both as informational skips rather than failing the run."""
     card_type = _pick_card_type(board_layout.board_layout(cfg).card_types)
@@ -388,8 +444,8 @@ def _check_type_id_writes(cfg: dict, lane_id: str | None, parent_id: str, run_id
 
 
 def _check_stale_patch(cfg: dict, parent_id: str, stale_version: str, results: list) -> None:
-    """Step 17: a stale x-lk-resource-version PATCH must be rejected, not silently applied."""
-    _step(17, "deliberately stale-version PATCH (the server MUST reject this)")
+    """Step 21: a stale x-lk-resource-version PATCH must be rejected, not silently applied."""
+    _step(21, "deliberately stale-version PATCH (the server MUST reject this)")
     body = [agileplace.op_tag("smoke-stale")]
     print(f"      PATCH /io/card/{parent_id} with stale x-lk-resource-version={stale_version} "
           f"body={json.dumps(body)}")
@@ -446,6 +502,7 @@ def _run_checks(cfg: dict, lane_id: str | None, run_id: str, created: list[str],
     _check_connections(cfg, parent_id, child_id, results)
     _check_dependencies(cfg, parent_id, child_id, results)
     _check_description(cfg, parent_id, results)
+    _check_comments(cfg, parent_id, results)
     _check_type_id_writes(cfg, lane_id, parent_id, run_id, created, results)
     _check_stale_patch(cfg, parent_id, baseline_version, results)
 

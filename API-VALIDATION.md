@@ -365,3 +365,33 @@ alone, since this worktree has no `.env` and no live board to probe against:
 
 All four remain `[live-check]` pending -- the first real reverse-intake promotion against a
 production board should confirm or correct them and update this section.
+
+## Comment sync (issue #66) -- `[live-check]` pending
+
+`agileplace_comments.py` adds list/create/update/delete for AgilePlace card comments, following the
+same defensive-normalization style as the rest of this file. `smoke.py` steps 15-18 (added alongside
+this module) exercise the whole CRUD surface offline via the fake tenant in `test_smoke.py`, but
+**no live run against a real tenant has been done from this worktree** (no `.env`/credentials are
+available here -- see the module's own docstring). Three things remain genuinely unconfirmed:
+
+1. **List endpoint shape.** `GET /io/card/{cardId}/comment` is assumed to return either a bare array
+   or an object carrying a `comments` array (mirroring `list_cards`' `{"cards": [...]}` convention);
+   `list_comments` falls back once to the single-card GET's top-level `comments` field on ANY shape
+   surprise. Neither the primary endpoint nor the fallback field name has been checked against a
+   real tenant -- the whole thing is inferred from `list_cards`/`get_card`'s already-confirmed
+   conventions, not from public docs (the web UI's comment feature has no documented io v2 page).
+2. **Create/update field names.** `POST`/`PUT` send `{"text": <html>}`; the read side tries
+   `createdBy` (nested `fullName`/`emailAddress`/`id`) and `createdOn` for the author/created
+   timestamp, with `lastModified`/`modifiedOn`/`updatedOn`/`editedOn` tried in that order for the
+   edited timestamp. None of these key names are confirmed -- `_normalize_ap_comment` degrades every
+   field but `id` to `None` on a miss rather than raising, so a wrong guess here would silently
+   report `author_name=None`/`edited=None` forever instead of failing loud. `smoke.py` step 16 prints
+   the resolved shape as an INFO line specifically so a live run surfaces this.
+3. **DELETE shape is speculative.** `DELETE /io/card/{cardId}/comment/{commentId}` was never
+   confirmed against docs, the Node client, or a devtools capture (unlike the Dependencies delete
+   shape above, which WAS captured live) -- the web UI has never exposed deleting a comment.
+   `smoke.py` step 18 pins this as a hard PASS/FAIL (readback-confirms-gone, not just a 2xx), the
+   same pattern used for the externalLink-add and tag-add checks.
+
+Run `python smoke.py` against a disposable card on a real tenant to confirm or correct all three,
+then move this section to a "Validated live" one the way the reverse-intake findings above will be.

@@ -44,12 +44,13 @@ class FakeTenant:
 
     def __init__(self, *, accept_stale: bool = False, fail_child_create_body: str | None = None,
                  ignore_external_link: bool = False, ignore_tag_add: bool = False,
-                 duplicate_status: int = 409):
+                 duplicate_status: int = 409, ignore_comment_delete: bool = False):
         self.accept_stale = accept_stale
         self.fail_child_create_body = fail_child_create_body
         self.ignore_external_link = ignore_external_link
         self.ignore_tag_add = ignore_tag_add
         self.duplicate_status = duplicate_status  # live contract is 409; override to model outages
+        self.ignore_comment_delete = ignore_comment_delete  # models the speculative DELETE shape missing
         self.created_custom_ids: list[str] = []
         self.writes: list[tuple[str, str]] = []
         self.cards: dict[str, dict] = {
@@ -58,7 +59,9 @@ class FakeTenant:
         }
         self.children: dict[str, list[str]] = {}
         self.dependencies: dict[str, list[dict]] = {}
+        self.comments: dict[str, list[dict]] = {}
         self._next_id = 0
+        self._next_comment_id = 0
 
     def urlopen(self, req, timeout=None):
         method = req.get_method()
@@ -67,16 +70,26 @@ class FakeTenant:
         body = json.loads(req.data) if req.data else None
         if method != "GET":
             self.writes.append((method, path))
+        is_comment_collection = path.startswith("card/") and path.endswith("/comment")
+        is_comment_item = path.startswith("card/") and "/comment/" in path
+        if method == "GET" and is_comment_collection:
+            return self._get_comments(path)
         if method == "GET":
             return self._get(req.full_url, path)
+        if method == "POST" and is_comment_collection:
+            return self._create_comment(path, body)
         if method == "POST" and path == "card":
             return self._create(req.full_url, body)
+        if method == "PUT" and is_comment_item:
+            return self._update_comment(path, body)
         if method == "PATCH" and path.startswith("card/"):
             return self._patch(req, path.removeprefix("card/"), body)
         if path == "card/connections":
             return self._connections(method, body)
         if path == "card/dependency":
             return self._dependency(req, method, body)
+        if method == "DELETE" and is_comment_item:
+            return self._delete_comment(path)
         if method == "DELETE" and path.startswith("card/"):
             del self.cards[path.removeprefix("card/")]
             return _Response(None)
@@ -105,6 +118,37 @@ class FakeTenant:
             raise _http_error(url, 404, json.dumps({"message": "card not found"}))
         return _Response({"card": {**self.cards[card_id],
                                    "version": str(self.cards[card_id]["version"])}})
+
+    def _get_comments(self, path: str):
+        card_id = path.split("/")[1]
+        return _Response({"comments": self.comments.get(card_id, [])})
+
+    def _create_comment(self, path: str, body: dict):
+        card_id = path.split("/")[1]
+        self._next_comment_id += 1
+        comment = {
+            "id": self._next_comment_id, "text": body["text"],
+            "createdBy": {"fullName": "Smoke Bot", "emailAddress": "smoke-bot@example.invalid",
+                          "id": "U1"},
+            "createdOn": "2026-07-23T00:00:00Z",
+        }
+        self.comments.setdefault(card_id, []).append(comment)
+        return _Response(comment)
+
+    def _update_comment(self, path: str, body: dict):
+        card_id, comment_id = path.split("/")[1], int(path.split("/")[3])
+        for comment in self.comments.get(card_id, []):
+            if comment["id"] == comment_id:
+                comment["text"] = body["text"]
+                comment["lastModified"] = "2026-07-23T00:05:00Z"
+        return _Response({})
+
+    def _delete_comment(self, path: str):
+        if self.ignore_comment_delete:
+            return _Response(None)
+        card_id, comment_id = path.split("/")[1], int(path.split("/")[3])
+        self.comments[card_id] = [c for c in self.comments.get(card_id, []) if c["id"] != comment_id]
+        return _Response(None)
 
     def _create(self, url: str, body: dict):
         if self.fail_child_create_body and body.get("customId", "").startswith("SMOKE-C"):
@@ -253,11 +297,15 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
         ("DELETE", "card/dependency"),    # dependency delete
         ("PATCH", "card/S1"),             # description write round-trip
         ("PATCH", "card/S1"),             # description length probe
+        ("POST", "card/S1/comment"),      # comment create
+        ("PUT", "card/S1/comment/1"),     # comment edit
+        ("DELETE", "card/S1/comment/1"),  # comment delete (speculative shape)
         ("PATCH", "card/S1"),             # deliberate stale-version probe
         ("DELETE", "card/S2"),            # cleanup child
         ("DELETE", "card/S1"),            # cleanup parent
     ]
     assert set(world.cards) == {"P1"}  # only the pre-existing card survives
+    assert world.comments.get("S1", []) == []  # the smoke comment was actually deleted
     out = capsys.readouterr().out
     assert "FAIL" not in out
     assert "wrapped" in out            # single-card GET shape reported
@@ -269,6 +317,10 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
     assert "Dependency already exists" in out
     assert "description write round-trip" in out
     assert "description length probe" in out
+    assert "comment create returns a usable id" in out
+    assert "comment list readback finds the created comment" in out
+    assert "comment edit round-trip" in out
+    assert "comment delete + readback gone" in out
 
 
 def test_unexpected_duplicate_create_failure_fails_the_run(tenant_env, capsys):
@@ -324,6 +376,20 @@ def test_tag_add_never_visible_still_summarizes_and_cleans_up(tenant_env, capsys
     assert "FAIL" in out
     assert "Traceback" not in out
     assert set(world.cards) == {"P1"}  # cleanup still ran
+
+
+def test_comment_not_actually_deleted_is_reported_as_failure(tenant_env, capsys):
+    """agileplace_comments.delete_comment's DELETE shape is speculative (issue #66 design doc --
+    the web UI never exposed comment deletion). A 2xx response is not proof it worked, so a server
+    that silently ignores the delete must turn the readback check into a FAIL, exactly like the
+    externalLink-add and tag-add checks above -- never a false PASS that would hide a wrong shape."""
+    tenant_env(FakeTenant(ignore_comment_delete=True))
+
+    assert smoke.main([]) == 1
+
+    out = capsys.readouterr().out
+    assert "FAIL" in out
+    assert "comment delete + readback gone" in out
 
 
 def test_versionless_create_response_is_informational_not_a_failure(tenant_env, capsys):
