@@ -1,6 +1,6 @@
 """Regression-budget invariants for issue #70 (card coherence: contested-card exclusion +
-lane-conflict poisoning) and issue #75 (widened contested_cards() customId fencing +
-poisoned-child/poisoned-dependency guards).
+lane-conflict poisoning), issue #75 (widened contested_cards() customId fencing +
+poisoned-child/poisoned-dependency guards), and issue #66 (per-issue comment sync).
 
 sync.py was already 828 lines before issue #70's first commit -- over the repo's 800-line hard
 cap. The design deliberately extracted the two genuinely-new pieces of logic (contested_cards(),
@@ -130,11 +130,40 @@ line. #82 deliberately skipped this exact assertion because it would have failed
 debt that predated its own commits; #84 is the follow-up that clears that debt, so the assertion no
 longer fails against anything but genuinely new growth.
 
+Issue #66 (per-issue comment sync between GitHub issue comments and AgilePlace card comments)
+re-anchors PRE_CHANGE_SYNC_LINES a third time, from 726 to 750: three merges (#78 richtext-fidelity,
+#81/#79's own fix-up, #88/#84's board_layout split) landed between #79 and #66 and grew sync.py from
+726 to 750 lines by the time #66 started -- none of that growth is #66's to own. #66's own sync.py
+wiring is a single `from comment_sync import sync_comments` plus one `sync_comments(...)` call after
+`sync_description(...)` in the per-issue loop, ~2 lines, landing at 752 -- comfortably inside the
+750 + WIRING_BUDGET_LINES=40 ceiling.
+
+Unlike every prior issue here, #66 does not touch agileplace.py at all: its AgilePlace comment I/O
+(list/create/update/delete comment) lives entirely in a new module, agileplace_comments.py, which
+imports agileplace.py's request/mutate helpers but adds no lines to agileplace.py itself. The
+existing PRE_CHANGE_AGILEPLACE_LINES/AGILEPLACE_WIRING_BUDGET_LINES tests already pass trivially
+(0 lines of growth clears any wiring budget), but a pure line-count budget cannot distinguish "no
+change" from "deleted N lines, added N back elsewhere" -- so test_agileplace_py_is_byte_for_byte_
+unchanged_by_comment_sync pins the stronger invariant directly: agileplace.py's sha256 must match
+the hash measured at task 8's start, after confirming via `git diff --stat origin/main --
+agileplace.py` that issue #66's own seven prior commits produced no diff. PRE_CHANGE_AGILEPLACE_LINES
+itself needs no re-anchor -- it already reads 672, exactly matching agileplace.py's current size.
+
+#66 also re-anchors PRE_CHANGE_TEST_COUNT a third time, from 1167 to 1198 -- the full suite's own
+passing count measured at origin/main (e62a5b8, the tip of #84), immediately before issue #66's
+first commit. Unlike #84's generous-slack bump, this uses the exact pre-existing count, mirroring
+#82's own convention: the floor should reflect every test that existed before this change, not a
+stale figure. NEW_TEST_FILES gains #66's four wholly new test files -- tests/test_agileplace_
+comments.py, tests/test_comment_sync.py, tests/test_ghkit_comments.py, and tests/test_sync_
+comments_call_site.py -- for the same reason every prior issue here tracked its own: a passed_count
+floor alone can't notice one of these silently leaving discovery.
+
 Run: pytest -q
 """
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
 import subprocess
 import sys
@@ -142,10 +171,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Baseline re-anchored to sync.py's own size immediately after issue #79's metadata_sync extraction
-# (measured via `wc -l sync.py` post-move) -- see module docstring for why #79 re-pins this down
-# rather than budgeting against the pre-#79 908-line figure.
-PRE_CHANGE_SYNC_LINES = 726
+# Re-anchored for issue #66 (comment sync) from #79's 726 to 750 -- sync.py's own size at
+# origin/main (e62a5b8, the tip of #84) immediately before issue #66's first commit, measured via
+# `git show origin/main:sync.py | wc -l`. Three merges (#78, #81, #83/#79's fix-up, #88/#84) landed
+# between #79 and #66 and grew sync.py from 726 to 750 lines -- none of that growth is #66's to own,
+# so re-deriving from #79's original 726 would blame #66 for line growth #66 didn't cause. See
+# module docstring's issue #66 section.
+PRE_CHANGE_SYNC_LINES = 750
 
 # Wiring-only budget for issue #75's own addition: widen contested_cards()'s call site to also
 # fence pure-customId collisions, a poisoned-child guard in the step-3 child-connection loop, a
@@ -180,6 +212,17 @@ AGILEPLACE_WIRING_BUDGET_LINES = 70
 # this exact check would have failed against).
 AGILEPLACE_HARD_CAP_LINES = 800
 
+# Issue #66 (comment sync) is the first issue whose own design explicitly commits to touching
+# agileplace.py *not at all*: its AgilePlace comment I/O lives entirely in the new
+# agileplace_comments.py module, which imports agileplace (for its request/mutate helpers) but adds
+# zero lines to agileplace.py itself. A line-count budget alone can't pin that -- a change could
+# delete N lines and add N back elsewhere in the file and still clear
+# PRE_CHANGE_AGILEPLACE_LINES + AGILEPLACE_WIRING_BUDGET_LINES undetected. sha256 of agileplace.py's
+# exact bytes, measured immediately before issue #66's task 8 (the file was already confirmed
+# untouched by #66's tasks 1-7 via `git diff --stat origin/main -- agileplace.py` reporting no
+# diff), pins the stronger byte-for-byte invariant the line-count tests above cannot express.
+AGILEPLACE_SHA256 = "c3fb07615550c503fdb7766864b394d1c79ca32f9473eeb2b1b33ca14a05f95e"
+
 # Names issue #79 moved out of sync.py into metadata_sync.py. sync_metadata/sync_dates are the two
 # public entry points (still reachable as `sync.sync_metadata` via sync.py's own import -- hence the
 # explicit no-stale-import check); the rest are metadata_sync-private and would fail an import
@@ -202,16 +245,23 @@ MOVED_TO_METADATA_SYNC = (
 # agileplace to board_layout) -- comfortably below the ~1194 tests collected once that rewire lands,
 # with the same generous slack every prior bump here leaves. See module docstring's issue #84
 # section.
-PRE_CHANGE_TEST_COUNT = 1167
+#
+# Re-bumped again from 1167 to 1198 for issue #66 (comment sync) -- the full suite's own passing
+# count measured at origin/main (e62a5b8, the tip of #84), immediately before issue #66's first
+# commit. Uses the exact pre-existing count rather than leaving slack, the same convention issue
+# #82 used for its own bump (988): the floor should reflect every test that existed before this
+# change, not a stale figure. See module docstring's issue #66 section.
+PRE_CHANGE_TEST_COUNT = 1198
 
 # Issue #70's four new test files, plus issue #82's three (test_card_types.py,
 # test_sync_card_types.py, test_ghkit_issue_types.py), plus issue #84's three
-# (test_board_layout.py, test_board_layout_call_sites.py, test_board_layout_import_boundary.py).
-# Invariant B's companion check asserts each is still collected (deleting/renaming/emptying one is
-# exactly the silent-loss a >= baseline pass-count floor misses) -- without these three, the
-# passed_count >= PRE_CHANGE_TEST_COUNT floor alone would be the only safety net for them, and its
-# slack is smaller than either file's own test count, so one of them silently losing its tests
-# would not be caught.
+# (test_board_layout.py, test_board_layout_call_sites.py, test_board_layout_import_boundary.py),
+# plus issue #66's four (test_agileplace_comments.py, test_comment_sync.py, test_ghkit_comments.py,
+# test_sync_comments_call_site.py). Invariant B's companion check asserts each is still collected
+# (deleting/renaming/emptying one is exactly the silent-loss a >= baseline pass-count floor misses)
+# -- without these files listed, the passed_count >= PRE_CHANGE_TEST_COUNT floor alone would be the
+# only safety net for them, and its slack is smaller than several of these files' own test counts,
+# so one of them silently losing its tests would not be caught.
 NEW_TEST_FILES = (
     "tests/test_card_coherence.py",
     "tests/test_sync_contested_cards.py",
@@ -223,6 +273,10 @@ NEW_TEST_FILES = (
     "tests/test_board_layout.py",
     "tests/test_board_layout_call_sites.py",
     "tests/test_board_layout_import_boundary.py",
+    "tests/test_agileplace_comments.py",
+    "tests/test_comment_sync.py",
+    "tests/test_ghkit_comments.py",
+    "tests/test_sync_comments_call_site.py",
 )
 
 
@@ -283,6 +337,20 @@ def test_agileplace_py_never_exceeds_repo_hard_cap():
         f"agileplace.py has grown to {line_count} lines, past the repo's own "
         f"{AGILEPLACE_HARD_CAP_LINES}-line file-organization hard cap. Extract cohesive logic into "
         "its own module rather than letting agileplace.py keep absorbing it."
+    )
+
+
+def test_agileplace_py_is_byte_for_byte_unchanged_by_comment_sync():
+    """Issue #66 (comment sync) deliberately routes all AgilePlace comment I/O through a new
+    agileplace_comments.py module rather than adding to agileplace.py -- see module docstring's
+    issue #66 section. A line-count budget can't catch a change that deletes and re-adds the same
+    number of lines elsewhere in the file, so this pins the exact bytes instead."""
+    actual = hashlib.sha256(Path(REPO_ROOT / "agileplace.py").read_bytes()).hexdigest()
+
+    assert actual == AGILEPLACE_SHA256, (
+        "agileplace.py's contents changed, but issue #66's design commits to adding comment I/O "
+        "entirely inside the new agileplace_comments.py module, touching agileplace.py not at "
+        f"all. sha256 was {actual!r}, expected {AGILEPLACE_SHA256!r}."
     )
 
 
