@@ -344,8 +344,12 @@ def test_agileplace_py_is_byte_for_byte_unchanged_by_comment_sync():
     """Issue #66 (comment sync) deliberately routes all AgilePlace comment I/O through a new
     agileplace_comments.py module rather than adding to agileplace.py -- see module docstring's
     issue #66 section. A line-count budget can't catch a change that deletes and re-adds the same
-    number of lines elsewhere in the file, so this pins the exact bytes instead."""
-    actual = hashlib.sha256(Path(REPO_ROOT / "agileplace.py").read_bytes()).hexdigest()
+    number of lines elsewhere in the file, so this pins the exact bytes instead. Byte-for-byte
+    modulo checkout line-ending normalization: git autocrlf checks the file out with CRLF on
+    Windows, which would flip the raw-bytes hash even though git holds the file unchanged, so CRLF
+    is folded to LF before hashing and AGILEPLACE_SHA256 is the LF-form hash."""
+    actual = hashlib.sha256(
+        Path(REPO_ROOT / "agileplace.py").read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
     assert actual == AGILEPLACE_SHA256, (
         "agileplace.py's contents changed, but issue #66's design commits to adding comment I/O "

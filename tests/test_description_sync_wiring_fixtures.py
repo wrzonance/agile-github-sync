@@ -88,8 +88,12 @@ def test_agileplace_py_is_byte_for_byte_unchanged_by_issue_66():
     doc decision: 'zero lines added to agileplace.py'). Confirmed via `git diff` immediately before
     this test was added; pinned here as a content hash so a later change that reaches back into
     agileplace.py to inline comment support gets caught at the repo boundary, not just noticed in
-    review."""
-    content = (REPO_ROOT / "agileplace.py").read_bytes()
+    review.
+
+    Byte-for-byte modulo checkout line-ending normalization: git autocrlf checks the file out with
+    CRLF on Windows, which would change the raw-bytes hash even though the file is unchanged in git,
+    so CRLF is folded to LF before hashing and the pinned hash is the LF form."""
+    content = (REPO_ROOT / "agileplace.py").read_bytes().replace(b"\r\n", b"\n")
     digest = hashlib.sha256(content).hexdigest()
     assert digest == AGILEPLACE_PY_SHA256, (
         f"agileplace.py changed (sha256 {digest}, expected {AGILEPLACE_PY_SHA256}) -- comment-sync "
