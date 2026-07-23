@@ -7,6 +7,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -20,7 +21,32 @@ from description_sync import (  # noqa: E402
     _canonicalize_gh_body,
     _truncate_for_agileplace,
     resolve_description,
+    sync_description,
 )
+
+ISSUE_URL = "https://github.com/acme/repo/issues/1"
+
+
+def _issue(body="", url=ISSUE_URL, number=1, title="[T1] widget"):
+    return {"number": number, "title": title, "url": url, "body": body}
+
+
+def _card(card_id="C1"):
+    return {"id": card_id}
+
+
+def _cfg():
+    return {"ap_description_max_length": 20000}
+
+
+class _Queue:
+    """Records every queue(card, ops, note) call for assertions -- same spy shape as
+    test_sync_dates.py's _Queue."""
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, card, ops, note):
+        self.calls.append((card, ops, note))
 
 
 def _assert_invariant(base: str | None, result: DescriptionResolution) -> None:
@@ -231,3 +257,103 @@ def test_truncate_large_body_completes_in_low_single_digit_seconds():
     assert was_truncated is True
     assert len(html) <= 5000
     assert elapsed < 5.0, f"truncation took {elapsed:.2f}s -- the O(n^2) regression may have returned"
+
+
+# =====================================================================================
+# sync_description -- wiring entry point + coupled base-advance gate (issue #65 task 4).
+#
+# Mirrors sync_dates' merge-base contract (test_sync_dates.py) exactly: desc_base and
+# desc_ap_written only ever advance TOGETHER, and only when apply is True AND the GitHub-side
+# write is confirmed (gh_write_ok -- trivially True whenever no GitHub write was needed at all).
+# The AgilePlace-side queue write is unconditional -- it fires whenever write_ap is True
+# regardless of apply/gh_write_ok, and that firing must never leak into the base-advance gate.
+# =====================================================================================
+
+def test_sync_description_dry_run_does_not_advance_base_despite_queued_ap_write():
+    # gh-changed-only (seeding): write_ap fires and queue is called unconditionally even though
+    # apply=False -- but the merge base must NOT advance on a dry run.
+    issue = _issue(body="Hello from GitHub")
+    card = _card()
+    state = {ISSUE_URL: {}}
+    queue = _Queue()
+    with patch("description_sync.agileplace.card_description", return_value=""), \
+         patch("description_sync.agileplace.op_description", return_value="OP") as op_mock, \
+         patch("description_sync.ghkit.edit_issue_body") as edit_mock:
+        sync_description(_cfg(), False, issue, card, state, queue)
+    op_mock.assert_called_once()
+    edit_mock.assert_not_called()
+    assert len(queue.calls) == 1
+    assert "desc_base" not in state[ISSUE_URL]
+    assert "desc_ap_written" not in state[ISSUE_URL]
+
+
+def test_sync_description_failed_gh_write_blocks_base_advance():
+    # ap-changed-only (seeding): write_gh fires but the GitHub write is reported as failed/skipped
+    # -- neither field may advance, even though apply is True.
+    issue = _issue(body="")
+    card = _card()
+    state = {ISSUE_URL: {}}
+    queue = _Queue()
+    with patch("description_sync.agileplace.card_description", return_value="Hello from AgilePlace"), \
+         patch("description_sync.agileplace.op_description") as op_mock, \
+         patch("description_sync.ghkit.edit_issue_body", return_value=False) as edit_mock:
+        sync_description(_cfg(), True, issue, card, state, queue)
+    edit_mock.assert_called_once_with(_cfg(), True, issue["number"], "Hello from AgilePlace")
+    op_mock.assert_not_called()
+    assert queue.calls == []
+    assert "desc_base" not in state[ISSUE_URL]
+    assert "desc_ap_written" not in state[ISSUE_URL]
+
+
+def test_sync_description_conflict_makes_no_writes_and_no_advance():
+    issue = _issue(body="GH text")
+    card = _card()
+    state = {ISSUE_URL: {}}
+    queue = _Queue()
+    with patch("description_sync.agileplace.card_description", return_value="AP text"), \
+         patch("description_sync.agileplace.op_description") as op_mock, \
+         patch("description_sync.ghkit.edit_issue_body") as edit_mock:
+        sync_description(_cfg(), True, issue, card, state, queue)
+    edit_mock.assert_not_called()
+    op_mock.assert_not_called()
+    assert queue.calls == []
+    assert "desc_base" not in state[ISSUE_URL]
+    assert "desc_ap_written" not in state[ISSUE_URL]
+
+
+def test_sync_description_confirmed_gh_write_advances_both_fields_together():
+    # ap-changed-only, confirmed GitHub write -> both fields advance to the SAME merged value
+    # (write_ap never fired here, so desc_ap_written simply reflects the unchanged AP canonical).
+    issue = _issue(body="")
+    card = _card()
+    state = {ISSUE_URL: {}}
+    queue = _Queue()
+    with patch("description_sync.agileplace.card_description", return_value="Hello from AgilePlace"), \
+         patch("description_sync.agileplace.op_description") as op_mock, \
+         patch("description_sync.ghkit.edit_issue_body", return_value=True) as edit_mock:
+        sync_description(_cfg(), True, issue, card, state, queue)
+    edit_mock.assert_called_once_with(_cfg(), True, issue["number"], "Hello from AgilePlace")
+    op_mock.assert_not_called()
+    assert queue.calls == []
+    assert state[ISSUE_URL]["desc_base"] == "Hello from AgilePlace"
+    assert state[ISSUE_URL]["desc_ap_written"] == "Hello from AgilePlace"
+
+
+def test_sync_description_confirmed_ap_write_advances_both_fields_together():
+    # gh-changed-only (seeding), no GitHub write needed at all -> gh_write_ok is trivially True,
+    # so both fields advance even though the only write that happened was the queued AP op.
+    issue = _issue(body="Hello from GitHub")
+    card = _card()
+    state = {ISSUE_URL: {}}
+    queue = _Queue()
+    written_html = richtext.markdown_to_leankit_html("Hello from GitHub")
+    expected_ap_written = _canonicalize_ap_description(written_html)
+    with patch("description_sync.agileplace.card_description", return_value=""), \
+         patch("description_sync.agileplace.op_description", return_value="OP") as op_mock, \
+         patch("description_sync.ghkit.edit_issue_body") as edit_mock:
+        sync_description(_cfg(), True, issue, card, state, queue)
+    edit_mock.assert_not_called()
+    op_mock.assert_called_once_with(written_html)
+    assert queue.calls == [(card, ["OP"], "description")]
+    assert state[ISSUE_URL]["desc_base"] == "Hello from GitHub"
+    assert state[ISSUE_URL]["desc_ap_written"] == expected_ap_written

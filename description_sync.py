@@ -17,9 +17,13 @@ nothing to warn about and nothing left to write.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import NamedTuple
 
+import agileplace
+import ghkit
 import richtext
+from stages import issue_custom_id
 
 # Appended to a truncated AgilePlace description so a reader knows the full text lives on GitHub.
 # Exact text pinned by the issue #65 design doc -- config.py's DEFAULT_AP_DESCRIPTION_MAX_LENGTH
@@ -157,3 +161,49 @@ def _truncate_for_agileplace(markdown: str, max_length: int) -> tuple[str, bool]
 
     final_html = richtext.markdown_to_leankit_html(markdown[:best_cut]) + TRUNCATION_MARKER
     return final_html, True
+
+
+def sync_description(cfg: dict, apply: bool, issue: dict, card: dict, issues_state: dict,
+                     queue: Callable) -> None:
+    """Wire resolve_description's pure merge into GitHub/AgilePlace writes, with a coupled
+    base-advance gate mirroring sync_dates' (issue #6) merge-base contract exactly: `desc_base` and
+    `desc_ap_written` only ever advance TOGETHER, and only when `apply` is True AND the GitHub-side
+    write is confirmed (`gh_write_ok`). `gh_write_ok` defaults to True whenever no GitHub write was
+    needed at all (write_gh is False) -- there is nothing to have failed, same as sync_dates.
+
+    The AgilePlace-side queue write is unconditional, also like sync_dates: it fires whenever
+    write_ap is True regardless of apply or gh_write_ok, and its eventual success/failure at PATCH-
+    flush time is not fed back into this gate -- a poisoned card's flush skip already holds the
+    whole run's state per sync.py's own contract (see sync.py's "poisoned card(s) this run" branch).
+    A write that is skipped, a dry run, or a failed GitHub write must never advance either field --
+    and the two fields never advance independently of one another.
+    """
+    url = issue["url"]
+    prev = issues_state[url]
+    key = issue_custom_id(issue)
+
+    gh_canonical = _canonicalize_gh_body(issue.get("body"))
+    ap_canonical = _canonicalize_ap_description(agileplace.card_description(cfg, card))
+    result = resolve_description(prev.get("desc_base"), prev.get("desc_ap_written"),
+                                 gh_canonical, ap_canonical)
+
+    if result.conflict:
+        print(f"WARN  [{key}] {result.warning}")
+        return
+
+    gh_write_ok = True
+    if result.write_gh:
+        gh_write_ok = ghkit.edit_issue_body(cfg, apply, issue["number"], result.merged)
+
+    new_ap_written = ap_canonical
+    if result.write_ap:
+        html, _ = _truncate_for_agileplace(result.merged, cfg["ap_description_max_length"])
+        queue(card, [agileplace.op_description(html)], "description")
+        new_ap_written = _canonicalize_ap_description(html)
+
+    if result.write_gh or result.write_ap:
+        print(f"desc  [{key}] gh={result.write_gh} ap={result.write_ap}")
+
+    if apply and gh_write_ok:
+        prev["desc_base"] = result.merged
+        prev["desc_ap_written"] = new_ap_written
