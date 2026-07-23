@@ -39,6 +39,8 @@ def _card(number: int, custom_id: str, *, url: str | None = None,
         "laneId": None,
         "blockedStatus": {"isBlocked": False, "reason": ""},
         "childCards": [{"id": child_id} for child_id in children],
+        # issue #65: keeps agileplace.card_description() on its zero-I/O path.
+        "description": "",
     }
     return {**card, **({"externalLink": {"url": url}} if url else {})}
 
@@ -52,6 +54,7 @@ def _config(tmp_path: Path) -> dict:
         "label_sync_ignore": frozenset(),
         "stage_lane_map": {},
         "gh_project": {},
+        "ap_description_max_length": 20000,  # issue #65: sync_description reads this unconditionally
     }
 
 

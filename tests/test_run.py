@@ -119,6 +119,10 @@ class FixtureWorld:
             "plannedFinish": None,
             "blockedStatus": {"isBlocked": False, "reason": ""},
             "childCards": [],
+            # issue #65: keeps agileplace.card_description() on its zero-I/O path -- without this
+            # key it falls back to the real (unmocked) GET card/{id}, which this fixture's own
+            # open_url dispatch doesn't expect and raises "unexpected AgilePlace request".
+            "description": "",
         }
 
     def run_process(self, argv, **_kwargs):
@@ -200,6 +204,7 @@ class FixtureWorld:
                     "plannedStart": None,
                     "plannedFinish": None,
                     "blockedStatus": {"isBlocked": False, "reason": ""},
+                    "description": "",  # issue #65: same zero-I/O contract as epic_card above
                 },
             })
         if method in {"POST", "DELETE"} and path == "card/connections":
@@ -411,6 +416,7 @@ class _IntakeFixtureWorld(FixtureWorld):
             "plannedFinish": None,
             "blockedStatus": {"isBlocked": False, "reason": ""},
             "childCards": [],
+            "description": "",  # issue #65: same zero-I/O contract as FixtureWorld.epic_card
         }
 
     def run_process(self, argv, **kwargs):

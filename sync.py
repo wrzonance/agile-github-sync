@@ -28,6 +28,7 @@ import vetting_latch
 from card_coherence import (contested_cards, fence_run_indices, filter_poisoned_edges,
                             laneid_op_value, lane_conflict, poisoned_card_ids, same_card)
 from config import STATE_FILE, env_config
+from description_sync import sync_description
 from metadata_sync import sync_dates, sync_metadata
 from stages import (epic_key_for_task, is_retired_issue, issue_custom_id,
                     issue_stage, normalize_status, title_key)
@@ -679,6 +680,7 @@ def main() -> None:
         sync_metadata(cfg, apply, issue, card, cfg["label_sync_ignore"], issues_state, queue)
         if field_meta:
             sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue)
+        sync_description(cfg, apply, issue, card, issues_state, queue)
 
     # 3) parent/child connections (see sync_child_connections for the full contract).
     poisoned = poisoned_card_ids(card_ops)

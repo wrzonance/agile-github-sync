@@ -84,6 +84,8 @@ def _card(card_id: str, custom_id: str, urls: list[str], *, lane_id: str = "L-EL
         "tags": [],
         "plannedStart": None,
         "plannedFinish": None,
+        # issue #65: keeps agileplace.card_description() on its zero-I/O path.
+        "description": "",
     }
 
 
@@ -96,6 +98,7 @@ def _cfg(tmp_path) -> dict:
         "label_sync_ignore": frozenset(),
         "stage_lane_map": {},
         "gh_project": {},
+        "ap_description_max_length": 20000,  # issue #65: sync_description reads this unconditionally
     }
 
 

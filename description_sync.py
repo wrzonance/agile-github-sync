@@ -177,13 +177,22 @@ def sync_description(cfg: dict, apply: bool, issue: dict, card: dict, issues_sta
     whole run's state per sync.py's own contract (see sync.py's "poisoned card(s) this run" branch).
     A write that is skipped, a dry run, or a failed GitHub write must never advance either field --
     and the two fields never advance independently of one another.
+
+    A dry-run-only planned card (``card["_planOnly"]``) exists only as a synthetic snapshot for
+    continuing this one dry run -- it has no server-side identity yet, so it never carries a
+    'description' key. agileplace.card_description()'s lazy get_card() fallback would otherwise
+    issue a live GET for an id that was never created on the server. Same convention sync.py's
+    dependency-sync loop already uses for plan-only cards ("a fresh card has no server-side
+    dependencies; never read a plan-only id") -- a fresh card likewise has no server-side
+    description yet, so the AgilePlace side is treated as "" without any network read.
     """
     url = issue["url"]
     prev = issues_state[url]
     key = issue_custom_id(issue)
 
     gh_canonical = _canonicalize_gh_body(issue.get("body"))
-    ap_canonical = _canonicalize_ap_description(agileplace.card_description(cfg, card))
+    ap_description = "" if card.get("_planOnly") else agileplace.card_description(cfg, card)
+    ap_canonical = _canonicalize_ap_description(ap_description)
     result = resolve_description(prev.get("desc_base"), prev.get("desc_ap_written"),
                                  gh_canonical, ap_canonical)
 

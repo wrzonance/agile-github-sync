@@ -357,3 +357,27 @@ def test_sync_description_confirmed_ap_write_advances_both_fields_together():
     assert queue.calls == [(card, ["OP"], "description")]
     assert state[ISSUE_URL]["desc_base"] == "Hello from GitHub"
     assert state[ISSUE_URL]["desc_ap_written"] == expected_ap_written
+
+
+def test_sync_description_never_reads_a_plan_only_dry_run_card():
+    # Discovered running the wiring end-to-end (tests/test_run.py's dry-run path, issue #65 task
+    # 5/7): a dry-run-only card carries agileplace.create_card's synthetic "_planOnly" marker and
+    # has no server-side identity yet, so it never has a 'description' key. Without a guard,
+    # agileplace.card_description()'s lazy get_card() fallback fires a live GET for an id that was
+    # never created on the server -- exactly the network read sync.py's own dependency-sync loop
+    # already refuses for plan-only cards ("a fresh card has no server-side dependencies; never
+    # read a plan-only id"). sync_description must apply that same convention: treat a plan-only
+    # card's AgilePlace-side description as "" without calling agileplace.card_description() at all.
+    issue = _issue(body="Hello from GitHub")
+    card = {**_card(), "_planOnly": True}
+    state = {ISSUE_URL: {}}
+    queue = _Queue()
+    written_html = richtext.markdown_to_leankit_html("Hello from GitHub")
+    with patch("description_sync.agileplace.card_description") as card_description_mock, \
+         patch("description_sync.agileplace.op_description", return_value="OP") as op_mock, \
+         patch("description_sync.ghkit.edit_issue_body") as edit_mock:
+        sync_description(_cfg(), False, issue, card, state, queue)
+    card_description_mock.assert_not_called()
+    edit_mock.assert_not_called()
+    op_mock.assert_called_once_with(written_html)
+    assert queue.calls == [(card, ["OP"], "description")]
