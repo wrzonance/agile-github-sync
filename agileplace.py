@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from types import MappingProxyType
+from typing import NamedTuple
 
 from stages import STAGES, STAGE_CARD_STATUS, lane_matches_stage, title_contains_phrase
 
@@ -123,8 +124,48 @@ def _lanes_with_ids(lanes: list) -> list[dict]:
     return valid
 
 
-def board_layout(cfg: dict) -> list:
-    return _lanes_with_ids(api(cfg, "GET", f"board/{cfg['board_id']}").get("lanes", []))
+class BoardLayout(NamedTuple):
+    """Return-shape of one board GET: leaf-and-parent lanes plus the board's configured card types,
+    each already structurally validated (malformed entries filtered, one WARN apiece)."""
+    lanes: list
+    card_types: list
+
+
+def _card_types_with_ids(card_types: list) -> list[dict]:
+    """Structural validation mirroring _lanes_with_ids: malformed card-type entries are skipped with
+    one WARN each, never raised. Eligibility (isCardType) and name resolution are card_types.py's
+    semantic job -- this only guarantees every entry handed onward is a dict with a usable id."""
+    valid = []
+    for card_type in card_types:
+        if not isinstance(card_type, dict):
+            print(f"WARN  card type <{type(card_type).__name__}> is not an object -- "
+                  f"skipping malformed card type")
+            continue
+        title = card_type.get("title")
+        if title is not None and not isinstance(title, str):
+            print(f"WARN  card type id {card_type.get('id', '<unknown>')!r} has non-string title "
+                  f"({type(title).__name__}) -- skipping malformed card type")
+            continue
+        display_title = (title or "").strip() or "<untitled>"
+        if "id" not in card_type or card_type["id"] is None:
+            print(f"WARN  card type '{display_title}' has no id -- skipping malformed card type")
+            continue
+        try:
+            hash(card_type["id"])
+        except TypeError:
+            print(f"WARN  card type '{display_title}' has unhashable id "
+                  f"({type(card_type['id']).__name__}) -- skipping malformed card type")
+            continue
+        valid.append(card_type)
+    return valid
+
+
+def board_layout(cfg: dict) -> BoardLayout:
+    response = api(cfg, "GET", f"board/{cfg['board_id']}")
+    return BoardLayout(
+        lanes=_lanes_with_ids(response.get("lanes", [])),
+        card_types=_card_types_with_ids(response.get("cardTypes", [])),
+    )
 
 
 def _ancestor_titles(lane: dict, by_id: dict) -> list[str]:
@@ -627,6 +668,9 @@ def _card_value_for_patch_path(card: dict, path: str):
         return card_is_blocked(card)
     if root == "blockReason":
         return card_block_reason(card)
+    if root == "typeId":
+        card_type = card.get("type")
+        return card_type.get("id") if isinstance(card_type, dict) else None
     raise ValueError(f"unsupported JSON-Patch path {path!r}")
 
 
@@ -679,16 +723,21 @@ def _version_headers(card: dict) -> dict:
 
 
 def _planned_card_snapshot(title: str, custom_id: str, external_url: str,
-                           lane_id: str | None) -> Mapping[str, object]:
+                           lane_id: str | None, type_id: str | None = None,
+                           type_title: str | None = None) -> Mapping[str, object]:
     """Read-only card defaults for continuing one dry run after a planned creation.
 
     The synthetic identity is deterministic for this plan but has meaning only inside the current
     dry run. It is never a server identity and callers must not persist it. Keeping every value in
     the mapping immutable makes the snapshot itself immutable without copying caller-owned inputs.
+
+    When ``type_id`` is supplied, the snapshot carries a nested ``type`` object (matching the real
+    card response's shape) so a same-pass card-type sync reads current type back via card_type_title
+    and sees it already matches the derived type -- no double-queued typeId patch.
     """
     identity_source = f"{custom_id}\0{external_url}".encode("utf-8")
     plan_id = PLANNED_CARD_ID_PREFIX + hashlib.sha256(identity_source).hexdigest()[:16]
-    return MappingProxyType({
+    snapshot = {
         "id": plan_id,
         "title": title,
         "customId": custom_id,
@@ -697,20 +746,30 @@ def _planned_card_snapshot(title: str, custom_id: str, external_url: str,
         "plannedFinish": None,
         "_planOnly": True,
         "_planOnlyExternalUrl": external_url,
-    })
+    }
+    if type_id:
+        snapshot["type"] = {"id": type_id, "title": type_title}
+    return MappingProxyType(snapshot)
 
 
 def create_card(cfg: dict, apply: bool, title: str, custom_id: str, external_url: str,
-                lane_id: str | None) -> Mapping[str, object]:
-    """Create a card, or return a plan-only read-only snapshot when ``apply`` is false."""
+                lane_id: str | None, type_id: str | None = None,
+                type_title: str | None = None) -> Mapping[str, object]:
+    """Create a card, or return a plan-only read-only snapshot when ``apply`` is false.
+
+    ``type_id`` (when truthy) is sent as the card's typeId; ``type_title`` never reaches the API --
+    it only feeds the dry-run snapshot's nested type.title for same-pass read-back.
+    """
     body = {"boardId": cfg["board_id"], "title": title, "customId": custom_id}
     if lane_id:
         body["laneId"] = lane_id
     if external_url:
         body["externalLink"] = {"label": f"GitHub {custom_id}", "url": external_url}
+    if type_id:
+        body["typeId"] = type_id
     if not apply:
         mutate(cfg, False, "POST", "card", body=body, note=f"create card {custom_id}")
-        return _planned_card_snapshot(title, custom_id, external_url, lane_id)
+        return _planned_card_snapshot(title, custom_id, external_url, lane_id, type_id, type_title)
     return mutate(cfg, True, "POST", "card", body=body, note=f"create card {custom_id}")
 
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import agileplace
+import card_types
 import ghkit
 from stages import issue_custom_id, title_key
 
@@ -292,6 +293,25 @@ def _card_for_link_write(cfg: dict, apply: bool, card: dict) -> dict:
     return agileplace.get_card(cfg, card["id"])
 
 
+def _reverse_seed_create(cfg: dict, apply: bool, card: dict,
+                         org_types: frozenset[str] | None) -> dict | None:
+    """Create the GitHub issue for one non-resumed candidate, reverse-seeding its native issue type
+    and/or label from the card's own AgilePlace card type (card_types.reverse_seed_for_card_type).
+    The native type only ever reaches ghkit.create_issue once card_types.validate_reverse_issue_type
+    has confirmed it against `org_types` (None -- probe failed/skipped/dry-run -- always falls back
+    to typeless, never raises). The seed label (if any) is applied via ghkit.edit_label, but only
+    after a successful create (`issue` is not None) -- a dry-run "would create" plan applies no
+    label. Returns whatever ghkit.create_issue returns (None for a dry-run plan, or the created
+    {"number", "url"})."""
+    seed = card_types.reverse_seed_for_card_type(card_types.card_type_title(card))
+    validated_type = card_types.validate_reverse_issue_type(seed.issue_type, org_types)
+    issue = ghkit.create_issue(cfg, apply, card.get("title", ""), _issue_body(card, cfg),
+                               issue_type=validated_type)
+    if issue is not None and seed.label:
+        ghkit.edit_label(cfg, apply, issue["number"], seed.label, add=True)
+    return issue
+
+
 def _collides_with_a_different_card(derived_key: str | None, claimed_keys: set[str]) -> bool:
     """True when this card's PROSPECTIVE writeback customId (`derived_key` -- the `title_key` of its
     title, what `_writeback_key` produces from a `[KEY]` prefix) is already owned by a DIFFERENT
@@ -315,6 +335,19 @@ def promote(cfg: dict, apply: bool, cards: list[dict], lanes: list, stage_map: d
     customId that stalls the next sync's fail-closed identity guard). This ordering is what keeps the
     crash-recovery case from stranding a card whose own issue is now in the `issues` snapshot.
 
+    A card with no resumable issue also gets its AgilePlace card type reverse-seeded onto the new
+    GitHub issue, via _reverse_seed_create -- card_types.reverse_seed_for_card_type yields an
+    optional native issue TYPE and/or label. The native type only ever reaches ghkit.create_issue
+    after card_types.validate_reverse_issue_type confirms it against `org_types`
+    (ghkit.org_issue_types(cfg), fetched AT MOST ONCE per promote() call, lazily, on the first
+    candidate that actually reaches this branch, and ONLY when `apply` is True). A dry run (or a run
+    with no such candidate) never probes org issue types at all: org_types stays None and
+    validate_reverse_issue_type's existing fail-closed fallback naturally creates the issue typeless
+    -- this is what keeps the two existing dry-run transport-call-count tests intact. The seed label
+    (if any) is applied via ghkit.edit_label only after a successful create. A resumed candidate is
+    never reseeded -- marker-resume means the issue (and any type/label it should carry) already
+    exists from whatever run originally created it.
+
     Zero AgilePlace/GitHub calls when there are no candidates. Any create_issue/patch_card failure
     propagates uncaught -- no in-run retry; recovery is the next cycle's marker-based resume scan."""
     candidates = intake_candidates(cards, lanes, stage_map, issues)
@@ -330,6 +363,10 @@ def promote(cfg: dict, apply: bool, cards: list[dict], lanes: list, stage_map: d
     # customIds already owned by an existing issue, plus any reserved by a card created earlier this
     # run -- the collision set the (marker-unaware) guard below checks a fresh candidate's key against.
     claimed_keys = {issue_custom_id(issue) for issue in issues}
+    # Lazily probed at most once, only once apply=True and a not-yet-resumed candidate actually
+    # needs it -- see the docstring above and finding #6 in the design.
+    org_types: frozenset[str] | None = None
+    org_types_probed = False
     for card in candidates:
         marked = _find_marked_issue(card.get("id"), issues_with_bodies)
         derived_key = title_key(card.get("title") or "")
@@ -343,7 +380,10 @@ def promote(cfg: dict, apply: bool, cards: list[dict], lanes: list, stage_map: d
                 continue
             if derived_key is not None:
                 claimed_keys.add(derived_key)
-            issue = ghkit.create_issue(cfg, apply, card.get("title", ""), _issue_body(card, cfg))
+            if apply and not org_types_probed:
+                org_types = ghkit.org_issue_types(cfg)
+                org_types_probed = True
+            issue = _reverse_seed_create(cfg, apply, card, org_types)
             was_resumed = False
         if issue is None:
             print(f"DRY   intake: would create issue for card {card.get('id')} "

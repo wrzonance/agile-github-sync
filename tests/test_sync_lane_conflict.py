@@ -29,6 +29,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import agileplace  # noqa: E402
 import ghkit  # noqa: E402
 import sync  # noqa: E402
 
@@ -99,7 +100,10 @@ def _run_main(tmp_path, monkeypatch, raw_issues, card, *, open_pr_numbers: froze
     stack.enter_context(patch("ghproject.items", return_value={}))
     stack.enter_context(patch("ghproject.field_meta", return_value=None))
     stack.enter_context(patch("ghproject.hydrate_item_dates", return_value={}))
-    stack.enter_context(patch("agileplace.board_layout", return_value=list(lanes)))
+    stack.enter_context(patch(
+        "agileplace.board_layout",
+        return_value=agileplace.BoardLayout(lanes=list(lanes), card_types=[]),
+    ))
     stack.enter_context(patch("agileplace.list_cards", return_value=[card]))
     stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
     create_card = stack.enter_context(patch("agileplace.create_card", return_value={}))

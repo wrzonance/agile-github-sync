@@ -10,9 +10,11 @@ These tests pin the boundary contract:
   (b) apply=True calls ghkit.run exactly once with `gh issue create --title <title> --body-file -`
       and the body passed via the `input=` kwarg (never interpolated into argv, so a body
       containing shell metacharacters or gh flag-like text can never be misparsed).
-  (c) create_issue never passes --type -- API-VALIDATION.md records `gh issue create --type` as
-      non-atomic (creates the issue, THEN fails, so a blind retry double-creates), so the Intake
-      feature must never touch that flag at all.
+  (c) create_issue passes --type only when explicitly given a validated `issue_type` (issue #82,
+      Task 4/9) -- API-VALIDATION.md records `gh issue create --type` as non-atomic (creates the
+      issue, THEN fails, so a blind retry double-creates), so the flag is never guessed at; the
+      original zero-arg call shape covered here still omits it entirely. See
+      tests/test_ghkit_issue_types.py for the issue_type-given coverage.
   (d) apply=True parses the created issue's number and url out of gh's own stdout (a bare URL) and
       returns {"number": int, "url": str}.
   (e) Any failure from run() (CalledProcessError, TimeoutExpired) propagates UNCAUGHT -- no
