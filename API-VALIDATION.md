@@ -395,3 +395,17 @@ available here -- see the module's own docstring). Three things remain genuinely
 
 Run `python smoke.py` against a disposable card on a real tenant to confirm or correct all three,
 then move this section to a "Validated live" one the way the reverse-intake findings above will be.
+
+### Live run 2026-07-23 (partial) -- `POST` id is a JSON string of digits
+
+A real-tenant `python smoke.py` run got through steps 1-14 and reached STEP 15 (create comment).
+The **`POST /io/card/{cardId}/comment` response serializes the new comment `id` as a STRING of
+digits** (observed: `'2491550223'`), not a JSON number. The original `_normalize_ap_comment`
+required `isinstance(id, int)` and so rejected a valid live response with a (misleading)
+"non-numeric id" error. Fixed: `_coerce_comment_id` now accepts an int (never a bool) OR an
+all-ASCII-digit string and coerces to `int`, preserving the ledger's `gh_id`/`ap_id` `int|None`
+contract at the I/O boundary; the list read path funnels through the same normalizer, so it is
+covered too. **Confirmed live:** item 1 (list-shape) reached only far enough to create; items 2
+(author/timestamp field names) and 3 (speculative `DELETE`) plus the `PUT` edit shape remain
+**pending-live-validation** -- the run raised before steps 16-18 executed, so re-run `smoke.py`
+to exercise list-readback / edit / delete now that create succeeds.

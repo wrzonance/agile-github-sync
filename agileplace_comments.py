@@ -150,17 +150,35 @@ def _valid_timestamp_or_none(raw_timestamp) -> str | None:
     return raw_timestamp if comment_sync._parse_timestamp(raw_timestamp) is not None else None
 
 
+def _coerce_comment_id(raw_id) -> int | None:
+    """The comment id as an int, or None when it can't be one. Accepts a real int (never a bool)
+    and -- since the live POST /io/card/{cardId}/comment response serializes the new id as a STRING
+    of digits (e.g. '2491550223', confirmed against a real tenant 2026-07-23; see API-VALIDATION.md)
+    -- an all-ASCII-digit string, coerced to int. Rejects bools, floats, non-digit strings, and
+    None so the ledger's gh_id/ap_id int|None contract (comment_sync struct #1) still holds."""
+    if isinstance(raw_id, bool):
+        return None
+    if isinstance(raw_id, int):
+        return raw_id
+    if isinstance(raw_id, str):
+        text = raw_id.strip()
+        if text.isascii() and text.isdigit():
+            return int(text)
+    return None
+
+
 def _normalize_ap_comment(raw: dict) -> dict:
     """Normalize one raw AgilePlace comment payload into the ApComment shape. Pure -- no I/O.
-    Raises ValueError when `raw` isn't an object or its id is missing/non-numeric (a comment the
+    Raises ValueError when `raw` isn't an object or its id is missing/unusable (a comment the
     sync can't identify is a genuine unrecovered failure, not a value to paper over); every other
     field degrades gracefully instead of raising, since a comment with a missing author or
     unparseable timestamp is still a real comment the sync must be able to mirror/ledger."""
     if not isinstance(raw, dict):
         raise ValueError(f"AgilePlace comment payload is {type(raw).__name__}, expected an object")
-    comment_id = raw.get("id")
-    if not isinstance(comment_id, int) or isinstance(comment_id, bool):
-        raise ValueError(f"AgilePlace comment has a missing/non-numeric id ({comment_id!r})")
+    comment_id = _coerce_comment_id(raw.get("id"))
+    if comment_id is None:
+        raise ValueError(f"AgilePlace comment has an unusable id ({raw.get('id')!r}, "
+                         f"expected an int or a digit string)")
     body = raw.get("text")
     author_name, author_email, author_id = _comment_author_fields(raw.get("createdBy"))
     created = _first_present(raw, "createdOn", "created")

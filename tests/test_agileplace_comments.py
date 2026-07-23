@@ -64,6 +64,26 @@ def test_normalize_ap_comment_accepts_valid_int_id():
     assert result["id"] == 42
 
 
+def test_normalize_ap_comment_accepts_digit_string_id_and_coerces_to_int():
+    """The live POST /io/card/{id}/comment response serializes the new comment id as a STRING of
+    digits (e.g. '2491550223' -- confirmed against a real tenant 2026-07-23, see API-VALIDATION.md).
+    The normalizer must coerce it to int so the ledger's gh_id/ap_id int|None contract still holds."""
+    result = _normalize_ap_comment({"id": "2491550223", "text": "hi"})
+    assert result["id"] == 2491550223
+    assert isinstance(result["id"], int)
+
+
+def test_normalize_ap_comment_raises_on_float_id():
+    """A float is numeric but not an integer id -- reject rather than silently truncate."""
+    with pytest.raises(ValueError):
+        _normalize_ap_comment({"id": 3.14, "text": "hi"})
+
+
+def test_normalize_ap_comment_raises_on_non_digit_string_id():
+    with pytest.raises(ValueError):
+        _normalize_ap_comment({"id": "12x3", "text": "hi"})
+
+
 # --- _normalize_ap_comment: body -------------------------------------------------------------
 
 def test_normalize_ap_comment_reads_text_as_body():
