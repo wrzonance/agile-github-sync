@@ -456,3 +456,156 @@ def org_issue_types(cfg: dict) -> frozenset[str] | None:
             TypeError, KeyError) as exc:
         print(f"WARN  org issue-types probe failed: {exc}", file=sys.stderr)
         return None
+
+
+# --- Issue #66: GitHub-side issue-comment I/O --------------------------------
+#
+# All four functions below go through `gh api ... --input -` for writes -- never `gh issue
+# comment` and never an argv-interpolated `-f body={body}` flag (the design doc's findings #5/#6):
+# a JSON body built with json.dumps is piped through run()'s existing `input=` stdin passthrough,
+# the same mechanism create_issue/edit_issue_body already use for issue bodies, so a comment body
+# containing shell metacharacters or gh-flag-like text can never be misparsed.
+
+
+def _normalize_gh_comment(raw: dict) -> dict:
+    """One GitHub REST issue-comment payload normalized into the GhComment shape
+    ({"id", "author", "body", "created", "edited"}). Raises TypeError/ValueError on a non-object
+    payload or a missing/non-numeric id -- a comment the sync can't identify is a genuine
+    unrecovered failure that must abort the whole list_issue_comments() read (mirroring
+    _local_blocker_numbers' own per-item raise-and-abort convention), not be silently skipped.
+    Every other field degrades to a safe default instead of raising."""
+    if not isinstance(raw, dict):
+        raise TypeError(f"GitHub issue-comment payload is {type(raw).__name__}, expected an object")
+    comment_id = raw.get("id")
+    if not isinstance(comment_id, int) or isinstance(comment_id, bool):
+        raise ValueError(f"GitHub issue-comment has a missing/non-numeric id ({comment_id!r})")
+    user = raw.get("user")
+    author = user.get("login") if isinstance(user, dict) else None
+    created = raw.get("created_at")
+    edited = raw.get("updated_at")
+    return {
+        "id": comment_id,
+        "author": author if isinstance(author, str) else None,
+        "body": raw.get("body") if isinstance(raw.get("body"), str) else "",
+        "created": created if isinstance(created, str) else "",
+        "edited": edited if isinstance(edited, str) else "",
+    }
+
+
+def list_issue_comments(cfg: dict, number: int) -> list[dict] | None:
+    """Every comment on one GitHub issue, normalized into GhComment dicts, via one paginated
+    `gh api repos/{owner}/{repo}/issues/{number}/comments --paginate --slurp` read.
+
+    Tri-state, mirroring blocked_by_map/org_issue_types exactly: a list on success (possibly
+    empty -- a genuinely commentless issue is a real, distinguishable result), and **None** on ANY
+    failure (no repo context, gh error, timeout, or a malformed response/item), so comment_sync
+    can tell "no comments" from "we don't know" instead of treating a failed read as an empty
+    snapshot and re-mirroring every comment as new.
+
+    Boundary-validates `number` (a positive, non-bool int) before any I/O, raising ValueError --
+    matching edit_issue_body's own boundary-validation convention."""
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        raise ValueError(f"list_issue_comments: number must be a positive int, got {number!r}")
+    ctx = _repo_context(cfg)
+    if ctx is None:
+        return None
+    try:
+        out = run(cfg, ["api", "--hostname", ctx.host,
+                        f"repos/{ctx.owner}/{ctx.name}/issues/{number}/comments",
+                        "--paginate", "--slurp"])
+        pages = json.loads(out.stdout or "[]")
+        if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+            raise TypeError("issue-comments response must be a list of pages")
+        return [_normalize_gh_comment(item) for page in pages for item in page]
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
+            TypeError, ValueError) as exc:
+        print(f"WARN  issue #{number} comment read failed: {exc}", file=sys.stderr)
+        return None
+
+
+def create_issue_comment(cfg: dict, apply: bool, number: int, body: str) -> int | None:
+    """Post one comment on a GitHub issue via `gh api --input -` (POST), through the dry-run gate.
+
+    apply=False prints a DRY line and returns None, with zero calls to run() -- identical dry-run
+    shape to create_issue/edit_issue_body. apply=True posts the JSON-encoded body and returns the
+    new comment's id (int); a response whose `id` can't be parsed as an int raises ValueError
+    rather than letting a created-but-unparsed comment masquerade as a swallowed None to
+    comment_sync's ledger writeback. Any CalledProcessError/TimeoutExpired from run() propagates
+    uncaught, matching create_issue/edit_issue_body's own apply=True behavior.
+
+    Validates `number`/`body` at this boundary, before either the dry-run print or repo-context
+    resolution -- an invalid number/body must never reach a live `gh api` call."""
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        raise ValueError(f"create_issue_comment: number must be a positive int, got {number!r}")
+    if not isinstance(body, str):
+        raise ValueError(f"create_issue_comment: body must be a str, got {type(body).__name__}")
+    if not apply:
+        print(f"DRY   gh api issue {number} comment -- POST")
+        return None
+    ctx = _repo_context(cfg)
+    if ctx is None:
+        raise SystemExit(f"create_issue_comment: repo context unavailable for issue #{number}")
+    out = run(cfg, ["api", "--hostname", ctx.host,
+                    f"repos/{ctx.owner}/{ctx.name}/issues/{number}/comments",
+                    "--method", "POST", "--input", "-"], input=json.dumps({"body": body}))
+    data = json.loads(out.stdout)
+    comment_id = data.get("id") if isinstance(data, dict) else None
+    if not isinstance(comment_id, int) or isinstance(comment_id, bool):
+        raise ValueError(f"create_issue_comment: response id is not an int ({comment_id!r})")
+    print(f"gh    issue {number} comment created -> {comment_id}")
+    return comment_id
+
+
+def edit_issue_comment(cfg: dict, apply: bool, comment_id: int, body: str) -> bool:
+    """Edit an existing GitHub issue comment's body via `gh api --input -` (PATCH), through the
+    dry-run gate -- the same json.dumps-built-body/stdin-`input=` mechanism as
+    create_issue_comment, fixing the spike's divergent argv-embedded `-f body={body}` flag (design
+    findings #5/#6), which would both mis-parse shell-meaningful bodies and diverge from create's
+    own stdin idiom.
+
+    Returns True only when the write actually happened (apply=True and gh succeeded) -- a dry run
+    must never report success, matching edit_issue_body's own apply-gated boolean contract. Any
+    CalledProcessError/TimeoutExpired from run() propagates uncaught.
+
+    Validates `comment_id`/`body` at this boundary, before either the dry-run print or repo-context
+    resolution."""
+    if not isinstance(comment_id, int) or isinstance(comment_id, bool) or comment_id < 1:
+        raise ValueError(
+            f"edit_issue_comment: comment_id must be a positive int, got {comment_id!r}")
+    if not isinstance(body, str):
+        raise ValueError(f"edit_issue_comment: body must be a str, got {type(body).__name__}")
+    if not apply:
+        print(f"DRY   gh api issue comment {comment_id} -- PATCH")
+        return False
+    ctx = _repo_context(cfg)
+    if ctx is None:
+        raise SystemExit(f"edit_issue_comment: repo context unavailable for comment {comment_id}")
+    run(cfg, ["api", "--hostname", ctx.host,
+              f"repos/{ctx.owner}/{ctx.name}/issues/comments/{comment_id}",
+              "--method", "PATCH", "--input", "-"], input=json.dumps({"body": body}))
+    print(f"gh    issue comment {comment_id} updated")
+    return True
+
+
+def delete_issue_comment(cfg: dict, apply: bool, comment_id: int) -> bool:
+    """Delete a GitHub issue comment via `gh api` (DELETE, no request body), through the dry-run
+    gate. Returns True only when the write actually happened (apply=True and gh succeeded) -- same
+    apply-gated boolean contract as edit_issue_comment/edit_issue_body. Any
+    CalledProcessError/TimeoutExpired from run() propagates uncaught.
+
+    Validates `comment_id` at this boundary, before either the dry-run print or repo-context
+    resolution."""
+    if not isinstance(comment_id, int) or isinstance(comment_id, bool) or comment_id < 1:
+        raise ValueError(
+            f"delete_issue_comment: comment_id must be a positive int, got {comment_id!r}")
+    if not apply:
+        print(f"DRY   gh api issue comment {comment_id} -- DELETE")
+        return False
+    ctx = _repo_context(cfg)
+    if ctx is None:
+        raise SystemExit(f"delete_issue_comment: repo context unavailable for comment {comment_id}")
+    run(cfg, ["api", "--hostname", ctx.host,
+              f"repos/{ctx.owner}/{ctx.name}/issues/comments/{comment_id}",
+              "--method", "DELETE"])
+    print(f"gh    issue comment {comment_id} deleted")
+    return True
