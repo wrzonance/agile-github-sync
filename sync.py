@@ -703,7 +703,6 @@ def main() -> None:
         if field_meta:
             sync_dates(cfg, apply, issue, card, project_items.get(issue["url"]), field_meta, issues_state, queue)
         sync_description(cfg, apply, issue, card, issues_state, queue)
-        sync_comments(cfg, apply, issue, card, issues_state)
         card_types.sync_card_type(cfg, apply, issue, card, resolved.by_name, issues_state, queue)
 
     # 3) parent/child connections (see sync_child_connections for the full contract).
@@ -736,7 +735,22 @@ def main() -> None:
             continue  # Issue #70 Layer 2: conflicting /laneId ops -- discard, don't half-apply
         agileplace.patch_card(cfg, apply, entry["card"], entry["ops"], "; ".join(entry["notes"]))
 
-    if apply and not any(entry["poisoned"] for entry in card_ops.values()):
+    # 6) comment sync (issue #66). Unlike every queued op above, sync_comments writes to GitHub AND
+    # AgilePlace IMMEDIATELY (its comment endpoints aren't part of the card-PATCH queue), so an
+    # applied comment write can't be rolled back by the poisoned-card hold below. Run it only when
+    # this run will actually persist the resulting ledger -- a dry run (preview only, no writes/state)
+    # or a CLEAN apply -- never on a poisoned apply where save_state is skipped: otherwise one issue's
+    # poisoned card would strand ANOTHER issue's applied comment writes with no ledger, re-mirroring
+    # them next run (issue #66 Codex P1 #4). Deferred here, after the flush, so it shares the atomic
+    # save's own gate.
+    clean = not any(entry["poisoned"] for entry in card_ops.values())
+    if not apply or clean:
+        for issue in syncable_issues:
+            card = card_for(issue)
+            if card and card.get("id"):
+                sync_comments(cfg, apply, issue, card, issues_state)
+
+    if apply and clean:
         save_state(state)
     elif apply:
         # Issue #70 Layer 2: skipping a poisoned card's PATCH leaves this run's already-advanced merge

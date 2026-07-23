@@ -1,13 +1,16 @@
 """sync.main()'s comment-sync call site (Task 6/8, issue #66).
 
-Thin, isolated from the large test_sync_main.py suite: this file's only concern is that main()'s
-per-issue loop actually calls comment_sync.sync_comments() with the right positional arguments
-(cfg, apply, issue, card, issues_state) -- once per syncable issue, immediately after
-sync_description(...). It does not re-verify sync_comments()'s own planning/execution/ledger
-behavior -- that is tests/test_comment_sync.py's job -- so sync_comments itself is monkeypatched
-here for the call-site assertions, matching the low-level-transport-boundary convention this
-repo's other main()-level call-site tests use (test_sync_description_call_site.py patches
-description_sync.sync_description the same way; patching the collaborator, not its internals).
+Thin, isolated from the large test_sync_main.py suite: this file's only concern is that main()
+actually calls comment_sync.sync_comments() with the right positional arguments (cfg, apply, issue,
+card, issues_state) -- once per syncable issue, and that the call is gated correctly. Comment sync
+writes live to both platforms (its endpoints aren't part of the card-PATCH queue), so main() runs it
+in a dedicated pass AFTER the card-PATCH flush, only on a dry run or a CLEAN (non-poisoned) apply --
+never on a poisoned apply where save_state is held (issue #66 Codex P1 #4). It does not re-verify
+sync_comments()'s own planning/execution/ledger behavior -- that is tests/test_comment_sync.py's job
+-- so sync_comments itself is monkeypatched here for the call-site assertions, matching the
+low-level-transport-boundary convention this repo's other main()-level call-site tests use
+(test_sync_description_call_site.py patches description_sync.sync_description the same way; patching
+the collaborator, not its internals).
 
 sync.py imports the name directly (`from comment_sync import sync_comments`), so the call site
 lives in sync's own namespace -- the patch target is "sync.sync_comments", not
@@ -69,8 +72,32 @@ def test_main_calls_sync_comments_once_per_issue_with_expected_args(tmp_path):
     assert call_issues_state == {
         ISSUE_URL: {"card_id": "C1", "labels": [], "milestone": None},
     }
-    # sync_comments runs immediately after sync_description in the per-issue loop.
+    # sync_description still runs (in the per-issue loop); sync_comments runs in the post-flush pass.
     assert sync_description_mock.call_count == 1
+
+
+def test_main_defers_comment_sync_and_holds_state_when_a_card_is_poisoned(tmp_path, monkeypatch):
+    """Issue #66 Codex P1 #4: comment sync writes live to both platforms, so it must NOT run on a
+    poisoned apply -- the run where save_state is held (issue #70 hold-clean-bases). Otherwise one
+    issue's poisoned card would strand another issue's applied comment writes with no persisted
+    ledger. A poisoned card => sync_comments NOT called AND state NOT persisted."""
+    state_file = tmp_path / ".sync-state.json"
+    cfg = _cfg(tmp_path)
+    # A customId mismatch forces a queue() call for this card; forcing lane_conflict poisons that entry.
+    card = {**_card(), "customId": "999"}
+    stack, _run_mock, _patch_card_mock, _create_card_mock = _mock_io(
+        card, ({}, []), field_meta_return=None)
+    stack.enter_context(patch("sync.sync_description"))
+    sync_comments_mock = stack.enter_context(patch("sync.sync_comments"))
+    save_state_mock = stack.enter_context(patch("sync.save_state"))
+    monkeypatch.setattr(sync, "lane_conflict", lambda ops, lane_id: (None, True))
+
+    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+         patch("sys.argv", ["sync.py", "--apply"]):
+        sync.main()
+
+    sync_comments_mock.assert_not_called()
+    save_state_mock.assert_not_called()
 
 
 def test_main_never_reaches_real_sync_comments_for_an_unresolved_card(tmp_path):
