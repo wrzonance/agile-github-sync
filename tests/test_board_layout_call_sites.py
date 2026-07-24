@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agileplace  # noqa: E402
 import board_layout  # noqa: E402
+import ghkit  # noqa: E402
 import intake  # noqa: E402
 import smoke  # noqa: E402
 import sync  # noqa: E402
@@ -163,6 +164,7 @@ def _sync_main_cfg(tmp_path):
         "token": "tok", "host": "example.leankit.com", "board_id": "42",
         "target_repo_path": tmp_path,
         "label_sync_ignore": frozenset(),
+        "repo_context": ghkit.RepoContext(owner="acme", name="repo", host="github.com"),
         "stage_lane_map": {},
         "gh_project": {"owner": "acme", "number": "7", "status_field": "Status",
                        "start_field": "Start", "target_field": "Target"},
@@ -184,7 +186,7 @@ def test_main_calls_board_layout_board_layout_when_online(tmp_path):
              "milestone": None, "assignees": [], "url": "https://github.com/acme/repo/issues/1"}
 
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
+    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
     stack.enter_context(patch("ghkit.list_issues", return_value=[issue]))
     stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))

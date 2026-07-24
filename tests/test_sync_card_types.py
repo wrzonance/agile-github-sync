@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agileplace  # noqa: E402
 import board_layout  # noqa: E402
+import ghkit  # noqa: E402
 import sync  # noqa: E402
 
 ISSUE_URL = "https://github.com/acme/repo/issues/1"
@@ -90,7 +91,7 @@ def _run_main(tmp_path, issue, card_types=(), existing_cards=None, seed_issues_s
                                           "issues": {ISSUE_URL: seed_issues_state}}),
                               encoding="utf-8")
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
+    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
     stack.enter_context(patch("ghkit.list_issues", return_value=[issue]))
     stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
