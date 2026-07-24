@@ -39,6 +39,7 @@ def _config(tmp_path) -> dict:
         "board_id": "42",
         "target_repo_path": tmp_path,
         "label_sync_ignore": frozenset(),
+        "repo_context": ghkit.RepoContext(owner="acme", name="repo", host="github.com"),
         "stage_lane_map": {},
         "gh_project": {},
         "ap_description_max_length": 20000,  # issue #65: sync_description reads this unconditionally
@@ -53,7 +54,7 @@ def _run_main(tmp_path, monkeypatch, raw_issues, cards, blocked_by=None, lanes=(
         lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps(raw_issues)),
     )
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
+    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
     stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=open_pr_result))
     blocked_by_read = stack.enter_context(patch("ghkit.blocked_by_map", return_value=blocked_by or {}))
     edit_label = stack.enter_context(patch("ghkit.edit_label"))

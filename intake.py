@@ -157,12 +157,11 @@ def intake_candidates(cards: list[dict], lanes: list, stage_map: dict | None,
     This is the lane/link/customId predicate only. The title-derived customId collision guard lives
     in promote() instead (not here), because it must run AFTER marker-resume matching: a card whose
     title-derived key matches an existing issue that is ITS OWN resume target must be resumed, not
-    dropped -- and marker awareness needs the body-bearing ghkit.list_issue_bodies() snapshot that
-    only promote() fetches.
+    dropped -- and marker awareness needs the body-bearing snapshot that only promote() derives.
 
-    `issues` is the already-fetched, title-bearing ghkit.list_issues() snapshot (same one sync.py's
-    main loop uses) -- not ghkit.list_issue_bodies()'s separate, tri-state, body-bearing read that
-    the marker-resume path uses further down the promotion flow."""
+    `issues` is the already-fetched, body-bearing ghkit.list_issues() snapshot (same one sync.py's
+    main loop uses) -- promote() derives its marker-resume snapshot from these same dicts
+    (issue #97), so there is no second listing to disagree with."""
     intake_lane_ids = _intake_lane_ids(lanes, stage_map)
     if not intake_lane_ids:
         return []
@@ -189,9 +188,9 @@ class IntakeSummary(NamedTuple):
     """Outcome of one promote() run -- both the caller's summary print and what tests assert on.
 
     candidates: how many cards intake_candidates() selected this run.
-    prescan_failed: True iff ghkit.list_issue_bodies() returned None -- the marker-resume snapshot
-        was unusable, so every write for the run was skipped; the candidates remain candidates
-        again next run (nothing here is persisted as "handled").
+    prescan_failed: retained for callers' shape stability but now always False -- the
+        marker-resume snapshot derives from the `issues` list itself (issue #97), so there is
+        no separate prescan read left to fail.
     resumed: candidates whose promoted issue already existed (found via its resume marker) and
         only needed writeback -- recovery from a prior run that crashed between create and writeback.
     created: candidates for which a brand-new GitHub issue was actually created (apply=True only --
@@ -359,11 +358,13 @@ def promote(cfg: dict, apply: bool, cards: list[dict], lanes: list, stage_map: d
     candidates = intake_candidates(cards, lanes, stage_map, issues)
     if not candidates:
         return IntakeSummary(candidates=0, prescan_failed=False, resumed=0, created=0)
-    issues_with_bodies = ghkit.list_issue_bodies(cfg)
-    if issues_with_bodies is None:
-        print("WARN  intake: could not read issue bodies for marker-resume scan -- skipping "
-              f"all {len(candidates)} candidate(s) this run")
-        return IntakeSummary(candidates=len(candidates), prescan_failed=True, resumed=0, created=0)
+    # Issue #97: the marker-resume snapshot is derived from the body-bearing `issues` list
+    # sync.main already fetched (ghkit.list_issues carries `body`), never a second full
+    # `gh issue list`. list_issues raising is main()'s own failure mode, so a promote() call
+    # always holds a complete snapshot here -- the old tri-state prescan (and its
+    # prescan_failed=True skip) had nothing left to guard.
+    issues_with_bodies = [{"number": i["number"], "url": i["url"], "state": i["state"],
+                           "body": i.get("body") or ""} for i in issues]
     resumed = created = 0
     adopted: list[tuple[dict, dict]] = []
     # customIds already owned by an existing issue, plus any reserved by a card created earlier this

@@ -92,7 +92,7 @@ def _run_main(tmp_path, monkeypatch, raw_issues, card, *, open_pr_numbers: froze
     monkeypatch.setattr(
         ghkit, "run", lambda *_a, **_k: SimpleNamespace(stdout=json.dumps(raw_issues)))
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
+    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
     stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set(open_pr_numbers)))
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
     stack.enter_context(patch("ghkit.edit_label"))

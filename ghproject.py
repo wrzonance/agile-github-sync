@@ -206,12 +206,19 @@ def hydrate_item_dates(cfg: dict, project_items: dict[str, dict],
 
 
 class ProjectV2Status(NamedTuple):
-    """One run's GitHub Projects v2 read, already resolved to the tri-state main() needs."""
+    """One run's GitHub Projects v2 read, already resolved to the tri-state main() needs.
+
+    `field_meta` keeps its historical date-sync gating (None whenever date sync must not run);
+    `status_meta` is the SAME fetched metadata un-gated (issue #97) -- present whenever the
+    field fetch succeeded, even on a Project with no date fields or a failed date-value read,
+    so status writes (vetting latch) reuse it via cfg['project_field_meta'] instead of
+    re-spawning `gh project view` + `field-list` per write."""
     project_items: dict
     project_status: dict
     field_meta: dict | None
     project_read_failed: bool
     move_lanes: bool
+    status_meta: dict | None = None
 
 
 def resolve_project_v2_status(cfg: dict) -> ProjectV2Status:
@@ -232,6 +239,7 @@ def resolve_project_v2_status(cfg: dict) -> ProjectV2Status:
                                   and bool(project_items) and not project_status)
     project_read_failed = call_failed or zero_status_despite_items
     field_meta_ = field_meta(cfg) if (configured(cfg) and not project_read_failed) else None
+    status_meta = field_meta_ if isinstance(field_meta_, dict) else None
     if field_meta_ and not (field_meta_.get("start_field_id") or field_meta_.get("target_field_id")):
         field_meta_ = None
     date_read_failed = False
@@ -255,7 +263,7 @@ def resolve_project_v2_status(cfg: dict) -> ProjectV2Status:
         print("WARN  Projects v2 date field-value read FAILED -- skipping all date sync this run")
     return ProjectV2Status(project_items=project_items, project_status=project_status,
                            field_meta=field_meta_, project_read_failed=project_read_failed,
-                           move_lanes=not project_read_failed)
+                           move_lanes=not project_read_failed, status_meta=status_meta)
 
 
 def issue_status_map(cfg: dict) -> dict[str, str]:
@@ -273,6 +281,9 @@ def field_meta(cfg: dict) -> dict | None:
     VALIDATE LIVE: gh project shapes."""
     if not configured(cfg):
         return None
+    cached = cfg.get("project_field_meta")
+    if isinstance(cached, dict):  # issue #97: main() threads the run's one successful fetch
+        return cached
     ctx = ghkit._repo_context(cfg)
     if ctx is None:  # can't resolve the target host -> fail closed rather than hit the default host
         return None

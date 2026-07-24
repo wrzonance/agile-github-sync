@@ -29,8 +29,9 @@ _GH_ENV_OVERRIDE_KEYS = frozenset({"GH_REPO", "GH_HOST"})
 
 
 class RepoContext(NamedTuple):
-    """The repo + host every gh api/graphql call must agree on, resolved fresh (never cached, never
-    env-sourced) from one `gh repo view` call so name and host can never disagree with each other."""
+    """The repo + host every gh api/graphql call must agree on, resolved fresh once per run (never
+    cached across runs, never env-sourced) from one `gh repo view` call so name and host can never
+    disagree with each other."""
     owner: str
     name: str
     host: str
@@ -81,11 +82,15 @@ def repo_name(cfg: dict) -> str | None:
         return None
 
 
-def _repo_context(cfg: dict) -> RepoContext | None:
-    """Resolve owner/name/host from one `gh repo view` call so all three can never disagree.
+def resolve_repo_context(cfg: dict) -> RepoContext | None:
+    """Resolve owner/name/host fresh from one `gh repo view` call so all three can never disagree.
     None on any failure (gh error, timeout, malformed/missing JSON fields, unparseable host) --
     callers already treat repo_name()-returning-None as "don't proceed"; this just extends that same
-    fail-closed contract to also cover host resolution."""
+    fail-closed contract to also cover host resolution.
+
+    sync.main calls this once per run and threads the result through cfg['repo_context'] (issue
+    #97), so hot-loop readers stop re-spawning `gh repo view` -- per-RUN scope keeps the
+    no-stale-cache guarantee (a fresh process still resolves fresh)."""
     try:
         out = run(cfg, ["repo", "view", "--json", "nameWithOwner,url"])
         data = json.loads(out.stdout)
@@ -105,6 +110,15 @@ def _repo_context(cfg: dict) -> RepoContext | None:
     if not host:
         return None
     return RepoContext(owner=owner, name=name, host=host)
+
+
+def _repo_context(cfg: dict) -> RepoContext | None:
+    """The run's RepoContext: cfg['repo_context'] when main() already resolved it this run,
+    else a fresh resolve (standalone callers -- smoke, tests -- keep working unchanged)."""
+    cached = cfg.get("repo_context")
+    if isinstance(cached, RepoContext):
+        return cached
+    return resolve_repo_context(cfg)
 
 
 def list_issues(cfg: dict) -> list[dict]:

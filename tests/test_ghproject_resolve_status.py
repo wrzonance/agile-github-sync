@@ -120,3 +120,45 @@ def test_date_hydration_failure_drops_field_meta_but_leaves_status_read_intact(c
     assert "1 items carry Status" in out
     assert "dates enabled" not in out
     assert "date field-value read FAILED" in out
+
+
+def test_resolve_keeps_status_meta_without_date_fields(capsys):
+    """Issue #97: a Project with a Status field but no Start/Target date fields must still
+    expose status_meta -- downstream status writes (vetting latch) reuse it instead of
+    re-spawning `gh project view` + `field-list` per write."""
+    meta = {"project_id": "PVT_1", "host": "github.com", "status_field_id": "F1",
+            "status_options": {"backlog": "O1"}, "start_field_id": None, "target_field_id": None}
+    items = {"https://github.com/acme/widgets/issues/1": {"item_id": "I1", "status": "Backlog"}}
+    with patch("ghproject.configured", return_value=True), \
+         patch("ghproject.items", return_value=items), \
+         patch("ghproject.field_meta", return_value=meta):
+        result = ghproject.resolve_project_v2_status(_cfg())
+
+    assert result.field_meta is None      # date sync stays gated off
+    assert result.status_meta == meta     # status writes stay armed
+    assert "dates enabled" not in capsys.readouterr().out
+
+
+def test_resolve_keeps_status_meta_when_date_hydration_fails(capsys):
+    """A failed date-value read Nones field_meta (skip date sync) but must not throw away the
+    status-write metadata fetched by the same call."""
+    items = {"https://github.com/acme/widgets/issues/1": {"item_id": "I1", "status": "Backlog"}}
+    with patch("ghproject.configured", return_value=True), \
+         patch("ghproject.items", return_value=items), \
+         patch("ghproject.field_meta", return_value=_field_meta()), \
+         patch("ghproject.hydrate_item_dates", return_value=None):
+        result = ghproject.resolve_project_v2_status(_cfg())
+
+    assert result.field_meta is None
+    assert result.status_meta == _field_meta()
+    assert "date field-value read FAILED" in capsys.readouterr().out
+
+
+def test_field_meta_prefers_run_scoped_value():
+    """Issue #97: cfg['project_field_meta'] short-circuits field_meta with zero gh spawns."""
+    meta = {"project_id": "PVT_1", "host": "github.com", "status_field_id": "F1",
+            "status_options": {}, "start_field_id": None, "target_field_id": None}
+    with patch("ghproject.configured", return_value=True), \
+         patch("ghkit.run", side_effect=AssertionError("gh must not be spawned")), \
+         patch("ghkit._repo_context", side_effect=AssertionError("no context resolve either")):
+        assert ghproject.field_meta({**_cfg(), "project_field_meta": meta}) is meta

@@ -54,6 +54,7 @@ def _config(tmp_path: Path) -> dict:
         "board_id": "42",
         "target_repo_path": tmp_path,
         "label_sync_ignore": frozenset(),
+        "repo_context": ghkit.RepoContext(owner="acme", name="repo", host="github.com"),
         "stage_lane_map": {},
         "gh_project": {},
         "ap_description_max_length": 20000,  # issue #65: sync_description reads this unconditionally
@@ -74,7 +75,7 @@ def _run_hierarchy(tmp_path: Path, monkeypatch, issues: list[dict], cards: list[
     )
     planned_cards = created_cards or {}
 
-    monkeypatch.setattr(ghkit, "repo_name", lambda _cfg: "acme/repo")
+    monkeypatch.setattr(ghkit, "resolve_repo_context", lambda _cfg: ghkit.RepoContext(owner="acme", name="repo", host="github.com"))
     monkeypatch.setattr(ghkit, "list_issues", lambda _cfg: issues)
     monkeypatch.setattr(ghkit, "open_pr_issue_numbers", lambda _cfg: set())
     monkeypatch.setattr(ghkit, "sub_issue_numbers", lambda *_args: sub_issue_numbers)

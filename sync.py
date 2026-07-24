@@ -567,7 +567,11 @@ def main() -> None:
     if cfg["target_repo_path"] is None:
         print("NOTE: TARGET_REPO_PATH not set (.env) -- cannot read GitHub; nothing to sync.")
         return
-    target = ghkit.repo_name(cfg)
+    # Issue #97: one `gh repo view` per run -- every downstream _repo_context() call reads this.
+    repo_context = ghkit.resolve_repo_context(cfg)
+    if repo_context and cfg.get("repo_context") != repo_context:
+        cfg = {**cfg, "repo_context": repo_context}
+    target = f"{repo_context.owner}/{repo_context.name}" if repo_context else None
     if not target:
         print("NOTE: target repo unreachable (no remote or gh not authenticated) -- nothing to sync yet (local only).")
         return
@@ -591,6 +595,8 @@ def main() -> None:
     pv2 = ghproject.resolve_project_v2_status(cfg)
     project_items, project_status = pv2.project_items, pv2.project_status
     field_meta, project_read_failed, move_lanes = pv2.field_meta, pv2.project_read_failed, pv2.move_lanes
+    if pv2.status_meta:  # issue #97: status writes (vetting latch) reuse this run's one fetch
+        cfg = {**cfg, "project_field_meta": pv2.status_meta}
 
     # --- issue #82: card-types wiring (comment-banner delimited -- #65 is expected to touch this
     # same `lanes = ...` line, so this is flagged as a likely merge conflict up front) ---

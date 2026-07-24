@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agileplace  # noqa: E402
 import board_layout  # noqa: E402
+import ghkit  # noqa: E402
 import ghproject  # noqa: E402
 import sync  # noqa: E402
 
@@ -60,6 +61,7 @@ def _cfg(tmp_path):
         "token": "tok", "host": "example.leankit.com", "board_id": "42",
         "target_repo_path": tmp_path,
         "label_sync_ignore": frozenset(),
+        "repo_context": ghkit.RepoContext(owner="acme", name="repo", host="github.com"),
         "stage_lane_map": {},
         "gh_project": {"owner": "acme", "number": "7", "status_field": "Status",
                        "start_field": "Start", "target_field": "Target"},
@@ -90,7 +92,11 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     stashed as stack.add_item_mock / stack.set_item_status_mock for latch-specific call assertions,
     since the primary 4-tuple return stays unchanged for every other caller."""
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
+    # Issue #97: the mock is retained (stack.resolve_repo_context_mock) so tests can assert the
+    # run resolves the repo context exactly once instead of merely relying on the cached fixture.
+    stack.resolve_repo_context_mock = stack.enter_context(patch(
+        "ghkit.resolve_repo_context",
+        return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
     issue = _issue() if issue_return is _UNSET else issue_return
     issues = issue if isinstance(issue, list) else [issue]
     stack.enter_context(patch("ghkit.list_issues", return_value=issues))
@@ -845,3 +851,20 @@ def test_created_card_uses_header_custom_id_and_short_link_label(tmp_path):
     args, kwargs = create_card_mock.call_args
     assert args[3] == "GitHub Issue #1"          # the custom_id argument is the header
     assert kwargs["link_label"] == "GitHub 1"    # the link label stays the short key
+
+
+def test_main_resolves_the_repo_context_exactly_once(tmp_path):
+    """Issue #97's core claim: one `gh repo view` per run. cfg['repo_context'] short-circuits
+    every downstream _repo_context() call, so the fresh resolver fires exactly once, with the
+    run's initial configuration."""
+    card = _card()
+    cfg = _cfg(tmp_path)
+    stack, _run_mock, _patch_card, _create = _mock_io(card, ({}, []), field_meta_return=None)
+
+    with stack, patch("sync.env_config", return_value=cfg), \
+         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+         patch("sys.argv", ["sync.py"]):
+        sync.main()
+
+    stack.resolve_repo_context_mock.assert_called_once()
+    assert stack.resolve_repo_context_mock.call_args.args[0] is cfg

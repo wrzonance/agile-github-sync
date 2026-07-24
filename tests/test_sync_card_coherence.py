@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agileplace  # noqa: E402
 import board_layout  # noqa: E402
+import ghkit  # noqa: E402
 import sync  # noqa: E402
 
 _DONE_LANE = {"id": "L-DONE", "title": "Done", "cardStatus": "finished"}
@@ -111,7 +112,7 @@ def _mock_io(issues: list[dict], cards: list[dict], *, lanes: tuple = ()):
     v2 date/status sync, so that whole subsystem is kept out of the way."""
     stack = ExitStack()
     stack.enter_context(patch("ghkit.list_issues", return_value=list(issues)))
-    stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
+    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
     stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
     stack.enter_context(patch("ghkit.edit_label"))
