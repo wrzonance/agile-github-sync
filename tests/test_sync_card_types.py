@@ -40,7 +40,9 @@ def _card(type_obj=None, **overrides):
     # "description": "" (issue #65) keeps agileplace_description.card_description() on its zero-I/O
     # path -- without the key it falls back to the real (unmocked) agileplace.get_card(), which hits
     # the live HTTP client and SystemExits (see tests/test_description_sync_wiring_fixtures.py).
-    card = {"id": "C1", "version": 1, "customId": "1",
+    # customId carries the issue #93 header format (the post-transition, already-in-sync state) --
+    # matches _issue()'s default unkeyed title (issue #1 -> "GitHub Issue #1").
+    card = {"id": "C1", "version": 1, "customId": "GitHub Issue #1",
             "externalLink": {"url": ISSUE_URL}, "tags": [],
             "plannedStart": None, "plannedFinish": None, "laneId": None,
             "description": ""}
@@ -163,7 +165,8 @@ def test_main_threads_resolved_type_id_into_create_card_for_a_new_card(tmp_path)
     _, create_card_mock, _ = _run_main(tmp_path, issue, card_types=[_BUG_CARD_TYPE], existing_cards=[])
 
     create_card_mock.assert_called_once()
-    assert create_card_mock.call_args.kwargs == {"type_id": "CT-BUG", "type_title": "Bug"}
+    assert create_card_mock.call_args.kwargs == {
+        "type_id": "CT-BUG", "type_title": "Bug", "link_label": "GitHub 1"}
 
 
 def test_main_omits_type_id_when_derived_type_does_not_resolve(tmp_path):
@@ -174,7 +177,8 @@ def test_main_omits_type_id_when_derived_type_does_not_resolve(tmp_path):
     _, create_card_mock, _ = _run_main(tmp_path, issue, card_types=[], existing_cards=[])
 
     create_card_mock.assert_called_once()
-    assert create_card_mock.call_args.kwargs == {"type_id": None, "type_title": None}
+    assert create_card_mock.call_args.kwargs == {
+        "type_id": None, "type_title": None, "link_label": "GitHub 1"}
 
 
 def test_main_omits_type_id_for_an_issue_that_derives_no_card_type(tmp_path):
@@ -185,7 +189,8 @@ def test_main_omits_type_id_for_an_issue_that_derives_no_card_type(tmp_path):
     _, create_card_mock, _ = _run_main(tmp_path, issue, card_types=[_BUG_CARD_TYPE], existing_cards=[])
 
     create_card_mock.assert_called_once()
-    assert create_card_mock.call_args.kwargs == {"type_id": None, "type_title": None}
+    assert create_card_mock.call_args.kwargs == {
+        "type_id": None, "type_title": None, "link_label": "GitHub 1"}
 
 
 # --- existing-card drift: card_types.sync_card_type is wired into the per-issue loop -----------
@@ -254,5 +259,6 @@ def test_main_does_not_double_queue_a_typeid_patch_for_a_card_created_this_same_
         create_card_return=created_sparse, get_card_return=refetched_full)
 
     create_card_mock.assert_called_once()
-    assert create_card_mock.call_args.kwargs == {"type_id": "CT-BUG", "type_title": "Bug"}
+    assert create_card_mock.call_args.kwargs == {
+        "type_id": "CT-BUG", "type_title": "Bug", "link_label": "GitHub 1"}
     patch_card_mock.assert_not_called()

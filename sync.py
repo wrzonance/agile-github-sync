@@ -33,8 +33,8 @@ from comment_sync import sync_comments
 from config import STATE_FILE, env_config
 from description_sync import sync_description
 from metadata_sync import sync_dates, sync_metadata
-from stages import (epic_key_for_task, is_retired_issue, issue_custom_id,
-                    issue_stage, normalize_status, title_key)
+from stages import (epic_key_for_task, header_match_key, is_retired_issue, issue_card_header,
+                    issue_custom_id, issue_stage, normalize_status, title_key)
 
 STATE_SCHEMA = 2
 
@@ -309,7 +309,7 @@ def _reconciled_custom_id_index(issues: list[dict], card_by_url: dict,
         # Catch two URL-owned issues planning the same previously-unclaimed customId.
         _matching_card(issue, card_by_url, reconciled)
         desired_custom_id = issue_custom_id(issue)
-        current_custom_id = agileplace.custom_id_value(url_match)
+        current_custom_id = header_match_key(agileplace.custom_id_value(url_match))
         if current_custom_id and same_card(reconciled.get(current_custom_id), url_match):
             del reconciled[current_custom_id]
             if current_custom_id != desired_custom_id:
@@ -497,9 +497,11 @@ def _ensure_cards_for_syncable_issues(cfg: dict, apply: bool, syncable_issues: l
             lane, _ = board_layout.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", stage_map)
         derived_type = card_types.derive_card_type_name(issue)
         type_id = type_by_name.get(derived_type) if derived_type else None
-        created = agileplace.create_card(cfg, apply, issue_card_title(issue), key, issue["url"],
+        created = agileplace.create_card(cfg, apply, issue_card_title(issue),
+                                         issue_card_header(issue), issue["url"],
                                          lane["id"] if lane else None,
-                                         type_id=type_id, type_title=derived_type if type_id else None)
+                                         type_id=type_id, type_title=derived_type if type_id else None,
+                                         link_label=f"GitHub {key}")
         if apply and created.get("id"):
             created = _created_card_snapshot(cfg, created)
         if created.get("id"):
@@ -601,7 +603,7 @@ def main() -> None:
     for card in cards:
         for u in agileplace.card_external_urls(card):
             all_card_by_url[u] = card
-        cid = agileplace.custom_id_value(card)
+        cid = header_match_key(agileplace.custom_id_value(card))
         if cid:
             all_card_by_cid[cid] = card
 
@@ -673,8 +675,9 @@ def main() -> None:
         st = issues_state.setdefault(issue["url"], {})
         if st.get("card_id") != cid:
             issues_state[issue["url"]] = {"card_id": cid}  # fresh/migrated/replaced -> reset merge base
-        if agileplace.custom_id_value(card) != key:
-            queue(card, [agileplace.op_custom_id(key)], f"customId->{key}")
+        header = issue_card_header(issue)
+        if agileplace.custom_id_value(card) != header:
+            queue(card, [agileplace.op_custom_id(header)], f"customId->{header}")
             print(f"{'sync ' if apply else 'DRY  '} [{key}] customId")
 
         stage = resolve_issue_stage(issue, project_status, project_items, smap)
