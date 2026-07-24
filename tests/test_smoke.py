@@ -279,6 +279,16 @@ def tenant_env(monkeypatch):
                     "state": "OPEN", "body": _SMOKE_ISSUE_BODY}]
                   if issue_bodies == "__default__" else issue_bodies)
         monkeypatch.setattr(smoke.ghkit, "list_issue_bodies", lambda cfg: bodies)
+        # Step 24 (issue #98) reads GitHub via the batched issue graph; fake both the batch and
+        # the per-issue REST cross-check so no real gh call happens and they agree by default.
+        graph_comments = {1: [{"id": 11, "author": "alice", "body": "hello",
+                               "created": "2026-01-01T00:00:00Z",
+                               "edited": "2026-01-01T00:00:00Z"}]}
+        monkeypatch.setattr(smoke.ghkit_snapshot, "fetch_issue_graph",
+                            lambda cfg, include_comments=None: smoke.ghkit_snapshot.IssueGraph(
+                                comments=dict(graph_comments), blocked_by={}, sub_issues={}))
+        monkeypatch.setattr(smoke.ghkit, "list_issue_comments",
+                            lambda cfg, number: list(graph_comments.get(number, [])))
         if answer is None:
             def refuse(_prompt=""):
                 raise AssertionError("input() must not be called with --yes")
@@ -501,3 +511,25 @@ def test_missing_configuration_fails_loud(monkeypatch, tmp_path):
 
     with pytest.raises(SystemExit, match="AGILEPLACE"):
         smoke.main([])
+
+
+def test_issue_graph_batch_step_cross_checks_the_rest_reader(tenant_env, capsys):
+    """Step 24 (issue #98): the batched graph read PASSes and its normalized comments must
+    byte-match the per-issue REST reader for the probe issue."""
+    tenant_env(FakeTenant())
+
+    assert smoke.main(["--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "PASS  issue-graph batched read (issue #98)" in out
+    assert "PASS  issue-graph comments match the per-issue REST reader" in out
+
+
+def test_issue_graph_batch_failure_fails_the_run(tenant_env, capsys, monkeypatch):
+    """A None graph on the live host means #98's batched read path is broken there -- smoke must
+    FAIL, not shrug."""
+    tenant_env(FakeTenant())
+    monkeypatch.setattr(smoke.ghkit_snapshot, "fetch_issue_graph",
+                        lambda cfg, include_comments=None: None)
+
+    assert smoke.main(["--yes"]) == 1
+    assert "FAIL  issue-graph batched read (issue #98)" in capsys.readouterr().out

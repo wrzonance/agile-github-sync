@@ -31,6 +31,7 @@ import agileplace_description
 import board_layout
 import card_types
 import ghkit
+import ghkit_snapshot
 import richtext
 from config import env_config
 
@@ -656,6 +657,41 @@ def _run_checks(cfg: dict, lane_id: str | None, run_id: str, created: list[str],
     _check_stale_patch(cfg, parent_id, baseline_version, results)
     _check_github_richtext_roundtrip(cfg, parent_id, results)
     _check_custom_id_header(cfg, parent_id, run_id, results)
+    _check_issue_graph_batch(cfg, results)
+
+
+def _check_issue_graph_batch(cfg: dict, results: list) -> None:
+    """Step 24: the batched issue-graph read (issue #98) against the live GitHub API -- proves
+    this host's GraphQL schema serves the batch's field shapes (comments.databaseId/author/body/
+    createdAt/updatedAt, repository-qualified blockedBy, subIssues) and that the batch's
+    normalized comments byte-match ghkit.list_issue_comments, the per-issue REST reader the sync
+    falls back to (ledger ids must be identical across both paths). GitHub READS only -- smoke
+    performs no GitHub writes; no cards involved."""
+    _step(24, "batched issue-graph read cross-checks the per-issue comment reader")
+    graph = ghkit_snapshot.fetch_issue_graph(cfg, include_comments=True)
+    if graph is None:
+        results.append(("issue-graph batched read (issue #98)", False,
+                        "fetch_issue_graph returned None -- GraphQL query failed on this host"))
+        return
+    results.append(("issue-graph batched read (issue #98)", True,
+                    f"{len(graph.comments)} comment snapshot(s), "
+                    f"blocked_by {'ok' if graph.blocked_by is not None else 'unusable (None)'}, "
+                    f"{len(graph.sub_issues)} sub-issue set(s)"))
+    probe = next((n for n in sorted(graph.comments) if graph.comments[n]),
+                 min(graph.comments, default=None))
+    if probe is None:
+        results.append(("issue-graph comments match the per-issue REST reader", None,
+                        "SKIP: repo has no issues in the batch to cross-check"))
+        return
+    rest = ghkit.list_issue_comments(cfg, probe)
+    if rest is None:
+        results.append(("issue-graph comments match the per-issue REST reader", None,
+                        f"SKIP: REST comment read for issue #{probe} failed"))
+        return
+    results.append(("issue-graph comments match the per-issue REST reader",
+                    graph.comments[probe] == rest,
+                    f"issue #{probe}: batch {len(graph.comments[probe])} vs REST {len(rest)} "
+                    f"comment(s)"))
 
 
 def _summarize(results: list) -> int:

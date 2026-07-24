@@ -24,6 +24,7 @@ import agileplace
 import board_layout
 import card_types
 import ghkit
+import ghkit_snapshot
 import ghproject
 import intake
 import vetting_latch
@@ -76,13 +77,18 @@ def save_state(state: dict) -> None:
             os.unlink(tmp)
 
 
-def _epic_task_resolution(cfg: dict, epic: dict, by_key: dict) -> tuple[list[int], bool]:
+def _epic_task_resolution(cfg: dict, epic: dict, by_key: dict,
+                          sub_issues: dict[int, list[int]] | None = None) -> tuple[list[int], bool]:
     """Return ``(numbers, authoritative)`` for an epic's tasks.
 
     A successful native sub-issue read is authoritative, including an empty result. The title-key
     fallback is only a heuristic, so callers may use it to add connections but must not use it to
-    authorize removals.
+    authorize removals. `sub_issues` is the run's batched issue graph slice (issue #98); an epic
+    present there resolves authoritatively with zero I/O, an absent epic (batch overflow/failure)
+    falls through to the existing per-epic read.
     """
+    if sub_issues is not None and epic["number"] in sub_issues:
+        return sub_issues[epic["number"]], True
     nums = ghkit.sub_issue_numbers(cfg, epic["number"])
     if nums is not None:
         return nums, True
@@ -96,9 +102,10 @@ def _epic_task_resolution(cfg: dict, epic: dict, by_key: dict) -> tuple[list[int
              if epic_key_for_task(title_key(i["title"]) or "") == epic_key], False)
 
 
-def epic_task_numbers(cfg: dict, epic: dict, by_key: dict) -> list[int]:
+def epic_task_numbers(cfg: dict, epic: dict, by_key: dict,
+                      sub_issues: dict[int, list[int]] | None = None) -> list[int]:
     """Native sub-issues, or [KEY] convention matches when the native read fails."""
-    numbers, _ = _epic_task_resolution(cfg, epic, by_key)
+    numbers, _ = _epic_task_resolution(cfg, epic, by_key, sub_issues)
     return numbers
 
 
@@ -117,7 +124,8 @@ def _child_connection_changes(desired: set[str], existing: set[str], managed: se
 
 def sync_child_connections(cfg: dict, apply: bool, epics: list[dict], card_for, by_key: dict,
                            by_number: dict, poisoned: frozenset[str],
-                           managed_card_ids: set[str]) -> None:
+                           managed_card_ids: set[str],
+                           sub_issues: dict[int, list[int]] | None = None) -> None:
     """Mirror GitHub sub-issues as native AgilePlace parent/child card connections (step 3):
     authoritative native reads reconcile exactly (additions and removals); the [KEY] title-key
     fallback is add-only, because a heuristic must never authorize destructive reconciliation.
@@ -136,7 +144,7 @@ def sync_child_connections(cfg: dict, apply: bool, epics: list[dict], card_for, 
         if str(parent["id"]) in poisoned:
             print(f"WARN  [{key}] skipping child connections -- parent card {parent['id']} is poisoned")
             continue
-        task_numbers, authoritative = _epic_task_resolution(cfg, epic, by_key)
+        task_numbers, authoritative = _epic_task_resolution(cfg, epic, by_key, sub_issues)
         task_issues = [by_number[number] for number in task_numbers if number in by_number]
         desired = {str(card["id"])
                    for issue in task_issues
@@ -580,6 +588,10 @@ def main() -> None:
     active_issues = [issue for issue in issues if not is_retired_issue(issue)]
     retired_issues = [issue for issue in issues if is_retired_issue(issue)]
     open_pr = ghkit.open_pr_issue_numbers(cfg)
+    # Issue #98: one batched GraphQL read replaces the per-issue comment loop, the per-issue
+    # blocked-by loop, and the per-epic sub-issue reads. None -> each consumer keeps its
+    # existing per-item path.
+    graph = ghkit_snapshot.fetch_issue_graph(cfg) if online else None
     open_pr_read_failed = open_pr is None
     if open_pr_read_failed:
         print("WARN  open-PR read FAILED -- leaving PR-derived 'In review' stages untouched this run")
@@ -722,7 +734,8 @@ def main() -> None:
     # 3) parent/child connections (see sync_child_connections for the full contract).
     poisoned = poisoned_card_ids(card_ops)
     managed_card_ids = _managed_card_ids(syncable_issues, card_for, retired_card_by_url)
-    sync_child_connections(cfg, apply, epics, card_for, by_key, by_number, poisoned, managed_card_ids)
+    sync_child_connections(cfg, apply, epics, card_for, by_key, by_number, poisoned, managed_card_ids,
+                           sub_issues=graph.sub_issues if graph else None)
 
     # 4) GitHub blocked-by edges -> native card dependencies (issue #57) -- all edges, managed
     # pairs only, retired Done blockers resolving through their URL-owned cards. Skip entirely
@@ -732,8 +745,8 @@ def main() -> None:
     # authority is narrower than managed_card_ids here: a card an active issue reached only
     # through the customId fallback confers no removal authority over its dependencies
     # (issue #60) -- see _removal_authority_card_ids.
-    blocked_by = (ghkit.blocked_by_map(cfg, [i["number"] for i in syncable_issues])
-                  if online and syncable_issues else {} if online else None)
+    blocked_by = ghkit_snapshot.resolve_blocked_by(
+        cfg, graph, online, [i["number"] for i in syncable_issues])
     if online and blocked_by is None:
         print("WARN  blocked-by snapshot incomplete -- leaving ALL card dependencies untouched this run")
     if blocked_by is not None:
@@ -762,7 +775,8 @@ def main() -> None:
         for issue in syncable_issues:
             card = card_for(issue)
             if card and card.get("id"):
-                sync_comments(cfg, apply, issue, card, issues_state)
+                sync_comments(cfg, apply, issue, card, issues_state,
+                              gh_comments=graph.comments.get(issue["number"]) if graph else None)
 
     if apply and clean:
         save_state(state)
