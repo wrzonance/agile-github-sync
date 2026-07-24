@@ -126,8 +126,10 @@ class FakeTenant:
     def _create_comment(self, path: str, body: dict):
         card_id = path.split("/")[1]
         self._next_comment_id += 1
+        # Live AgilePlace returns the new comment id as a digit-STRING, not a JSON number (see
+        # API-VALIDATION.md); modelling that exercises _coerce_comment_id's string branch end-to-end.
         comment = {
-            "id": self._next_comment_id, "text": body["text"],
+            "id": str(self._next_comment_id), "text": body["text"],
             "createdBy": {"fullName": "Smoke Bot", "emailAddress": "smoke-bot@example.invalid",
                           "id": "U1"},
             "createdOn": "2026-07-23T00:00:00Z",
@@ -136,9 +138,9 @@ class FakeTenant:
         return _Response(comment)
 
     def _update_comment(self, path: str, body: dict):
-        card_id, comment_id = path.split("/")[1], int(path.split("/")[3])
+        card_id, comment_id = path.split("/")[1], path.split("/")[3]
         for comment in self.comments.get(card_id, []):
-            if comment["id"] == comment_id:
+            if str(comment["id"]) == comment_id:
                 comment["text"] = body["text"]
                 comment["lastModified"] = "2026-07-23T00:05:00Z"
         return _Response({})
@@ -146,8 +148,9 @@ class FakeTenant:
     def _delete_comment(self, path: str):
         if self.ignore_comment_delete:
             return _Response(None)
-        card_id, comment_id = path.split("/")[1], int(path.split("/")[3])
-        self.comments[card_id] = [c for c in self.comments.get(card_id, []) if c["id"] != comment_id]
+        card_id, comment_id = path.split("/")[1], path.split("/")[3]
+        self.comments[card_id] = [c for c in self.comments.get(card_id, [])
+                                  if str(c["id"]) != comment_id]
         return _Response(None)
 
     def _create(self, url: str, body: dict):

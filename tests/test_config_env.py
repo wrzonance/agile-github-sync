@@ -237,6 +237,7 @@ def test_env_config_comment_sync_identity_none_when_unset(tmp_path, monkeypatch)
     "gh_login,ap_author",
     [
         (None, None),
+        ("octocat", "Jane Doe"),  # both non-blank: comment sync ENABLED -- still must be silent
         ("octocat", None),
         (None, "Jane Doe"),
         ("", ""),
