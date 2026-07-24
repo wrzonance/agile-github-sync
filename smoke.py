@@ -426,7 +426,10 @@ def _check_custom_id_header(cfg: dict, parent_id: str, run_id: str, results: lis
     spaces verbatim. The probe value keeps the per-run smoke prefix so stages.header_match_key()
     normalizes a leaked leftover to this run's unique key -- NEVER write a bare 'GitHub Issue #N'
     here (that would normalize to a real unkeyed issue's match key and could be adopted by a
-    later sync run)."""
+    later sync run). This step must run LAST among the parent-card checks: it overwrites the
+    parent card's customId away from the plain per-run prefix that earlier steps still key their
+    own lookups against, and only the run's final cleanup (which deletes the card outright) comes
+    after it."""
     _step(23, "customId header-format round-trip -- parens/#/spaces must survive verbatim")
     header = f"{PARENT_CUSTOM_ID_PREFIX}{run_id} (GitHub Issue #999999)"
     fresh = agileplace.get_card(cfg, parent_id)

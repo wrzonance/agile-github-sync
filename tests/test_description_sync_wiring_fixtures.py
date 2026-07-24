@@ -38,6 +38,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # was already confirmed byte-for-byte unchanged from before those commits, via `git diff`). A
 # mismatch means new code reached back into agileplace.py instead of staying in
 # agileplace_comments.py -- the module split this feature's design record requires.
+# Re-pinned for issue #93's create_card link_label parameter (the only agileplace.py change that
+# feature makes).
 AGILEPLACE_PY_SHA256 = "2a0539fe835285161beb17a9e4f5d7d01c53cbbf0ac011c96c2fd99703cc5c07"
 
 # Every file whose card fixtures reach sync.main()'s per-issue loop -- and therefore

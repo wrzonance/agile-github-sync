@@ -594,15 +594,15 @@ def test_promote_resumes_rather_than_skips_when_the_collision_is_the_cards_own_m
 
 # --- _writeback_header ----------------------------------------------------------
 
-def test_writeback_key_uses_bracketed_title_prefix_when_present():
+def test_writeback_header_uses_bracketed_title_prefix_when_present():
     assert intake._writeback_header("[EP-0C] Some card", 42) == "EP-0C (GitHub Issue #42)"
 
 
-def test_writeback_key_falls_back_to_issue_number_without_bracket_prefix():
+def test_writeback_header_falls_back_to_issue_number_without_bracket_prefix():
     assert intake._writeback_header("Plain title, no bracket", 42) == "GitHub Issue #42"
 
 
-def test_writeback_key_is_sourced_from_the_cards_own_title_not_a_fetch():
+def test_writeback_header_is_sourced_from_the_cards_own_title_not_a_fetch():
     assert intake._writeback_header("[EP-01] A", 5) != intake._writeback_header("[EP-02] B", 5)
 
 

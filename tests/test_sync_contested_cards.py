@@ -115,6 +115,29 @@ def test_contested_card_excluded_from_all_active_match_paths_and_warns_once(
     patch_card.assert_not_called()
 
 
+def test_contested_detection_spans_header_format_cards(tmp_path, monkeypatch, capsys):
+    """A card whose customId is already the issue #93 HEADER format ('KEY (GitHub Issue #1)')
+    rather than a bare key must still be fenced when two active issues both claim it. Neither
+    issue's own url matches (the card carries no externalLinks), so both resolve only through the
+    customId fallback path -- sync.py's build loop normalizes the header customId back down to
+    'KEY' via header_match_key() before all_card_by_cid is ever keyed, so contested_cards() sees
+    the same claim it would for an old-format 'KEY' card."""
+    issue1 = _issue(1, "[KEY] widget one")
+    issue2 = _issue(2, "[KEY] widget two")
+    card = _card_with_urls("100", "KEY (GitHub Issue #1)", [])
+
+    create_card, patch_card = _run_main(tmp_path, monkeypatch, [issue1, issue2], cards=[card])
+
+    out = capsys.readouterr().out
+    warn_lines = [line for line in out.splitlines() if line.startswith("WARN  card 100 claimed by")]
+    assert len(warn_lines) == 1, "a header-format customId card must be fenced exactly like a bare-key one"
+    assert "2 issue URLs" in warn_lines[0]
+    assert issue1["url"] in warn_lines[0] and issue2["url"] in warn_lines[0]
+
+    create_card.assert_not_called()
+    patch_card.assert_not_called()
+
+
 def test_contested_card_exclusion_is_consistent_across_retirement_and_active_paths(
         tmp_path, monkeypatch, capsys):
     """A card contested between a retired issue's URL and an active issue's URL must be excluded from
