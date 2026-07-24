@@ -154,7 +154,7 @@ def _raw_timestamp(value) -> str | None:
 def _coerce_comment_id(raw_id) -> int | None:
     """The comment id as an int, or None when it can't be one. Accepts a real int (never a bool)
     and -- since the live POST /io/card/{cardId}/comment response serializes the new id as a STRING
-    of digits (e.g. '2491550223', confirmed against a real tenant 2026-07-23; see API-VALIDATION.md)
+    of digits (e.g. '1234567890', confirmed against a real tenant 2026-07-23; see API-VALIDATION.md)
     -- an all-ASCII-digit string, coerced to int. Rejects bools, floats, non-digit strings, and
     None so the ledger's gh_id/ap_id int|None contract (comment_sync struct #1) still holds."""
     if isinstance(raw_id, bool):

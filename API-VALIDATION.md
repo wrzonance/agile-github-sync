@@ -366,46 +366,56 @@ alone, since this worktree has no `.env` and no live board to probe against:
 All four remain `[live-check]` pending -- the first real reverse-intake promotion against a
 production board should confirm or correct them and update this section.
 
-## Comment sync (issue #66) -- `[live-check]` pending
+## Comment sync (issue #66) -- Validated live 2026-07-23
 
-`agileplace_comments.py` adds list/create/update/delete for AgilePlace card comments, following the
-same defensive-normalization style as the rest of this file. `smoke.py` steps 15-18 (added alongside
-this module) exercise the whole CRUD surface offline via the fake tenant in `test_smoke.py`, but
-**no live run against a real tenant has been done from this worktree** (no `.env`/credentials are
-available here -- see the module's own docstring). Three things remain genuinely unconfirmed:
+`agileplace_comments.py` adds list/create/update/delete for AgilePlace card comments. A full
+real-tenant `python smoke.py` run on 2026-07-23 exercised every comment step (create -> list ->
+edit -> delete) against a disposable card and **all passed**. All shapes below are live-confirmed;
+values are shown as PLACEHOLDERS (the real run used a real name/email, not reproduced here). The
+three previously-speculative items are now retired:
 
-1. **List endpoint shape.** `GET /io/card/{cardId}/comment` is assumed to return either a bare array
-   or an object carrying a `comments` array (mirroring `list_cards`' `{"cards": [...]}` convention);
-   `list_comments` falls back once to the single-card GET's top-level `comments` field on ANY shape
-   surprise. Neither the primary endpoint nor the fallback field name has been checked against a
-   real tenant -- the whole thing is inferred from `list_cards`/`get_card`'s already-confirmed
-   conventions, not from public docs (the web UI's comment feature has no documented io v2 page).
-2. **Create/update field names.** `POST`/`PUT` send `{"text": <html>}`; the read side tries
-   `createdBy` (nested `fullName`/`emailAddress`/`id`) and `createdOn` for the author/created
-   timestamp, with `lastModified`/`modifiedOn`/`updatedOn`/`editedOn` tried in that order for the
-   edited timestamp. None of these key names are confirmed -- `_normalize_ap_comment` degrades every
-   field but `id` to `None` on a miss rather than raising, so a wrong guess here would silently
-   report `author_name=None`/`edited=None` forever instead of failing loud. `smoke.py` step 16 prints
-   the resolved shape as an INFO line specifically so a live run surfaces this.
-3. **DELETE shape is speculative.** `DELETE /io/card/{cardId}/comment/{commentId}` was never
-   confirmed against docs, the Node client, or a devtools capture (unlike the Dependencies delete
-   shape above, which WAS captured live) -- the web UI has never exposed deleting a comment.
-   `smoke.py` step 18 pins this as a hard PASS/FAIL (readback-confirms-gone, not just a 2xx), the
-   same pattern used for the externalLink-add and tag-add checks.
+1. **List endpoint -- CONFIRMED.** `GET /io/card/{cardId}/comment` list readback finds the created
+   comment (`list_comments` normalizes it; the single-card `comments` fallback was not needed).
+2. **Create/read field names -- CONFIRMED.** `POST /io/card/{cardId}/comment {"text": <html>}`
+   returns a usable comment `id` **serialized as a STRING of digits** (e.g. `"1234567890"`), not a
+   JSON number -- `_coerce_comment_id` accepts an int (never a bool) OR an all-ASCII-digit string
+   and coerces to `int`, preserving the ledger's `int|None` id contract. The read side resolves
+   `createdBy` (nested `fullName`, `emailAddress`, `id`) and `createdOn`:
+   - `createdBy.fullName` -> a display name (placeholder `"Maintainer Name"`).
+   - `createdBy.emailAddress` -> **arrives MIXED-CASE** even when the configured
+     `COMMENT_SYNC_AP_AUTHOR` is lowercase (e.g. `Maintainer@Example.COM`). `is_sync_authored`
+     casefolds both sides, so identity matching still works -- pinned by
+     `test_is_sync_authored_ap_matches_email_case_insensitively`.
+   - `createdBy.id` -> a numeric-string id (placeholder `"<numeric-string>"`).
+   - `createdOn` -> a Z-suffixed ISO-8601 timestamp (placeholder `"2026-07-23T…Z"`), which
+     `_parse_timestamp` handles.
+3. **DELETE -- CONFIRMED WORKING.** `DELETE /io/card/{cardId}/comment/{commentId}` succeeds and a
+   list readback shows 0 comments -- the "speculative" shape is real. The web UI never exposed
+   comment deletion, but the io v2 endpoint honors it.
 
-Run `python smoke.py` against a disposable card on a real tenant to confirm or correct all three,
-then move this section to a "Validated live" one the way the reverse-intake findings above will be.
+### Open `[live-check]`: the AP comment `edited` timestamp is not populated
 
-### Live run 2026-07-23 (partial) -- `POST` id is a JSON string of digits
+The live run's fact-finding surfaced ONE gap: the comment `edited` timestamp came back **`None`
+even immediately after a successful `PUT` edit** (`created=…Z`, `edited=None`; before/after the PUT
+both `None`). None of `_normalize_ap_comment`'s candidate keys (`lastModified`, `modifiedOn`,
+`updatedOn`, `editedOn`) matched, so either the field has a different name or AgilePlace genuinely
+does not expose a comment edit time.
 
-A real-tenant `python smoke.py` run got through steps 1-14 and reached STEP 15 (create comment).
-The **`POST /io/card/{cardId}/comment` response serializes the new comment `id` as a STRING of
-digits** (observed: `'2491550223'`), not a JSON number. The original `_normalize_ap_comment`
-required `isinstance(id, int)` and so rejected a valid live response with a (misleading)
-"non-numeric id" error. Fixed: `_coerce_comment_id` now accepts an int (never a bool) OR an
-all-ASCII-digit string and coerces to `int`, preserving the ledger's `gh_id`/`ap_id` `int|None`
-contract at the I/O boundary; the list read path funnels through the same normalizer, so it is
-covered too. **Confirmed live:** item 1 (list-shape) reached only far enough to create; items 2
-(author/timestamp field names) and 3 (speculative `DELETE`) plus the `PUT` edit shape remain
-**pending-live-validation** -- the run raised before steps 16-18 executed, so re-run `smoke.py`
-to exercise list-readback / edit / delete now that create succeeds.
+**Consequence if real:** AP-side comment edits are UNDETECTABLE by the drift model (a `None`
+ledgered value equals the `None` current value, so `_side_drifted` never fires) -> **AP -> GH edit
+propagation silently never happens.** This fails SAFE -- no corruption (nothing is overwritten), the
+GH -> AP direction is unaffected (GitHub always returns `updated_at`) -- but that half of the
+bidirectional-edit feature would be inert.
+
+`smoke.py` now dumps, after the edit, the RAW persisted comment's top-level keys + any date/time-ish
+key values AND a fact-finding PUT's raw response body (`_probe_comment_edit_shape`), so a re-run
+reveals the real edit-timestamp field name if one exists, or confirms none does. **Do not redesign
+drift handling yet** -- if the re-run confirms no edit timestamp, that is a design amendment for the
+maintainer to weigh (see the PR's Design decisions QUESTION).
+
+### INFO (issue #65): server accepted a description over the configured cap
+
+Fact-finding aside: the description length probe wrote **20007 chars and the server ACCEPTED and
+stored them** despite the configured `AP_DESCRIPTION_MAX_LENGTH=20000`. The configured cap is a
+client-side conservative guard, not a server-enforced limit -- the server did not reject the
+oversize body.

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import secrets
 import sys
 
@@ -343,6 +344,42 @@ def _find_comment(comments: list[dict], comment_id: int) -> dict | None:
     return next((comment for comment in comments if comment.get("id") == comment_id), None)
 
 
+_COMMENT_TIME_KEY_RE = re.compile(r"(?i)(date|time|modif|edit|updat|stamp|created|changed)")
+
+
+def _comment_time_like(obj: dict) -> dict:
+    """The subset of `obj`'s top-level items whose KEY looks date/time-ish -- values kept so a live
+    run reveals the actual timestamp value under whatever name AgilePlace uses."""
+    return {key: value for key, value in obj.items()
+            if isinstance(key, str) and _COMMENT_TIME_KEY_RE.search(key)}
+
+
+def _probe_comment_edit_shape(cfg: dict, parent_id: str, comment_id, results: list) -> None:
+    """Fact-finding for issue #66's open question: the AP comment `edited` timestamp came back None
+    even after a PUT, so none of _normalize_ap_comment's candidate keys (lastModified/modifiedOn/
+    updatedOn/editedOn) matched. Dump the RAW persisted comment's top-level keys, and a second
+    fact-finding PUT's raw response body -- values only for date/time-like keys -- so a live re-run
+    reveals which field (if any) carries the edit time, or confirms AP exposes none. Never pass/fail
+    (informational). See API-VALIDATION.md."""
+    raw = agileplace.api(cfg, "GET", agileplace_comments._comment_collection_path(parent_id))
+    raw_list = raw.get("comments") if isinstance(raw, dict) else raw if isinstance(raw, list) else []
+    raw_comment = next((c for c in (raw_list or []) if str(c.get("id")) == str(comment_id)), None)
+    if raw_comment is not None:
+        results.append(("RAW comment top-level keys after edit (fact-finding)", None,
+                        f"{sorted(raw_comment)}"))
+        results.append(("RAW comment date/time-like fields after edit (fact-finding)", None,
+                        f"{_comment_time_like(raw_comment)}"))
+    put_response = agileplace.mutate(cfg, True, "PUT",
+                                     agileplace_comments._comment_item_path(parent_id, comment_id),
+                                     body={"text": "<p>SMOKE comment (edit probe)</p>"},
+                                     note=f"edit-timestamp fact-find on comment {comment_id}")
+    if isinstance(put_response, dict) and put_response:
+        results.append(("PUT response top-level keys (fact-finding)", None,
+                        f"{sorted(put_response)}"))
+        results.append(("PUT response date/time-like fields (fact-finding)", None,
+                        f"{_comment_time_like(put_response)}"))
+
+
 def _check_comments(cfg: dict, parent_id: str, results: list) -> None:
     """Steps 15-18: agileplace_comments' full CRUD surface. Create, then a list-readback (the
     per-comment author/timestamp field names are VALIDATE LIVE per the issue #66 design doc --
@@ -384,6 +421,9 @@ def _check_comments(cfg: dict, parent_id: str, results: list) -> None:
     edited_after = found_after_edit.get("edited") if found_after_edit else None
     results.append(("comment edited timestamp moves after PUT (fact-finding)", None,
                     f"before={edited_before!r} after={edited_after!r}"))
+    # Live run 2026-07-23 saw edited=None even after the PUT -- dump the raw shape so a re-run finds
+    # the actual edit-timestamp field name (if AgilePlace exposes one). See API-VALIDATION.md.
+    _probe_comment_edit_shape(cfg, parent_id, comment_id, results)
 
     _step(18, "delete the comment (speculative shape), then confirm it is gone on readback")
     agileplace_comments.delete_comment(cfg, True, parent_id, comment_id)

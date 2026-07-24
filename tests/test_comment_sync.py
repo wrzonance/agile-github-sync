@@ -194,6 +194,15 @@ def test_is_sync_authored_ap_matches_exact():
     assert is_sync_authored("ap", "sync@example.com", IDENTITY) is True
 
 
+def test_is_sync_authored_ap_matches_email_case_insensitively():
+    """Live finding (2026-07-23): AgilePlace's createdBy.emailAddress arrives MIXED-CASE even when
+    the configured COMMENT_SYNC_AP_AUTHOR is lowercase. is_sync_authored casefolds both sides, so a
+    mixed-case live email still matches the sync identity -- otherwise the sync would fail to
+    recognize its own mirrors and re-mirror them as if human-authored."""
+    identity = {"gh_login": "syncbot", "ap_author": "maintainer@example.com"}
+    assert is_sync_authored("ap", "Maintainer@Example.COM", identity) is True
+
+
 def test_is_sync_authored_false_for_different_author():
     assert is_sync_authored("gh", "alice", IDENTITY) is False
 

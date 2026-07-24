@@ -299,6 +299,7 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
         ("PATCH", "card/S1"),             # description length probe
         ("POST", "card/S1/comment"),      # comment create
         ("PUT", "card/S1/comment/1"),     # comment edit
+        ("PUT", "card/S1/comment/1"),     # edit-timestamp fact-finding probe (issue #66)
         ("DELETE", "card/S1/comment/1"),  # comment delete (speculative shape)
         ("PATCH", "card/S1"),             # deliberate stale-version probe
         ("DELETE", "card/S2"),            # cleanup child

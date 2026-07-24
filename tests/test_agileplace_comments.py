@@ -66,10 +66,10 @@ def test_normalize_ap_comment_accepts_valid_int_id():
 
 def test_normalize_ap_comment_accepts_digit_string_id_and_coerces_to_int():
     """The live POST /io/card/{id}/comment response serializes the new comment id as a STRING of
-    digits (e.g. '2491550223' -- confirmed against a real tenant 2026-07-23, see API-VALIDATION.md).
+    digits (e.g. '1234567890' -- confirmed against a real tenant 2026-07-23, see API-VALIDATION.md).
     The normalizer must coerce it to int so the ledger's gh_id/ap_id int|None contract still holds."""
-    result = _normalize_ap_comment({"id": "2491550223", "text": "hi"})
-    assert result["id"] == 2491550223
+    result = _normalize_ap_comment({"id": "1234567890", "text": "hi"})
+    assert result["id"] == 1234567890
     assert isinstance(result["id"], int)
 
 
