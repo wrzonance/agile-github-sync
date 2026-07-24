@@ -21,7 +21,7 @@ import agileplace
 import board_layout
 import card_types
 import ghkit
-from stages import issue_custom_id, title_key
+from stages import header_match_key, issue_card_header, issue_custom_id, title_key
 
 # Embedded verbatim in every promoted issue's body so a create-then-writeback crash can be resumed
 # by search: `str.format` with a single `card_id` placeholder, coerced to str before formatting.
@@ -121,9 +121,12 @@ def _is_candidate(card: dict, intake_lane_ids: set[str], target_urls: set[str],
 
     A card qualifies only when it has a usable id AND a usable title, its current lane is one of
     `intake_lane_ids`, it carries no external link matching `target_urls` (the known target-repo
-    issue URLs), and its customId doesn't match any of `managed_custom_ids`. A foreign external
-    link (anything not in `target_urls`) or an unrecognized customId never disqualifies a card by
-    itself -- only an actual match does.
+    issue URLs), and its customId doesn't match any of `managed_custom_ids`. The customId check
+    normalizes the card's value through `header_match_key` first (issue #93) -- `managed_custom_ids`
+    stays in key space, so a card already rewritten to the header format ('0C1 (GitHub Issue #5)')
+    is disqualified exactly the same as one still carrying the bare old-format key ('0C1'). A
+    foreign external link (anything not in `target_urls`) or an unrecognized customId never
+    disqualifies a card by itself -- only an actual match does.
 
     A card lacking a usable id (missing, None, or empty -- the same truthy check sync.py's own
     card-matching loop uses) is never a candidate: promoting it would build marker_for_card(None),
@@ -142,7 +145,7 @@ def _is_candidate(card: dict, intake_lane_ids: set[str], target_urls: set[str],
         return False
     if set(agileplace.card_external_urls(card)) & target_urls:
         return False
-    return agileplace.custom_id_value(card) not in managed_custom_ids
+    return header_match_key(agileplace.custom_id_value(card)) not in managed_custom_ids
 
 
 def intake_candidates(cards: list[dict], lanes: list, stage_map: dict | None,
@@ -214,11 +217,12 @@ def _find_marked_issue(card_id, issues_with_bodies: list[dict]) -> dict | None:
     return next((issue for issue in issues_with_bodies if marker in issue.get("body", "")), None)
 
 
-def _writeback_key(card_title: str, issue_number: int) -> str:
-    """The customId written back onto a promoted card, via the SAME [KEY]-prefix convention every
-    other customId in this codebase uses (stages.issue_custom_id) -- computed from the CARD's own
-    title, never fetched back from GitHub."""
-    return issue_custom_id({"title": card_title, "number": issue_number})
+def _writeback_header(card_title: str, issue_number: int) -> str:
+    """The customId written back onto a promoted card -- the SAME header format the ordinary sync
+    writes (stages.issue_card_header, issue #93), computed from the CARD's own title, never
+    fetched back from GitHub. header_match_key() folds it back to the key `_is_candidate`'s
+    disqualification check and the ordinary sync's matching use."""
+    return issue_card_header({"title": card_title, "number": issue_number})
 
 
 def _writeback(cfg: dict, apply: bool, card: dict, issue: dict) -> None:
@@ -252,7 +256,7 @@ def _writeback(cfg: dict, apply: bool, card: dict, issue: dict) -> None:
     against a card with a usable version (the ordinary case from agileplace.list_cards()). See
     _card_for_link_write for how this is avoided."""
     card_id = card.get("id")
-    key = _writeback_key(card.get("title", ""), issue["number"])
+    key = _writeback_header(card.get("title", ""), issue["number"])
     agileplace.patch_card(cfg, apply, card, [agileplace.op_custom_id(key)],
                           note=f"intake customId -> {key}")
     if "externalLinks" in card or card.get("externalLink"):
@@ -314,9 +318,10 @@ def _reverse_seed_create(cfg: dict, apply: bool, card: dict,
 
 
 def _collides_with_a_different_card(derived_key: str | None, claimed_keys: set[str]) -> bool:
-    """True when this card's PROSPECTIVE writeback customId (`derived_key` -- the `title_key` of its
-    title, what `_writeback_key` produces from a `[KEY]` prefix) is already owned by a DIFFERENT
-    URL-owned card: an existing issue's `issue_custom_id`, or a candidate promoted earlier this run.
+    """True when this card's PROSPECTIVE writeback key (`derived_key` -- the `title_key` of its
+    title, the same `[KEY]` prefix `_writeback_header` folds into its header-format customId) is
+    already owned by a DIFFERENT URL-owned card: an existing issue's `issue_custom_id`, or a
+    candidate promoted earlier this run.
     A card whose title has no `[KEY]` prefix derives no key (None -- its writeback falls back to the
     new issue's own unique number, which can never collide) and never collides here."""
     return derived_key is not None and derived_key in claimed_keys

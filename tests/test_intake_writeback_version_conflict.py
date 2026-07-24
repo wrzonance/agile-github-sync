@@ -95,7 +95,7 @@ def test_writeback_second_write_never_reuses_the_first_writes_stale_version(monk
     intake._writeback(CFG, True, card, issue)
 
     assert server.patch_versions_sent == ["1", "2"]
-    assert server.card["customId"] == "42"
+    assert server.card["customId"] == "GitHub Issue #42"
     assert server.card["externalLink"] == {"label": "GitHub #42", "url": issue["url"]}
 
 
