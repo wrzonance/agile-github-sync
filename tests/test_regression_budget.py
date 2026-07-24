@@ -177,7 +177,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # between #79 and #66 and grew sync.py from 726 to 750 lines -- none of that growth is #66's to own,
 # so re-deriving from #79's original 726 would blame #66 for line growth #66 didn't cause. See
 # module docstring's issue #66 section.
-PRE_CHANGE_SYNC_LINES = 750
+# Issue #96 (perf overhaul stack: #97 run-scoped context, #98 batched issue graph) re-anchors
+# again, same reasoning as #66/#79: `git show 4845f1b:sync.py | wc -l` = 774 at the stack's base
+# (the #94 merge commit) -- #93's own retirement-header wiring grew the file from 750 and none of
+# that is #96's to own. #96's sync.py delta stays wiring-only by pushing decision logic into the
+# new modules (ghkit_snapshot.resolve_blocked_by owns the graph-vs-fallback selection; the
+# per-epic/per-issue readers stay where they were).
+PRE_CHANGE_SYNC_LINES = 774
 
 # Wiring-only budget for issue #75's own addition: widen contested_cards()'s call site to also
 # fence pure-customId collisions, a poisoned-child guard in the step-3 child-connection loop, a

@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import agileplace  # noqa: E402
 import board_layout  # noqa: E402
 import ghkit  # noqa: E402
+import ghkit_snapshot  # noqa: E402
 import ghproject  # noqa: E402
 import sync  # noqa: E402
 
@@ -93,6 +94,10 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     since the primary 4-tuple return stays unchanged for every other caller."""
     stack = ExitStack()
     stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
+    # Issue #98: default the batched issue graph to None so every pre-existing fixture keeps
+    # exercising the per-item reader paths; graph-specific tests re-patch this inside their
+    # own `with` block (the later patch wins while active).
+    stack.enter_context(patch("ghkit_snapshot.fetch_issue_graph", return_value=None))
     issue = _issue() if issue_return is _UNSET else issue_return
     issues = issue if isinstance(issue, list) else [issue]
     stack.enter_context(patch("ghkit.list_issues", return_value=issues))
@@ -847,3 +852,75 @@ def test_created_card_uses_header_custom_id_and_short_link_label(tmp_path):
     args, kwargs = create_card_mock.call_args
     assert args[3] == "GitHub Issue #1"          # the custom_id argument is the header
     assert kwargs["link_label"] == "GitHub 1"    # the link label stays the short key
+
+
+# --- issue #98: batched issue-graph wiring ---------------------------------------------------
+
+def test_main_prefers_graph_blocked_by_and_skips_the_per_issue_reader(tmp_path):
+    """A healthy IssueGraph supersedes ghkit.blocked_by_map entirely -- the per-issue REST loop
+    (~120 gh spawns on the reference board) must not run."""
+    card = _card()
+    stack, _run_mock, patch_card_mock, _create = _mock_io(card, ({}, []), field_meta_return=None)
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+         patch("sys.argv", ["sync.py"]), \
+         patch("ghkit_snapshot.fetch_issue_graph",
+               return_value=ghkit_snapshot.IssueGraph(comments={}, blocked_by={}, sub_issues={})), \
+         patch("ghkit.blocked_by_map",
+               side_effect=AssertionError("graph supersedes the per-issue blocked-by loop")):
+        sync.main()
+
+
+def test_main_graph_blocked_by_none_skips_all_dependency_writes(tmp_path, capsys):
+    """graph.blocked_by is None (all-or-nothing failure inside the batch) -> same contract as
+    blocked_by_map returning None: WARN once, touch no dependencies, and never fall back to the
+    per-issue REST loop (its result could not be more complete than the batch's)."""
+    card = _card()
+    stack, _run_mock, _patch_card, _create = _mock_io(card, ({}, []), field_meta_return=None)
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+         patch("sys.argv", ["sync.py"]), \
+         patch("ghkit_snapshot.fetch_issue_graph",
+               return_value=ghkit_snapshot.IssueGraph(comments={}, blocked_by=None, sub_issues={})), \
+         patch("ghkit.blocked_by_map",
+               side_effect=AssertionError("graph failure must not re-run the per-issue loop")):
+        sync.main()
+
+    assert "blocked-by snapshot incomplete" in capsys.readouterr().out
+
+
+def test_main_falls_back_to_per_issue_readers_when_graph_is_none(tmp_path):
+    """fetch_issue_graph returning None (whole-query failure) keeps today's per-item behavior."""
+    card = _card()
+    stack, _run_mock, _patch_card, _create = _mock_io(card, ({}, []), field_meta_return=None)
+    blocked_by_mock = stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+         patch("sys.argv", ["sync.py"]), \
+         patch("ghkit_snapshot.fetch_issue_graph", return_value=None):
+        sync.main()
+
+    blocked_by_mock.assert_called_once()
+
+
+def test_main_prefers_graph_sub_issues_for_epics(tmp_path):
+    """An epic whose number is in graph.sub_issues resolves authoritatively from the batch --
+    the per-epic ghkit.sub_issue_numbers GraphQL call must not run."""
+    epic_issue = {**_issue(), "title": "[EP] Epic", "labels": ["type:epic"]}
+    card = {**_card(), "customId": "EP", "tags": ["type:epic"]}
+    stack, _run_mock, _patch_card, _create = _mock_io(
+        card, ({}, []), field_meta_return=None, issue_return=epic_issue)
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+         patch("sys.argv", ["sync.py"]), \
+         patch("ghkit_snapshot.fetch_issue_graph",
+               return_value=ghkit_snapshot.IssueGraph(
+                   comments={}, blocked_by={},
+                   sub_issues={epic_issue["number"]: []})), \
+         patch("ghkit.sub_issue_numbers",
+               side_effect=AssertionError("graph supersedes the per-epic sub-issue read")):
+        sync.main()

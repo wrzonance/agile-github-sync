@@ -104,6 +104,23 @@ def _local_blockers(node: dict, number: int, target_repo: str) -> list[int]:
     return numbers
 
 
+def resolve_blocked_by(cfg: dict, graph: IssueGraph | None, online: bool,
+                       issue_numbers: list[int]) -> dict[int, list[int]] | None:
+    """The run's blocked-by snapshot, preferring the batched graph (issue #98).
+
+    Offline -> None (skip all dependency writes, AgilePlace unreachable); no syncable issues ->
+    {} (nothing to reconcile); a present graph -> its blocked_by verbatim (None inside it is the
+    batch's own all-or-nothing failure -- never re-run the per-issue loop, whose result could not
+    be more complete); no graph -> the existing per-issue reader."""
+    if not online:
+        return None
+    if not issue_numbers:
+        return {}
+    if graph is not None:
+        return graph.blocked_by
+    return ghkit.blocked_by_map(cfg, issue_numbers)
+
+
 def fetch_issue_graph(cfg: dict) -> IssueGraph | None:
     """The whole repo's issue graph in ceil(N/50) gh spawns. None on any page failure."""
     ctx = ghkit._repo_context(cfg)
