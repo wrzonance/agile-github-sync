@@ -595,6 +595,8 @@ def main() -> None:
     pv2 = ghproject.resolve_project_v2_status(cfg)
     project_items, project_status = pv2.project_items, pv2.project_status
     field_meta, project_read_failed, move_lanes = pv2.field_meta, pv2.project_read_failed, pv2.move_lanes
+    if pv2.status_meta:  # issue #97: status writes (vetting latch) reuse this run's one fetch
+        cfg = {**cfg, "project_field_meta": pv2.status_meta}
 
     # --- issue #82: card-types wiring (comment-banner delimited -- #65 is expected to touch this
     # same `lanes = ...` line, so this is flagged as a likely merge conflict up front) ---
