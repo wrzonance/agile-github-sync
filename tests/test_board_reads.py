@@ -176,3 +176,18 @@ def test_hydrate_failed_reads_keep_todays_unknown_semantics(monkeypatch):
     assert card["_prefetchedDeps"] is None      # None -> "state unknown", consumer skips
     assert card["_prefetchedApComments"] is None
     assert card["_prefetchedChildIds"] is None  # None -> add-only authority
+
+
+def test_hydrate_skips_dependency_prefetch_when_reconciliation_is_off(monkeypatch):
+    """Codex stack-review P2: when the run's blocked-by snapshot is unusable (blocked_by=None),
+    sync_dependencies never runs -- prefetching one dependency read per matched card would spend
+    the expensive requests solely to discard them."""
+    monkeypatch.setattr(agileplace, "card_dependencies",
+                        Mock(side_effect=AssertionError("no dependency prefetch expected")))
+    monkeypatch.setattr(agileplace, "get_card", lambda _cfg, cid: {"id": cid})
+    card = {"id": "T1"}
+
+    board_reads.hydrate_run_reads({}, True, [_issue(2)], lambda _i: card, [],
+                                  prefetch_deps=False)
+
+    assert "_prefetchedDeps" not in card
