@@ -562,17 +562,21 @@ def _planned_card_snapshot(title: str, custom_id: str, external_url: str,
 
 def create_card(cfg: dict, apply: bool, title: str, custom_id: str, external_url: str,
                 lane_id: str | None, type_id: str | None = None,
-                type_title: str | None = None) -> Mapping[str, object]:
+                type_title: str | None = None,
+                link_label: str | None = None) -> Mapping[str, object]:
     """Create a card, or return a plan-only read-only snapshot when ``apply`` is false.
 
     ``type_id`` (when truthy) is sent as the card's typeId; ``type_title`` never reaches the API --
-    it only feeds the dry-run snapshot's nested type.title for same-pass read-back.
+    it only feeds the dry-run snapshot's nested type.title for same-pass read-back. ``link_label``
+    (issue #93) is used verbatim as the external-link label when provided; None keeps the classic
+    ``GitHub {custom_id}`` derivation for every existing caller.
     """
     body = {"boardId": cfg["board_id"], "title": title, "customId": custom_id}
     if lane_id:
         body["laneId"] = lane_id
     if external_url:
-        body["externalLink"] = {"label": f"GitHub {custom_id}", "url": external_url}
+        label = link_label if link_label is not None else f"GitHub {custom_id}"
+        body["externalLink"] = {"label": label, "url": external_url}
     if type_id:
         body["typeId"] = type_id
     if not apply:
