@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agileplace  # noqa: E402
 import board_layout  # noqa: E402
+import ghkit  # noqa: E402
 import intake  # noqa: E402
 import sync  # noqa: E402
 
@@ -53,6 +54,7 @@ def _cfg(tmp_path):
         "token": "tok", "host": "example.leankit.com", "board_id": "42",
         "target_repo_path": tmp_path,
         "label_sync_ignore": frozenset(),
+        "repo_context": ghkit.RepoContext(owner="acme", name="repo", host="github.com"),
         "stage_lane_map": {"Intake": ["New Requests"]},
         "gh_project": {"owner": "acme", "number": "7", "status_field": "Status",
                        "start_field": "Start", "target_field": "Target"},
@@ -66,7 +68,7 @@ def _run_main(tmp_path, promote_return, lanes=(), cards=None):
     state_file = tmp_path / ".sync-state.json"
     cfg = _cfg(tmp_path)
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
+    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
     stack.enter_context(patch("ghkit.list_issues", return_value=[_issue()]))
     stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
@@ -150,7 +152,7 @@ def test_main_runs_intake_only_after_the_fail_closed_identity_check(tmp_path):
     cid_card = {"id": "C-cid", "customId": "1", "laneId": "LANE1"}  # issue #1's fallback customId
 
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
+    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
     stack.enter_context(patch("ghkit.list_issues", return_value=[_issue()]))
     stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
     stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))

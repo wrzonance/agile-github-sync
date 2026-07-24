@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agileplace  # noqa: E402
 import board_layout  # noqa: E402
+import ghkit  # noqa: E402
 import ghproject  # noqa: E402
 import sync  # noqa: E402
 
@@ -60,6 +61,7 @@ def _cfg(tmp_path):
         "token": "tok", "host": "example.leankit.com", "board_id": "42",
         "target_repo_path": tmp_path,
         "label_sync_ignore": frozenset(),
+        "repo_context": ghkit.RepoContext(owner="acme", name="repo", host="github.com"),
         "stage_lane_map": {},
         "gh_project": {"owner": "acme", "number": "7", "status_field": "Status",
                        "start_field": "Start", "target_field": "Target"},
@@ -90,7 +92,7 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     stashed as stack.add_item_mock / stack.set_item_status_mock for latch-specific call assertions,
     since the primary 4-tuple return stays unchanged for every other caller."""
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.repo_name", return_value="acme/repo"))
+    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
     issue = _issue() if issue_return is _UNSET else issue_return
     issues = issue if isinstance(issue, list) else [issue]
     stack.enter_context(patch("ghkit.list_issues", return_value=issues))
