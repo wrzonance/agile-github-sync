@@ -71,7 +71,7 @@ def gather_board_reads(cfg: dict, *, description_card_ids, dependency_card_ids,
 
 
 def hydrate_run_reads(cfg: dict, online: bool, syncable_issues: list, card_for, epics: list,
-                      max_workers: int = 8) -> None:
+                      max_workers: int = 8, prefetch_deps: bool = True) -> None:
     """Complete the run's matched card snapshots in place with everything the reconciliation
     loops would otherwise fetch one card at a time: `description` (the real API key --
     agileplace_description.card_description's documented zero-I/O path), `_prefetchedDeps`,
@@ -82,7 +82,11 @@ def hydrate_run_reads(cfg: dict, online: bool, syncable_issues: list, card_for, 
     sync.py's wiring unchanged. Only real, matched cards are touched -- plan-only cards keep
     their existing zero-network conventions. A key hydrated to None carries that reader's own
     failure sentinel (consumers already skip on it); a description that failed stays ABSENT so
-    the consumer's serial get_card fallback fails loud at today's call site. Offline -> no-op."""
+    the consumer's serial get_card fallback fails loud at today's call site. Offline -> no-op.
+
+    `prefetch_deps=False` (the run's blocked-by snapshot is unusable, so sync_dependencies will
+    not run) skips the per-card dependency reads entirely rather than spending them on results
+    the run would discard."""
     if not online:
         return
     matched: dict[str, dict] = {}
@@ -95,7 +99,7 @@ def hydrate_run_reads(cfg: dict, online: bool, syncable_issues: list, card_for, 
     reads = gather_board_reads(
         cfg,
         description_card_ids=[cid for cid, c in matched.items() if "description" not in c],
-        dependency_card_ids=list(matched),
+        dependency_card_ids=list(matched) if prefetch_deps else [],
         comment_card_ids=list(matched) if cfg.get("comment_sync_identity") else [],
         child_parent_ids=epic_ids,
         max_workers=max_workers,
@@ -103,7 +107,8 @@ def hydrate_run_reads(cfg: dict, online: bool, syncable_issues: list, card_for, 
     for cid, card in matched.items():
         if cid in reads.descriptions:
             card["description"] = reads.descriptions[cid]
-        card["_prefetchedDeps"] = reads.dependencies.get(cid)
+        if cid in reads.dependencies:
+            card["_prefetchedDeps"] = reads.dependencies[cid]
         if cid in reads.ap_comments:
             card["_prefetchedApComments"] = reads.ap_comments[cid]
         if cid in reads.children:
