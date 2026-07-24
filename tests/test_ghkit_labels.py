@@ -11,6 +11,7 @@ sync._filter_gh_safe_labels and sync_metadata's persisted-merge-base arithmetic 
 record a label as GitHub-side-applied when it was not actually written. Run: pytest -q
 """
 import copy
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ghkit import edit_label, is_gh_label_safe  # noqa: E402
+from ghkit import create_label, edit_label, is_gh_label_safe  # noqa: E402
 from reconcile import Reconciled  # noqa: E402
 from metadata_sync import _filter_gh_safe_labels, sync_metadata  # noqa: E402
 
@@ -491,6 +492,146 @@ def test_sync_metadata_queues_combined_add_and_remove_as_one_patch(monkeypatch, 
     assert {op["op"] for op in ops} == {"add", "remove"}         # both kinds combined in that one call
     assert sum(1 for op in ops if op["op"] == "add") == 1
     assert sum(1 for op in ops if op["op"] == "remove") == 1
+
+
+# --- issue #91: a missing GitHub label must be created (maintainer decision: auto-create), ---
+# --- and no gh label failure may ever abort the run -- the crash class from the first live ----
+# --- --apply after #66: `gh issue edit --add-label ADR` -> "'ADR' not found" -> whole sync died.
+
+def _gh_error(label="ADR"):
+    return subprocess.CalledProcessError(1, ["gh", "issue", "edit"], stderr=f"'{label}' not found")
+
+
+def test_create_label_applies_via_gh(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: calls.append(args))
+    create_label({}, True, "ADR")
+    assert len(calls) == 1
+    assert calls[0][:2] == ["label", "create"]
+    assert calls[0][-2:] == ["--", "ADR"]  # name last, behind the terminator (see dash test below)
+    assert capsys.readouterr().out.startswith("gh    label create ADR")
+
+
+def test_create_label_protects_dash_prefixed_names(monkeypatch):
+    """A label like '-blocked' must reach gh as a positional argument, not be parsed as a flag:
+    options first, then the `--` terminator, then the name."""
+    calls = []
+    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: calls.append(args))
+    create_label({}, True, "-blocked")
+    assert len(calls) == 1
+    assert calls[0][-2:] == ["--", "-blocked"]
+    assert "--color" in calls[0] and calls[0].index("--color") < calls[0].index("--")
+
+
+def test_create_label_dry_run_prints_and_never_shells(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr("ghkit.run", lambda *a, **k: calls.append(a))
+    create_label({}, False, "ADR")
+    assert calls == []
+    assert capsys.readouterr().out.startswith("DRY   gh label create 'ADR'")
+
+
+def test_sync_metadata_creates_missing_label_and_retries_add(monkeypatch, capsys):
+    """The live #91 failure shape: the first --add-label fails (label not defined in the repo), the
+    sync creates the label and retries, the retry succeeds, and the base records the label as
+    applied -- the tag mirrors as intended."""
+    issue = _issue(labels=[])
+    card = _card(tags=["ADR"])
+    issues_state = {issue["url"]: {"labels": [], "milestone": None}}
+
+    edit_calls = []
+
+    def fake_edit(cfg, apply, number, label, *, add):
+        edit_calls.append((label, add))
+        if len(edit_calls) == 1:
+            raise _gh_error()
+
+    created = []
+    monkeypatch.setattr("ghkit.edit_label", fake_edit)
+    monkeypatch.setattr("ghkit.create_label", lambda cfg, apply, name: created.append(name))
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+
+    sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
+
+    assert edit_calls == [("ADR", True), ("ADR", True)]  # failed add, then the post-create retry
+    assert created == ["ADR"]
+    assert "ADR" in issues_state[issue["url"]]["labels"]  # confirmed write -> base advances
+
+
+def test_sync_metadata_retries_add_even_when_create_fails(monkeypatch, capsys):
+    """A concurrent creator can make `gh label create` fail with already-exists while the label IS
+    now available -- the creation failure must not skip the one add retry. First add fails, create
+    raises, the retry succeeds, and the base records the label as applied."""
+    issue = _issue(labels=[])
+    card = _card(tags=["ADR"])
+    issues_state = {issue["url"]: {"labels": [], "milestone": None}}
+
+    edit_calls = []
+
+    def fake_edit(cfg, apply, number, label, *, add):
+        edit_calls.append((label, add))
+        if len(edit_calls) == 1:
+            raise _gh_error()
+
+    def fake_create(cfg, apply, name):
+        raise _gh_error(name)
+
+    monkeypatch.setattr("ghkit.edit_label", fake_edit)
+    monkeypatch.setattr("ghkit.create_label", fake_create)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+
+    sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
+
+    assert edit_calls == [("ADR", True), ("ADR", True)]  # retry ran despite the create failure
+    assert "ADR" in issues_state[issue["url"]]["labels"]  # confirmed write -> base advances
+    assert capsys.readouterr().out.count("WARN") == 0
+
+
+def test_sync_metadata_skips_add_and_continues_when_create_and_retry_fail(monkeypatch, capsys):
+    """Even when the create+retry recovery fails, the run must survive: WARN, keep the label out of
+    the base (never actually landed -> retried next run), and still process the batch's other
+    labels."""
+    issue = _issue(labels=[])
+    card = _card(tags=["bad", "good"])
+    issues_state = {issue["url"]: {"labels": [], "milestone": None}}
+
+    def fake_edit(cfg, apply, number, label, *, add):
+        if label == "bad":
+            raise _gh_error("bad")
+
+    monkeypatch.setattr("ghkit.edit_label", fake_edit)
+    monkeypatch.setattr("ghkit.create_label", lambda cfg, apply, name: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+
+    sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
+
+    prev = issues_state[issue["url"]]
+    assert "good" in prev["labels"]      # the rest of the batch still applied
+    assert "bad" not in prev["labels"]   # never landed on GitHub -> excluded, retried next run
+    warns = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warns) == 1 and "bad" in warns[0] and "skipping add on GitHub" in warns[0]
+
+
+def test_sync_metadata_failed_remove_keeps_label_in_base_and_continues(monkeypatch, capsys):
+    """A failed --remove-label leaves the label actually on GitHub, so the base must keep it (the
+    remove is retried next run) and the run must continue -- never raise."""
+    issue = _issue(labels=["stale"])
+    card = _card(tags=[])
+    issues_state = {issue["url"]: {"labels": ["stale"], "milestone": None}}
+
+    def fake_edit(cfg, apply, number, label, *, add):
+        if not add:
+            raise _gh_error("stale")
+
+    monkeypatch.setattr("ghkit.edit_label", fake_edit)
+    monkeypatch.setattr("ghkit.create_label", lambda *a, **k: None)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+
+    sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
+
+    assert "stale" in issues_state[issue["url"]]["labels"]  # still on GitHub -> stays in base
+    warns = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert len(warns) == 1 and "stale" in warns[0] and "skipping remove on GitHub" in warns[0]
 
 
 def test_sync_metadata_backward_compatible_on_safe_labels(monkeypatch, capsys):

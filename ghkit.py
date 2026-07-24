@@ -317,6 +317,22 @@ def edit_label(cfg: dict, apply: bool, number: int, label: str, *, add: bool) ->
         print(f"DRY   gh issue edit {number} {flag} '{label}'")
 
 
+def create_label(cfg: dict, apply: bool, name: str) -> None:
+    """Create one repo label so a reconciled add can land -- `gh issue edit --add-label` does NOT
+    create labels missing from the repo (live failure, issue #91). Fixed neutral color; the name is
+    a positional argument to gh (no CSV-splitting flag), so is_gh_label_safe does not apply here.
+    gh errors (including already-exists) propagate; the metadata_sync caller treats the create as
+    best-effort ahead of its single add retry."""
+    if apply:
+        # options first, then `--` so a dash-prefixed name stays positional instead of being
+        # parsed as a flag
+        run(cfg, ["label", "create", "--color", "ededed",
+                  "--description", "created by agile-github-sync", "--", name])
+        print(f"gh    label create {name}")
+    else:
+        print(f"DRY   gh label create '{name}'")
+
+
 def set_milestone(cfg: dict, apply: bool, number: int, title: str | None) -> None:
     """Set (title) or clear (title=None) an issue's milestone, through the dry-run gate. A single
     set-operation -- never clear-then-set -- so replacing one milestone with another cannot lose it."""
