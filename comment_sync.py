@@ -466,13 +466,19 @@ def _warn_comment_sync_disabled() -> None:
          "to enable", file=sys.stderr)
 
 
-def _fetch_both_sides(cfg: dict, number: int, card_id) -> tuple[list[dict], list[dict]] | None:
+def _fetch_both_sides(cfg: dict, number: int, card_id,
+                      gh_comments: list[dict] | None = None) -> tuple[list[dict], list[dict]] | None:
     """Both sides' comment snapshots for one issue/card pair. None when EITHER read fails, so a
     broken side never plans against a stale/empty snapshot of the other -- mirrors the read
     tri-state contract at the wiring layer: `ghkit.list_issue_comments` already returns None on
     failure; `agileplace_comments.list_comments` raises SystemExit instead (its own tri-state
-    idiom), caught here."""
-    gh_comments = ghkit.list_issue_comments(cfg, number)
+    idiom), caught here.
+
+    `gh_comments`, when not None, is this issue's already-normalized slice of the run's batched
+    issue graph (issue #98) -- used verbatim, skipping the per-issue GitHub read; None keeps
+    today's per-issue read (the batch's overflow/normalization fallback path)."""
+    if gh_comments is None:
+        gh_comments = ghkit.list_issue_comments(cfg, number)
     if gh_comments is None:
         print(f"WARN  issue #{number} comment sync skipped: GitHub comment read failed",
              file=sys.stderr)
@@ -742,7 +748,8 @@ def _rebuild_ledger(cfg: dict, number: int, card_id, ledger: list[dict],
     return list(rows_by_key.values())
 
 
-def sync_comments(cfg: dict, apply: bool, issue: dict, card: dict, issues_state: dict) -> None:
+def sync_comments(cfg: dict, apply: bool, issue: dict, card: dict, issues_state: dict,
+                  gh_comments: list[dict] | None = None) -> None:
     """Wiring entrypoint: one call per issue, after `sync_description(...)`. No-ops on a dry-run-
     only planned card (``card["_planOnly"]`` -- no server-side id yet, same convention
     `sync_description` follows) and when comment sync is self-disabled (no identity configured),
@@ -757,7 +764,7 @@ def sync_comments(cfg: dict, apply: bool, issue: dict, card: dict, issues_state:
         _warn_comment_sync_disabled()
         return
     number, card_id = issue["number"], card.get("id")
-    fetched = _fetch_both_sides(cfg, number, card_id)
+    fetched = _fetch_both_sides(cfg, number, card_id, gh_comments=gh_comments)
     if fetched is None:
         return
     gh_comments, ap_comments = fetched
