@@ -3,27 +3,35 @@
 Reads .env exactly like sync.py, previews the target board (title, lanes, existing cards), and only
 after an explicit confirmation creates clearly-marked throwaway cards, exercises every write shape
 the sync uses -- card create, versioned PATCH tag add/remove, externalLink add on a bare card,
-connect/disconnect children, description write + length probe (issue #65), a typeId replace and a
-typed card create (each verified via refetch, skipped as informational when the board has no
-eligible card type configured), and a deliberately stale-version PATCH that MUST be rejected -- then
-deletes every throwaway card and confirms they are gone. The steps mirror the ``[live-check]`` items
-in API-VALIDATION.md so one confirmed run retires them.
+connect/disconnect children, description write + length probe (issue #65), a comment create/list/
+edit/delete round-trip (issue #66 -- the delete shape is speculative, never exposed by the web UI),
+a typeId replace and a typed card create (each verified via refetch, skipped as informational when
+the board has no eligible card type configured), a deliberately stale-version PATCH that MUST be
+rejected, and a live richtext round-trip of the configured repo's GitHub issue #1 body through the
+card description (issue #78 fidelity) -- then deletes every throwaway card and confirms they are
+gone. The steps mirror the ``[live-check]`` items in API-VALIDATION.md so one confirmed run retires
+them.
 
-GitHub is never touched (dry run already exercises every gh read live), and the sync state file is
-never read or written. Every server rejection is printed with its full, untruncated response body so
-an incorrect write shape is diagnosable straight from the console.
+GitHub is never WRITTEN (the issue #1 richtext step performs a READ only -- `gh issue list`; dry
+runs already exercise every gh read live), and the sync state file is never read or written. Every
+server rejection is printed with its full, untruncated response body so an incorrect write shape is
+diagnosable straight from the console.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import secrets
 import sys
 
 import agileplace
+import agileplace_comments
 import agileplace_description
 import board_layout
 import card_types
+import ghkit
+import richtext
 from config import env_config
 
 PARENT_TITLE = "SMOKE parent (safe to delete)"
@@ -337,10 +345,188 @@ def _check_description(cfg: dict, parent_id: str, results: list) -> None:
                     f"(configured max_length={limit})"))
 
 
+def _write_description(cfg: dict, parent_id: str, html: str) -> str:
+    """Write `html` to the card's description via the sync's own op_description/patch_card path and
+    return what the server stored back (as read by card_description)."""
+    fresh = agileplace.get_card(cfg, parent_id)
+    agileplace.patch_card(cfg, True, fresh, [agileplace_description.op_description(html)])
+    return agileplace_description.card_description(cfg, agileplace.get_card(cfg, parent_id))
+
+
+def _diff_window(sent: str, stored: str) -> str:
+    """Whole verbatim SENT/STORED when short; otherwise a first-divergence window (index +/-60), so
+    a live run reveals exactly what AgilePlace normalizes without dumping huge bodies."""
+    if max(len(sent), len(stored)) <= 400:
+        return f"SENT={sent!r}  STORED={stored!r}"
+    n = min(len(sent), len(stored))
+    i = next((k for k in range(n) if sent[k] != stored[k]), n)
+    lo, hi = max(0, i - 60), i + 60
+    return f"first divergence at index {i}: sent[{sent[lo:hi]!r}] vs stored[{stored[lo:hi]!r}]"
+
+
+def _report_html_diff(label: str, sent: str, stored: str, results: list) -> None:
+    """INFO the server's HTML normalization: identical, or the verbatim/first-divergence diff."""
+    if sent == stored:
+        results.append((f"{label} (fact-finding)", None, f"{len(sent)} chars, server stored verbatim"))
+    else:
+        results.append((f"{label} (fact-finding)", None,
+                        f"sent {len(sent)} chars, server stored {len(stored)} -- NORMALIZED. "
+                        + _diff_window(sent, stored)))
+
+
+def _check_github_richtext_roundtrip(cfg: dict, parent_id: str, results: list) -> None:
+    """Step 22: a live richtext round-trip of a REAL GitHub issue body through the card description --
+    the exact translation layer description/comment sync uses (issue #78 fidelity), driven by
+    real-world markdown (headings, lists, code fences, links) rather than a synthetic fixture. Reads
+    the configured repo's issue #1 body via ghkit (a gh READ -- smoke performs no GitHub WRITES),
+    renders it to AgilePlace HTML, writes it, reads it back, then re-derives the sync's HTML from the
+    (possibly server-normalized) readback and writes THAT too.
+
+    PASS/FAIL on the CONVERGENCE invariant, not byte-equality: writing the sync's re-derived HTML must
+    reach a fixed point -- the second readback equals the first readback OR equals the re-derived HTML
+    itself. That is exactly "after the first sync write, later runs see no drift" even when AgilePlace
+    normalizes stored HTML (confirmed live 2026-07-24: it does). The sent-vs-stored HTML difference is
+    fact-finding INFO. An absent/unreadable/blank issue #1 is an informational SKIP, never a failure."""
+    _step(22, "live GitHub issue #1 body -> card description richtext round-trip (issue #78)")
+    repo_label = str(cfg.get("target_repo_path") or "the configured repo")
+    bodies = ghkit.list_issue_bodies(cfg)
+    if bodies is None:
+        results.append(("GitHub issue #1 richtext round-trip", None,
+                        f"SKIP: could not read issues from {repo_label} (gh read failed)"))
+        return
+    issue_one = next((i for i in bodies if i.get("number") == 1), None)
+    if issue_one is None or not (issue_one.get("body") or "").strip():
+        state = "has a blank body" if issue_one is not None else "was not found"
+        results.append(("GitHub issue #1 richtext round-trip", None,
+                        f"SKIP: {repo_label} issue #1 {state} -- nothing to round-trip"))
+        return
+
+    markdown = issue_one["body"]
+    print(f"      read {repo_label} issue #1 body ({len(markdown)} chars of markdown)")
+    html = richtext.markdown_to_leankit_html(markdown)
+    readback = _write_description(cfg, parent_id, html)
+    _report_html_diff("issue #1 rendered HTML vs stored", html, readback, results)
+
+    # Convergence: re-derive the sync's HTML from the server-normalized readback and write it back.
+    # If the sync's render reaches a fixed point, later runs see no description drift.
+    md_back = richtext.leankit_html_to_markdown(readback)
+    html2 = richtext.markdown_to_leankit_html(md_back)
+    readback2 = _write_description(cfg, parent_id, html2)
+    converged = readback2 == readback or readback2 == html2
+    results.append(("issue #1 body converges under the sync's richtext layer -- no perpetual drift "
+                    "(issue #78)", converged,
+                    f"2nd readback {'==' if readback2 == readback else '!='} 1st readback; "
+                    f"{'==' if readback2 == html2 else '!='} re-rendered html2 "
+                    f"(md_back {len(md_back)} chars)"))
+
+
+def _find_comment(comments: list[dict], comment_id: int) -> dict | None:
+    return next((comment for comment in comments if comment.get("id") == comment_id), None)
+
+
+_COMMENT_TIME_KEY_RE = re.compile(r"(?i)(date|time|modif|edit|updat|stamp|created|changed)")
+
+
+def _comment_time_like(obj: dict) -> dict:
+    """The subset of `obj`'s top-level items whose KEY looks date/time-ish -- values kept so a live
+    run reveals the actual timestamp value under whatever name AgilePlace uses."""
+    return {key: value for key, value in obj.items()
+            if isinstance(key, str) and _COMMENT_TIME_KEY_RE.search(key)}
+
+
+def _probe_comment_edit_shape(cfg: dict, parent_id: str, comment_id, results: list) -> None:
+    """Fact-finding for issue #66. CONFIRMED live 2026-07-24: an AgilePlace comment carries NO edit
+    timestamp -- its only keys are cardId/createdBy/createdOn/id/text -- so AP-side drift is detected
+    by a body-hash (design amendment; see API-VALIDATION.md + comment_sync). These steps are kept as
+    cheap fact-finding: they dump the RAW persisted comment's top-level keys and a fact-finding PUT's
+    raw response body (values only for date/time-like keys), so a future AgilePlace version that DID
+    add an edit-timestamp field would surface here. Never pass/fail (informational)."""
+    raw = agileplace.api(cfg, "GET", agileplace_comments._comment_collection_path(parent_id))
+    raw_list = raw.get("comments") if isinstance(raw, dict) else raw if isinstance(raw, list) else []
+    raw_comment = next((c for c in (raw_list or []) if str(c.get("id")) == str(comment_id)), None)
+    if raw_comment is not None:
+        results.append(("RAW comment top-level keys after edit (fact-finding)", None,
+                        f"{sorted(raw_comment)}"))
+        results.append(("RAW comment date/time-like fields after edit (fact-finding)", None,
+                        f"{_comment_time_like(raw_comment)}"))
+    put_response = agileplace.mutate(cfg, True, "PUT",
+                                     agileplace_comments._comment_item_path(parent_id, comment_id),
+                                     body={"text": "<p>SMOKE comment (edit probe)</p>"},
+                                     note=f"edit-timestamp fact-find on comment {comment_id}")
+    if isinstance(put_response, dict) and put_response:
+        results.append(("PUT response top-level keys (fact-finding)", None,
+                        f"{sorted(put_response)}"))
+        results.append(("PUT response date/time-like fields (fact-finding)", None,
+                        f"{_comment_time_like(put_response)}"))
+
+
+def _check_comments(cfg: dict, parent_id: str, results: list) -> None:
+    """Steps 15-18: agileplace_comments' full CRUD surface. Create, then a list-readback (the
+    per-comment author/timestamp field names are VALIDATE LIVE per the issue #66 design doc --
+    reported informational, not pass/fail, until a real tenant confirms them), an edit whose body
+    round-trips (edited-timestamp movement is also informational), and finally the DELETE, whose
+    shape is speculative -- the web UI never exposed comment deletion -- so the readback-confirms-
+    gone check is a hard PASS/FAIL, mirroring the externalLink-add and tag-add checks above: a 2xx
+    response alone is never proof a write actually happened."""
+    _step(15, "create a comment via agileplace_comments.create_comment")
+    comment = agileplace_comments.create_comment(cfg, True, parent_id, "<p>SMOKE comment</p>")
+    comment_id = comment.get("id") if comment else None
+    if comment_id is None:
+        raise SystemExit(f"comment create response has no usable id ({comment!r}) -- cannot continue")
+    print(f"      created comment {comment_id}")
+    results.append(("comment create returns a usable id", True, f"id={comment_id}"))
+
+    _step(16, "list comments, confirm the readback shape (author/timestamp fields are fact-finding)")
+    comments = agileplace_comments.list_comments(cfg, parent_id)
+    found = _find_comment(comments, comment_id)
+    results.append(("comment list readback finds the created comment", found is not None,
+                    f"{len(comments)} comment(s) now on the card"))
+    edited_before = found.get("edited") if found else None
+    if found is not None:
+        results.append(("comment author-field shape (fact-finding)", None,
+                        f"author_name={found['author_name']!r} author_email={found['author_email']!r} "
+                        f"author_id={found['author_id']!r}"))
+        results.append(("comment created/edited timestamp shape (fact-finding)", None,
+                        f"created={found['created']!r} edited={edited_before!r}"))
+
+    _step(17, "edit the comment via agileplace_comments.update_comment (richer HTML)")
+    # Richer HTML than a plain <p> so comment-body normalization gets probed (AgilePlace normalizes
+    # stored description HTML -- confirmed live 2026-07-24; comment bodies may too). PASS/FAIL is
+    # normalization-INSENSITIVE: the stored body canonicalized to Markdown must equal the sent body
+    # canonicalized (the same md-level compare description_sync uses), not byte-equality.
+    edited_html = ("<p>SMOKE comment (edited) with <strong>bold</strong> and <code>code</code>:</p>"
+                   "<ul><li>one</li><li>two</li></ul>")
+    agileplace_comments.update_comment(cfg, True, parent_id, comment_id, edited_html)
+    comments = agileplace_comments.list_comments(cfg, parent_id)
+    found_after_edit = _find_comment(comments, comment_id)
+    stored_body = found_after_edit["body"] if found_after_edit else ""
+    body_matches = (found_after_edit is not None
+                    and richtext.leankit_html_to_markdown(stored_body)
+                    == richtext.leankit_html_to_markdown(edited_html))
+    results.append(("comment edit round-trip (PUT), normalization-insensitive", body_matches,
+                    f"canonical-Markdown match; stored body {stored_body!r}" if found_after_edit
+                    else "comment vanished after edit"))
+    if found_after_edit is not None:
+        _report_html_diff("comment edit HTML vs stored", edited_html, stored_body, results)
+    edited_after = found_after_edit.get("edited") if found_after_edit else None
+    results.append(("comment edited timestamp moves after PUT (fact-finding)", None,
+                    f"before={edited_before!r} after={edited_after!r}"))
+    # Live run 2026-07-23 saw edited=None even after the PUT -- dump the raw shape so a re-run finds
+    # the actual edit-timestamp field name (if AgilePlace exposes one). See API-VALIDATION.md.
+    _probe_comment_edit_shape(cfg, parent_id, comment_id, results)
+
+    _step(18, "delete the comment (speculative shape), then confirm it is gone on readback")
+    agileplace_comments.delete_comment(cfg, True, parent_id, comment_id)
+    comments = agileplace_comments.list_comments(cfg, parent_id)
+    gone = _find_comment(comments, comment_id) is None
+    results.append(("comment delete + readback gone (speculative shape)", gone,
+                    f"{len(comments)} comment(s) remain"))
+
+
 def _check_type_id_roundtrip(cfg: dict, parent_id: str, card_type: dict, results: list) -> None:
-    """Step 15: card_types.op_type's /typeId replace on the existing parent card, then read the
+    """Step 19: card_types.op_type's /typeId replace on the existing parent card, then read the
     nested type back -- the same shape sync_card_type queues for a derived-type drift fix."""
-    _step(15, "typeId replace via one versioned PATCH, then read the type back")
+    _step(19, "typeId replace via one versioned PATCH, then read the type back")
     type_id = str(card_type["id"])
     fresh = agileplace.get_card(cfg, parent_id)
     agileplace.patch_card(cfg, True, fresh, [card_types.op_type(type_id)])
@@ -352,10 +538,10 @@ def _check_type_id_roundtrip(cfg: dict, parent_id: str, card_type: dict, results
 
 def _check_create_with_type_id(cfg: dict, lane_id: str | None, custom_id: str, card_type: dict,
                                created: list[str], results: list) -> None:
-    """Step 16: create a card with typeId set, then refetch it. The create response is confirmed
+    """Step 20: create a card with typeId set, then refetch it. The create response is confirmed
     sparse (no customId/laneId echo, no version -- see API-VALIDATION.md 2026-07-21), so this
     checks the refetch, never the create response itself."""
-    _step(16, "create card with typeId, verified via refetch (create response is sparse)")
+    _step(20, "create card with typeId, verified via refetch (create response is sparse)")
     type_id = str(card_type["id"])
     type_title = (card_type.get("title") or "").strip()
     card = agileplace.create_card(cfg, True, TYPED_TITLE, custom_id, "", lane_id,
@@ -373,7 +559,7 @@ def _check_create_with_type_id(cfg: dict, lane_id: str | None, custom_id: str, c
 
 def _check_type_id_writes(cfg: dict, lane_id: str | None, parent_id: str, run_id: str,
                           created: list[str], results: list) -> None:
-    """Steps 15-16, gated on the board actually having an eligible card type configured: neither
+    """Steps 19-20, gated on the board actually having an eligible card type configured: neither
     step is a sync precondition (a board with no card types configured never derives one), so a
     board without one reports both as informational skips rather than failing the run."""
     card_type = _pick_card_type(board_layout.board_layout(cfg).card_types)
@@ -388,8 +574,8 @@ def _check_type_id_writes(cfg: dict, lane_id: str | None, parent_id: str, run_id
 
 
 def _check_stale_patch(cfg: dict, parent_id: str, stale_version: str, results: list) -> None:
-    """Step 17: a stale x-lk-resource-version PATCH must be rejected, not silently applied."""
-    _step(17, "deliberately stale-version PATCH (the server MUST reject this)")
+    """Step 21: a stale x-lk-resource-version PATCH must be rejected, not silently applied."""
+    _step(21, "deliberately stale-version PATCH (the server MUST reject this)")
     body = [agileplace.op_tag("smoke-stale")]
     print(f"      PATCH /io/card/{parent_id} with stale x-lk-resource-version={stale_version} "
           f"body={json.dumps(body)}")
@@ -446,8 +632,10 @@ def _run_checks(cfg: dict, lane_id: str | None, run_id: str, created: list[str],
     _check_connections(cfg, parent_id, child_id, results)
     _check_dependencies(cfg, parent_id, child_id, results)
     _check_description(cfg, parent_id, results)
+    _check_comments(cfg, parent_id, results)
     _check_type_id_writes(cfg, lane_id, parent_id, run_id, created, results)
     _check_stale_patch(cfg, parent_id, baseline_version, results)
+    _check_github_richtext_roundtrip(cfg, parent_id, results)
 
 
 def _summarize(results: list) -> int:

@@ -1,6 +1,7 @@
 """Whole-run dry/apply parity tests at the real process and HTTP boundaries."""
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -244,6 +245,16 @@ def _configure(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     for name, value in values.items():
         monkeypatch.setenv(name, value)
+    # Comment-sync identity: force BLANK, not delenv. env_config() -> load_env_file() does
+    # os.environ.setdefault() from the repo-root .env (see this function's top comment: it
+    # "repopulates deleted variables"), so a merely-DELETED identity var is refilled from a dev box's
+    # production .env -- enabling comment sync and hitting un-stubbed endpoints (4 test_run failures
+    # on a machine whose .env exports COMMENT_SYNC_*; the ENV_FILE redirect above did not save it).
+    # A present-but-BLANK value survives setdefault (it only fills UNSET keys) and
+    # _parse_comment_sync_identity treats blank as disabled, so the baseline world is deterministic
+    # regardless of ambient env OR .env contents. The enabled scenario sets real values on top.
+    for name in ("COMMENT_SYNC_GH_LOGIN", "COMMENT_SYNC_AP_AUTHOR"):
+        monkeypatch.setenv(name, "")
 
 
 def _run(monkeypatch, tmp_path, *, apply: bool, world_factory=FixtureWorld) -> RunResult:
@@ -463,3 +474,229 @@ def test_latch_writes_dry_run_plans_exactly_what_apply_executes(monkeypatch, tmp
         ("gh", "project", "item-edit"),
     ]
     assert Counter(planned) == Counter(executed)
+
+
+# --- Comment sync: dry/apply parity through the run harness (issue #66) --------------------------
+#
+# CI has only ever run comment sync self-DISABLED -- the identity vars are unset there and now
+# explicitly cleared in _configure -- so the feature had never been exercised end-to-end (the #87
+# fall-through class the WIRED_TEST_FILES guard exists to catch). This scenario runs WITH identity
+# configured, seeding one human-authored origin comment on each side of the issue-1 / card-C1 pair so
+# comment sync plans a mirror_new in BOTH directions, and pins that the dry run plans exactly what
+# apply executes. The pre-EXISTING epic card C1 is used deliberately -- issue 2's card is created
+# this run, so it's _planOnly in dry mode and comment sync no-ops on it (same as sync_description),
+# which would make dry and apply diverge. Exhaustive planning logic stays in tests/test_comment_sync.py.
+
+_GH_ORIGIN_COMMENT = {
+    "id": 1001, "user": {"login": "alice"}, "body": "origin comment on GitHub",
+    "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z",
+}
+_AP_ORIGIN_COMMENT = {
+    "id": "2001",  # the live POST/list serializes the id as a STRING of digits (API-VALIDATION.md)
+    "createdBy": {"fullName": "bob", "emailAddress": "bob@example.com"},
+    "text": "<p>origin comment on AgilePlace</p>",
+    "createdOn": "2024-01-02T00:00:00Z", "lastModified": "2024-01-02T00:00:00Z",
+}
+
+
+def _is_gh_comment_path(path: str) -> bool:
+    return path.endswith("/comments") or "/issues/comments/" in path
+
+
+class _CommentFixtureWorld(FixtureWorld):
+    """FixtureWorld plus the GitHub and AgilePlace comment endpoints comment sync drives. Seeds one
+    human-authored origin comment on each side of the issue-1 / card-C1 pair (authored by alice/bob,
+    neither the configured sync identity), so comment sync mirrors each to the other side. Issue 2 /
+    card C2 carry no comments. Reuses the base gh/AgilePlace dispatch for everything else."""
+
+    def run_process(self, argv, **kwargs):
+        args = tuple(argv[1:])
+        if args and args[0] == "api" and len(args) > 3 and _is_gh_comment_path(args[3]):
+            return self._gh_comment(argv, args)
+        return super().run_process(argv, **kwargs)
+
+    def _gh_comment(self, argv, args):
+        path = args[3]
+        if path.endswith("/comments"):  # collection: list (read) or create (write)
+            if "--slurp" in args:
+                number = int(path.split("/issues/")[1].split("/")[0])
+                page = [_GH_ORIGIN_COMMENT] if number == 1 else []
+                return self._completed(argv, [page])
+            self.process_writes.append(args)
+            return self._completed(argv, {"id": 3001})
+        self.process_writes.append(args)  # item path: edit (PATCH) or delete (DELETE)
+        return self._completed(argv, {"id": 3002})
+
+    def open_url(self, request, **kwargs):
+        parsed = urllib.parse.urlparse(request.full_url)
+        path = parsed.path.removeprefix("/io/")
+        if path.endswith("/comment") or "/comment/" in path:
+            method = request.get_method()
+            if method != "GET":
+                body = json.loads(request.data) if request.data else None
+                headers = {key.lower(): value for key, value in request.header_items()}
+                self.http_writes.append(HttpWrite(method, path, body, headers))
+            return self._ap_comment(method, path)
+        return super().open_url(request, **kwargs)
+
+    def _ap_comment(self, method, path):
+        if method == "GET":  # list
+            card_id = path.split("/")[1]
+            return _Response({"comments": [_AP_ORIGIN_COMMENT] if card_id == "C1" else []})
+        if method == "POST":  # create -> a sparse string id, like the live tenant
+            return _Response({"id": "4001"})
+        return _Response({})  # PUT edit / DELETE
+
+
+def _configure_comment_identity(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("COMMENT_SYNC_GH_LOGIN", "syncbot")
+    monkeypatch.setenv("COMMENT_SYNC_AP_AUTHOR", "syncbot@example.com")
+
+
+_AP_COMMENT_POST_RE = re.compile(r"^DRY   POST /io/card/\S+/comment .* body=")
+_GH_COMMENT_POST_RE = re.compile(r"^DRY   gh api issue \d+ comment -- POST$")
+
+
+def _comment_creates_planned(output: str) -> tuple[int, int]:
+    """(ap_creates, gh_creates): comment mirror-creates the dry run PLANNED, read from its DRY lines."""
+    ap = sum(1 for line in output.splitlines() if _AP_COMMENT_POST_RE.match(line))
+    gh = sum(1 for line in output.splitlines() if _GH_COMMENT_POST_RE.match(line))
+    return ap, gh
+
+
+def _comment_creates_executed(run: RunResult) -> tuple[int, int]:
+    """(ap_creates, gh_creates): comment mirror-creates the run EXECUTED, from its recorded writes."""
+    ap = sum(1 for w in run.http_writes if w.method == "POST" and w.path.endswith("/comment"))
+    gh = sum(1 for w in run.process_writes
+             if w and w[0] == "api" and len(w) > 3 and w[3].endswith("/comments") and "POST" in w)
+    return ap, gh
+
+
+def test_comment_sync_dry_run_plans_the_mirror_creates_apply_executes(monkeypatch, tmp_path):
+    """Issue #66 e2e: with identity configured, comment sync mirrors a human comment on each side to
+    the other. The dry run must PLAN exactly the mirror-creates the apply run EXECUTES -- one AP
+    create and one GH create (both directions) -- and the dry run must itself write nothing."""
+    _configure_comment_identity(monkeypatch, tmp_path)
+    dry = _run(monkeypatch, tmp_path, apply=False, world_factory=_CommentFixtureWorld)
+    apply = _run(monkeypatch, tmp_path, apply=True, world_factory=_CommentFixtureWorld)
+
+    assert _comment_creates_planned(dry.output) == (1, 1)  # both directions planned
+    assert _comment_creates_executed(dry) == (0, 0)         # dry writes nothing
+    assert _comment_creates_executed(apply) == (1, 1)       # apply executes exactly the plan
+
+
+def test_configure_clears_ambient_comment_sync_env_keeping_baseline_deterministic(monkeypatch,
+                                                                                  tmp_path):
+    """Regression guard for the env-isolation fix: even when the developer's environment exports the
+    production comment-sync identity, _configure must clear it so the baseline world (which stubs NO
+    comment endpoints) never enables comment sync. If _configure stops clearing them, the base
+    FixtureWorld would hit an un-stubbed comment endpoint and this run would raise 'unexpected ...'."""
+    monkeypatch.setenv("COMMENT_SYNC_GH_LOGIN", "thewrz")
+    monkeypatch.setenv("COMMENT_SYNC_AP_AUTHOR", "maintainer@example.com")
+    _configure(monkeypatch, tmp_path)  # must delenv the two above
+
+    dry = _run(monkeypatch, tmp_path, apply=False)
+    apply = _run(monkeypatch, tmp_path, apply=True)
+
+    assert _comment_creates_planned(dry.output) == (0, 0)
+    assert _comment_creates_executed(apply) == (0, 0)
+
+
+# --- Comment sync: AP-edit detected via body hash -> GH mirror edit (issue #66 amendment) --------
+#
+# AgilePlace comments carry NO edit timestamp (confirmed live 2026-07-24), so an AP-side edit is
+# detected by a body-hash mismatch against the ledgered ap_hash. This seeds a LEDGERED gh<->ap pair
+# whose AP origin body has changed since the last sync, and pins that the run plans+executes exactly
+# one GH mirror edit (edit_mirror target=gh) across dry and apply -- the wiring for the amended drift
+# model. Exhaustive hash-drift logic (GH-wins tie-break, echo, refetch-failure) stays in the unit suite.
+
+_AP_ORIGIN_OLD = "<p>original ap origin body</p>"          # what the ledgered ap_hash was taken from
+_AP_ORIGIN_EDITED = "<p>EDITED ap origin body</p>"         # a human changed it since -> hash mismatch
+
+
+def _ap_hash(body: str) -> str:
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _seed_comment_ledger(state_path: Path, row: dict) -> None:
+    """Pre-write the sync-state file with one comments-ledger row on the epic (issue 1 / card C1),
+    so a run starts from an already-synced pair. target/board/schema must match what main() loads."""
+    state = {
+        "schema": sync.STATE_SCHEMA, "target": "acme/widgets", "board": "42",
+        "issues": {EPIC_URL: {"card_id": "C1", "comments": [row]}},
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+
+class _CommentEditFixtureWorld(FixtureWorld):
+    """A LEDGERED gh<->ap comment pair on issue-1 / card-C1 whose AP origin body has been edited since
+    the last sync (GH mirror unchanged). AP carries no edit timestamp, so the edit surfaces as a
+    body-hash mismatch and the GH mirror is updated. Issue 2 / card C2 carry no comments."""
+
+    def run_process(self, argv, **kwargs):
+        args = tuple(argv[1:])
+        if args and args[0] == "api" and len(args) > 3 and _is_gh_comment_path(args[3]):
+            path = args[3]
+            if path.endswith("/comments"):  # list
+                number = int(path.split("/issues/")[1].split("/")[0])
+                page = [{"id": 901, "user": {"login": "syncbot"},
+                         "body": "comment by bob on Agile Place\n\nold mirror text",
+                         "created_at": "2024-01-01T00:00:00Z",
+                         "updated_at": "2024-01-01T00:00:00Z"}] if number == 1 else []
+                return self._completed(argv, [page])
+            self.process_writes.append(args)  # PATCH edit (or DELETE)
+            return self._completed(argv, {"id": 901})
+        return super().run_process(argv, **kwargs)
+
+    def open_url(self, request, **kwargs):
+        parsed = urllib.parse.urlparse(request.full_url)
+        path = parsed.path.removeprefix("/io/")
+        if path.endswith("/comment") or "/comment/" in path:
+            method = request.get_method()
+            if method != "GET":
+                body = json.loads(request.data) if request.data else None
+                headers = {key.lower(): value for key, value in request.header_items()}
+                self.http_writes.append(HttpWrite(method, path, body, headers))
+            if method == "GET":
+                card_id = path.split("/")[1]
+                comments = [{"id": 801,
+                             "createdBy": {"fullName": "bob", "emailAddress": "bob@example.com"},
+                             "text": _AP_ORIGIN_EDITED,
+                             "createdOn": "2024-01-01T00:00:00Z"}] if card_id == "C1" else []
+                return _Response({"comments": comments})
+            return _Response({})
+        return super().open_url(request, **kwargs)
+
+
+_GH_COMMENT_PATCH_RE = re.compile(r"^DRY   gh api issue comment \d+ -- PATCH$")
+
+
+def _comment_edits_planned(output: str) -> int:
+    return sum(1 for line in output.splitlines() if _GH_COMMENT_PATCH_RE.match(line))
+
+
+def _comment_edits_executed(run: RunResult) -> int:
+    return sum(1 for w in run.process_writes
+               if w and w[0] == "api" and len(w) > 3 and "/issues/comments/" in w[3] and "PATCH" in w)
+
+
+def test_comment_sync_ap_edit_detected_via_hash_edits_gh_mirror(monkeypatch, tmp_path):
+    """Issue #66 amendment: AgilePlace exposes no comment edit timestamp, so an AP-side edit is
+    detected by a body-hash mismatch against the ledger. A ledgered pair whose AP origin body changed
+    since the last sync must plan and execute exactly one GH mirror edit, 1:1 across dry and apply."""
+    _configure_comment_identity(monkeypatch, tmp_path)
+    row = {
+        "gh_id": 901, "ap_id": 801, "origin": "ap",
+        "gh_created": "2024-01-01T00:00:00Z", "gh_edited": "2024-01-01T00:00:00Z",  # GH unchanged
+        "ap_created": "2024-01-01T00:00:00Z", "ap_hash": _ap_hash(_AP_ORIGIN_OLD), "deleted": False,
+    }
+    for name in ("dry-state.json", "apply-state.json"):
+        _seed_comment_ledger(tmp_path / name, row)
+
+    dry = _run(monkeypatch, tmp_path, apply=False, world_factory=_CommentEditFixtureWorld)
+    apply = _run(monkeypatch, tmp_path, apply=True, world_factory=_CommentEditFixtureWorld)
+
+    assert _comment_edits_planned(dry.output) == 1          # AP hash drift -> GH mirror edit planned
+    assert _comment_edits_executed(apply) == 1              # and executed (PATCH issues/comments/901)
+    assert _comment_creates_planned(dry.output) == (0, 0)   # no creates: the pair is already ledgered

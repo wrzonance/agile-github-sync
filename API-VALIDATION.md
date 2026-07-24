@@ -365,3 +365,92 @@ alone, since this worktree has no `.env` and no live board to probe against:
 
 All four remain `[live-check]` pending -- the first real reverse-intake promotion against a
 production board should confirm or correct them and update this section.
+
+## Comment sync (issue #66) -- Validated live 2026-07-23
+
+`agileplace_comments.py` adds list/create/update/delete for AgilePlace card comments. A full
+real-tenant `python smoke.py` run on 2026-07-23 exercised every comment step (create -> list ->
+edit -> delete) against a disposable card and **all passed**. All shapes below are live-confirmed;
+values are shown as PLACEHOLDERS (the real run used a real name/email, not reproduced here). The
+three previously-speculative items are now retired:
+
+1. **List endpoint -- CONFIRMED.** `GET /io/card/{cardId}/comment` list readback finds the created
+   comment (`list_comments` normalizes it; the single-card `comments` fallback was not needed).
+2. **Create/read field names -- CONFIRMED.** `POST /io/card/{cardId}/comment {"text": <html>}`
+   returns a usable comment `id` **serialized as a STRING of digits** (e.g. `"1234567890"`), not a
+   JSON number -- `_coerce_comment_id` accepts an int (never a bool) OR an all-ASCII-digit string
+   and coerces to `int`, preserving the ledger's `int|None` id contract. The read side resolves
+   `createdBy` (nested `fullName`, `emailAddress`, `id`) and `createdOn`:
+   - `createdBy.fullName` -> a display name (placeholder `"Maintainer Name"`).
+   - `createdBy.emailAddress` -> **arrives MIXED-CASE** even when the configured
+     `COMMENT_SYNC_AP_AUTHOR` is lowercase (e.g. `Maintainer@Example.COM`). `is_sync_authored`
+     casefolds both sides, so identity matching still works -- pinned by
+     `test_is_sync_authored_ap_matches_email_case_insensitively`.
+   - `createdBy.id` -> a numeric-string id (placeholder `"<numeric-string>"`).
+   - `createdOn` -> a Z-suffixed ISO-8601 timestamp (placeholder `"2026-07-23T…Z"`), which
+     `_parse_timestamp` handles.
+3. **DELETE -- CONFIRMED WORKING.** `DELETE /io/card/{cardId}/comment/{commentId}` succeeds and a
+   list readback shows 0 comments -- the "speculative" shape is real. The web UI never exposed
+   comment deletion, but the io v2 endpoint honors it.
+
+### CONFIRMED (2026-07-24): AgilePlace comments carry NO edit timestamp -> AP drift is body-hash based
+
+The `smoke.py` raw-shape probe confirmed it live: **an AgilePlace comment object exposes NO edit
+timestamp at all.** The full set of top-level keys, both from the list readback after a `PUT` and in
+the `PUT` response body, is `cardId`, `createdBy`, `createdOn`, `id`, `text` -- there is no
+`lastModified`/`modifiedOn`/`updatedOn`/`editedOn` or any other date/time-ish key beyond `createdOn`.
+So the comment `edited` timestamp is (and will stay) `None`.
+
+**Design amendment (user-approved, see the design doc's AMENDED note + the PR's Design decisions).**
+Because a timestamp comparison can never detect an AP-side edit, AP drift is now detected by a
+**content fingerprint**: the ledger row carries `ap_hash` = sha256 hex of the AP comment body (the
+raw `text` HTML as fetched), recorded at the last successful sync and refreshed after every
+sync-authored AP write. GH drift stays timestamp-based (`updated_at` is real). When BOTH sides drift,
+**GitHub wins** (AP recency is unknowable without a timestamp), replacing the original
+most-recent-wins. The vestigial `ap_edited` ledger field is removed; `ap_created` stays (from
+`createdOn`, used for chronology). `smoke.py`'s `_probe_comment_edit_shape` steps remain as cheap
+fact-finding -- they would surface an edit-timestamp field if a future AgilePlace version ever adds
+one.
+
+### INFO (issue #65): server accepted a description over the configured cap
+
+Fact-finding aside: the description length probe wrote **20007 chars and the server ACCEPTED and
+stored them** despite the configured `AP_DESCRIPTION_MAX_LENGTH=20000`. The configured cap is a
+client-side conservative guard, not a server-enforced limit -- the server did not reject the
+oversize body.
+
+### CONFIRMED (2026-07-24): AgilePlace NORMALIZES stored description/comment HTML
+
+The issue #78 richtext round-trip step (step 22) caught it live, and the enhanced sent-vs-stored diff
+pinned it exactly: **AgilePlace UNESCAPES the `&gt;` entity in text nodes** -- it does not store
+rendered description HTML verbatim. Synthetic example of the one transform observed:
+
+```
+sent:   <p>&gt; quoted</p>
+stored: <p>> quoted</p>
+```
+
+Attributes, links, and all other markup were stored verbatim (a 224-char body lost exactly 3 chars,
+one per `&gt;`->`>`). **Comment** bodies -- even richer HTML (bold/list/code) -- were stored
+VERBATIM; comment-body normalization was not observed. Step 22 PASSES via the convergence invariant:
+writing the sync's re-derived HTML reaches a fixed point (second readback == first readback) live, so
+descriptions do not perpetually re-drift.
+
+Why this is safe end to end: richtext's `leankit_html_to_markdown` escapes a leading `>` to `\>`
+(and `markdown_to_leankit_html` renders it back to `&gt;`), so a server-unescaped `<p>> quoted</p>`
+is never misread as Markdown blockquote syntax on the next round trip -- pinned by
+`tests/test_richtext_shared.py::test_leading_structural_chars_are_escaped_only_at_true_line_start`.
+
+**Implication and how the sync handles it (golden rule: compare/record what the SERVER stores, never
+what was sent):**
+- **description_sync (issue #65) is already robust** -- it never compares raw stored HTML. It
+  compares `_canonicalize_ap_description` (= `leankit_html_to_markdown` of the stored HTML) against
+  the canonical Markdown of the GitHub body, a normalization-insensitive md-level compare. Server
+  HTML normalization is absorbed by that canonicalization, so there is no perpetual false drift.
+- **comment_sync** fingerprints the AP body with a sha256 hash taken **from the post-write readback**
+  (the stored, normalized form). Next run reads the same stored form -> same hash -> no false drift.
+  The only exposed case was the refetch-failure fallback, which used to hash what-was-SENT; it now
+  leaves the hash unconfirmed and adopts a baseline next run (see comment_sync's amended docstring).
+- **smoke step 22** PASS/FAIL is a **convergence** invariant, not byte-equality: it writes the
+  sync's re-derived HTML back and requires a fixed point (second readback == first readback, or ==
+  the re-derived HTML), i.e. "after the first sync write, later runs see no drift."

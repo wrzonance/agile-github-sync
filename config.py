@@ -90,6 +90,21 @@ def _parse_ap_description_max_length(raw: str | None) -> int:
     return value
 
 
+def _parse_comment_sync_identity(gh_login: str | None, ap_author: str | None) -> dict | None:
+    """PURE -- no I/O, no print/WARN (issue #66 Task 1, finding #1): the self-disable WARN for
+    comment sync belongs to comment_sync.sync_comments' first real invocation, not to config parsing,
+    because two live suites assert env_config() never prints as a side effect of unrelated config.
+    Both COMMENT_SYNC_GH_LOGIN and COMMENT_SYNC_AP_AUTHOR present and non-blank -> the identity dict;
+    either missing or blank -> None, silently -- comment sync self-disables without a word here."""
+    if gh_login is None or ap_author is None:
+        return None
+    gh_login = gh_login.strip()
+    ap_author = ap_author.strip()
+    if not gh_login or not ap_author:
+        return None
+    return {"gh_login": gh_login, "ap_author": ap_author}
+
+
 def env_config() -> dict:
     """token/host/board_id are None when absent (offline dry run). target_repo_path is the local clone
     every `gh` call runs against."""
@@ -106,6 +121,8 @@ def env_config() -> dict:
         "stage_lane_map": parse_stage_lane_map(os.environ.get("STAGE_LANE_MAP", "")),
         "ap_description_max_length": _parse_ap_description_max_length(
             os.environ.get("AP_DESCRIPTION_MAX_LENGTH")),
+        "comment_sync_identity": _parse_comment_sync_identity(
+            os.environ.get("COMMENT_SYNC_GH_LOGIN"), os.environ.get("COMMENT_SYNC_AP_AUTHOR")),
         "gh_project": {
             "owner": os.environ.get("GH_PROJECT_OWNER") or None,
             "number": os.environ.get("GH_PROJECT_NUMBER") or None,

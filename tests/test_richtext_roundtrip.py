@@ -438,7 +438,13 @@ _TOTALITY_BATTERY = [
 ]
 
 
-@pytest.mark.parametrize("content", _TOTALITY_BATTERY)
+@pytest.mark.parametrize(
+    "content", _TOTALITY_BATTERY,
+    # Short ids: several payloads are 5k-100k chars and would overflow Windows'
+    # 32,767-char PYTEST_CURRENT_TEST env var (issue #90).
+    ids=["control-chars", "a-100k", "astral-unicode", "emoji-sandwich", "mixed-line-endings",
+         "lt-5k", "gt-5k", "amp-5k"],
+)
 def test_both_public_functions_never_raise_over_broad_safety_battery(content):
     md_result = leankit_html_to_markdown(content)
     html_result = markdown_to_leankit_html(content)

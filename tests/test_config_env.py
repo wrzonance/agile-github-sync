@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
@@ -158,3 +160,132 @@ def test_env_config_ap_description_max_length_treats_blank_as_unset(tmp_path, mo
 
     assert cfg["ap_description_max_length"] == config.DEFAULT_AP_DESCRIPTION_MAX_LENGTH
     assert capsys.readouterr().out == ""  # blank is "unset", not a malformed value -- no WARN noise
+
+
+# --- comment_sync_identity: pure parse, ZERO print/WARN at env_config() parse time (issue #66 -----
+# Task 1). The self-disable WARN belongs to comment_sync.sync_comments' first real invocation, not
+# to config parsing -- these tests pin that env_config() never becomes an I/O side effect regardless
+# of whether COMMENT_SYNC_GH_LOGIN/COMMENT_SYNC_AP_AUTHOR are set, unset, or blank, because two other
+# live suites (this file, test_probe_dependencies.py) assert exact capsys output around env_config()
+# calls that don't touch comment sync at all.
+
+def test_parse_comment_sync_identity_returns_dict_when_both_present():
+    identity = config._parse_comment_sync_identity("octocat", "Jane Doe")
+
+    assert identity == {"gh_login": "octocat", "ap_author": "Jane Doe"}
+
+
+def test_parse_comment_sync_identity_strips_whitespace():
+    identity = config._parse_comment_sync_identity("  octocat  ", "  Jane Doe  ")
+
+    assert identity == {"gh_login": "octocat", "ap_author": "Jane Doe"}
+
+
+def test_parse_comment_sync_identity_none_when_gh_login_missing():
+    assert config._parse_comment_sync_identity(None, "Jane Doe") is None
+
+
+def test_parse_comment_sync_identity_none_when_ap_author_missing():
+    assert config._parse_comment_sync_identity("octocat", None) is None
+
+
+def test_parse_comment_sync_identity_none_when_both_missing():
+    assert config._parse_comment_sync_identity(None, None) is None
+
+
+def test_parse_comment_sync_identity_none_when_gh_login_blank():
+    assert config._parse_comment_sync_identity("   ", "Jane Doe") is None
+
+
+def test_parse_comment_sync_identity_none_when_ap_author_blank():
+    assert config._parse_comment_sync_identity("octocat", "   ") is None
+
+
+def test_parse_comment_sync_identity_never_prints(capsys):
+    config._parse_comment_sync_identity(None, None)
+    config._parse_comment_sync_identity("octocat", None)
+    config._parse_comment_sync_identity(None, "Jane Doe")
+    config._parse_comment_sync_identity("octocat", "Jane Doe")
+    config._parse_comment_sync_identity("", "")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_env_config_wires_comment_sync_identity_when_both_set(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setenv("COMMENT_SYNC_GH_LOGIN", "octocat")
+    monkeypatch.setenv("COMMENT_SYNC_AP_AUTHOR", "Jane Doe")
+
+    cfg = config.env_config()
+
+    assert cfg["comment_sync_identity"] == {"gh_login": "octocat", "ap_author": "Jane Doe"}
+
+
+def test_env_config_comment_sync_identity_none_when_unset(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.delenv("COMMENT_SYNC_GH_LOGIN", raising=False)
+    monkeypatch.delenv("COMMENT_SYNC_AP_AUTHOR", raising=False)
+
+    cfg = config.env_config()
+
+    assert cfg["comment_sync_identity"] is None
+
+
+@pytest.mark.parametrize(
+    "gh_login,ap_author",
+    [
+        (None, None),
+        ("octocat", "Jane Doe"),  # both non-blank: comment sync ENABLED -- still must be silent
+        ("octocat", None),
+        (None, "Jane Doe"),
+        ("", ""),
+        ("   ", "Jane Doe"),
+        ("octocat", "   "),
+    ],
+)
+def test_env_config_never_prints_for_any_comment_sync_identity_combination(
+    tmp_path, monkeypatch, capsys, gh_login, ap_author
+):
+    """The invariant that matters most for finding #1: env_config() is silent no matter what shape
+    COMMENT_SYNC_GH_LOGIN/COMMENT_SYNC_AP_AUTHOR come in as -- set, unset, or blank. The WARN, if any,
+    belongs to comment_sync.sync_comments' first real call, never to config parsing."""
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
+    for key, value in (("COMMENT_SYNC_GH_LOGIN", gh_login), ("COMMENT_SYNC_AP_AUTHOR", ap_author)):
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+
+    config.env_config()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_deleted_comment_sync_identity_is_repopulated_by_dotenv_but_blank_is_not(tmp_path, monkeypatch):
+    """Platform-independent reproduction of the Windows e2e failure: env_config() calls
+    load_env_file(), which does os.environ.setdefault() from the repo .env. A merely-DELETED
+    COMMENT_SYNC_* var is therefore REPOPULATED from a .env that exports the production identity --
+    silently re-enabling comment sync (on the user's box this hit un-stubbed endpoints in 4
+    test_run.py tests). A present-but-BLANK value survives setdefault (it only fills UNSET keys) and
+    _parse_comment_sync_identity treats blank as disabled -- which is why the run harness's _configure
+    blanks these vars rather than deleting them."""
+    import os
+
+    env_file = _write_env(
+        tmp_path, "COMMENT_SYNC_GH_LOGIN=someone\nCOMMENT_SYNC_AP_AUTHOR=someone@example.com\n")
+    monkeypatch.setattr(config, "ENV_FILE", env_file)
+
+    # DELETED -> load_env_file's setdefault refills it from the .env -> identity comes back
+    monkeypatch.delenv("COMMENT_SYNC_GH_LOGIN", raising=False)
+    monkeypatch.delenv("COMMENT_SYNC_AP_AUTHOR", raising=False)
+    assert config.env_config()["comment_sync_identity"] is not None
+    assert os.environ["COMMENT_SYNC_GH_LOGIN"] == "someone"  # repopulated behind our back
+
+    # BLANK -> setdefault is a no-op (key already set) -> identity stays disabled
+    monkeypatch.setenv("COMMENT_SYNC_GH_LOGIN", "")
+    monkeypatch.setenv("COMMENT_SYNC_AP_AUTHOR", "")
+    assert config.env_config()["comment_sync_identity"] is None
