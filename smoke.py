@@ -345,16 +345,48 @@ def _check_description(cfg: dict, parent_id: str, results: list) -> None:
                     f"(configured max_length={limit})"))
 
 
+def _write_description(cfg: dict, parent_id: str, html: str) -> str:
+    """Write `html` to the card's description via the sync's own op_description/patch_card path and
+    return what the server stored back (as read by card_description)."""
+    fresh = agileplace.get_card(cfg, parent_id)
+    agileplace.patch_card(cfg, True, fresh, [agileplace_description.op_description(html)])
+    return agileplace_description.card_description(cfg, agileplace.get_card(cfg, parent_id))
+
+
+def _diff_window(sent: str, stored: str) -> str:
+    """Whole verbatim SENT/STORED when short; otherwise a first-divergence window (index +/-60), so
+    a live run reveals exactly what AgilePlace normalizes without dumping huge bodies."""
+    if max(len(sent), len(stored)) <= 400:
+        return f"SENT={sent!r}  STORED={stored!r}"
+    n = min(len(sent), len(stored))
+    i = next((k for k in range(n) if sent[k] != stored[k]), n)
+    lo, hi = max(0, i - 60), i + 60
+    return f"first divergence at index {i}: sent[{sent[lo:hi]!r}] vs stored[{stored[lo:hi]!r}]"
+
+
+def _report_html_diff(label: str, sent: str, stored: str, results: list) -> None:
+    """INFO the server's HTML normalization: identical, or the verbatim/first-divergence diff."""
+    if sent == stored:
+        results.append((f"{label} (fact-finding)", None, f"{len(sent)} chars, server stored verbatim"))
+    else:
+        results.append((f"{label} (fact-finding)", None,
+                        f"sent {len(sent)} chars, server stored {len(stored)} -- NORMALIZED. "
+                        + _diff_window(sent, stored)))
+
+
 def _check_github_richtext_roundtrip(cfg: dict, parent_id: str, results: list) -> None:
     """Step 22: a live richtext round-trip of a REAL GitHub issue body through the card description --
     the exact translation layer description/comment sync uses (issue #78 fidelity), driven by
     real-world markdown (headings, lists, code fences, links) rather than a synthetic fixture. Reads
     the configured repo's issue #1 body via ghkit (a gh READ -- smoke performs no GitHub WRITES),
-    renders it to AgilePlace HTML, writes it to the throwaway parent's description through the same
-    op_description/patch_card path as steps 13-14, reads it back, and asserts the #78 render-stable
-    invariant: markdown_to_leankit_html(leankit_html_to_markdown(readback)) == readback (NOT
-    byte-equality of the markdown). An absent, unreadable, or blank issue #1 is an informational
-    SKIP, never a failure; server HTML normalization is fact-finding INFO, not a failure."""
+    renders it to AgilePlace HTML, writes it, reads it back, then re-derives the sync's HTML from the
+    (possibly server-normalized) readback and writes THAT too.
+
+    PASS/FAIL on the CONVERGENCE invariant, not byte-equality: writing the sync's re-derived HTML must
+    reach a fixed point -- the second readback equals the first readback OR equals the re-derived HTML
+    itself. That is exactly "after the first sync write, later runs see no drift" even when AgilePlace
+    normalizes stored HTML (confirmed live 2026-07-24: it does). The sent-vs-stored HTML difference is
+    fact-finding INFO. An absent/unreadable/blank issue #1 is an informational SKIP, never a failure."""
     _step(22, "live GitHub issue #1 body -> card description richtext round-trip (issue #78)")
     repo_label = str(cfg.get("target_repo_path") or "the configured repo")
     bodies = ghkit.list_issue_bodies(cfg)
@@ -372,19 +404,20 @@ def _check_github_richtext_roundtrip(cfg: dict, parent_id: str, results: list) -
     markdown = issue_one["body"]
     print(f"      read {repo_label} issue #1 body ({len(markdown)} chars of markdown)")
     html = richtext.markdown_to_leankit_html(markdown)
-    fresh = agileplace.get_card(cfg, parent_id)
-    agileplace.patch_card(cfg, True, fresh, [agileplace_description.op_description(html)])
-    readback = agileplace_description.card_description(cfg, agileplace.get_card(cfg, parent_id))
+    readback = _write_description(cfg, parent_id, html)
+    _report_html_diff("issue #1 rendered HTML vs stored", html, readback, results)
 
-    results.append(("server stored the rendered HTML unchanged (fact-finding)", None,
-                    f"sent {len(html)} chars, server stored {len(readback)} back"
-                    + ("" if readback == html else " -- server NORMALIZED the HTML")))
+    # Convergence: re-derive the sync's HTML from the server-normalized readback and write it back.
+    # If the sync's render reaches a fixed point, later runs see no description drift.
     md_back = richtext.leankit_html_to_markdown(readback)
-    rerendered = richtext.markdown_to_leankit_html(md_back)
-    results.append(("issue #1 body is render-stable through the sync's richtext layer (issue #78)",
-                    rerendered == readback,
-                    f"md_back {len(md_back)} chars; re-render "
-                    f"{'reproduces' if rerendered == readback else 'DIVERGES from'} the readback HTML"))
+    html2 = richtext.markdown_to_leankit_html(md_back)
+    readback2 = _write_description(cfg, parent_id, html2)
+    converged = readback2 == readback or readback2 == html2
+    results.append(("issue #1 body converges under the sync's richtext layer -- no perpetual drift "
+                    "(issue #78)", converged,
+                    f"2nd readback {'==' if readback2 == readback else '!='} 1st readback; "
+                    f"{'==' if readback2 == html2 else '!='} re-rendered html2 "
+                    f"(md_back {len(md_back)} chars)"))
 
 
 def _find_comment(comments: list[dict], comment_id: int) -> dict | None:
@@ -456,15 +489,25 @@ def _check_comments(cfg: dict, parent_id: str, results: list) -> None:
         results.append(("comment created/edited timestamp shape (fact-finding)", None,
                         f"created={found['created']!r} edited={edited_before!r}"))
 
-    _step(17, "edit the comment via agileplace_comments.update_comment")
-    edited_html = "<p>SMOKE comment (edited)</p>"
+    _step(17, "edit the comment via agileplace_comments.update_comment (richer HTML)")
+    # Richer HTML than a plain <p> so comment-body normalization gets probed (AgilePlace normalizes
+    # stored description HTML -- confirmed live 2026-07-24; comment bodies may too). PASS/FAIL is
+    # normalization-INSENSITIVE: the stored body canonicalized to Markdown must equal the sent body
+    # canonicalized (the same md-level compare description_sync uses), not byte-equality.
+    edited_html = ("<p>SMOKE comment (edited) with <strong>bold</strong> and <code>code</code>:</p>"
+                   "<ul><li>one</li><li>two</li></ul>")
     agileplace_comments.update_comment(cfg, True, parent_id, comment_id, edited_html)
     comments = agileplace_comments.list_comments(cfg, parent_id)
     found_after_edit = _find_comment(comments, comment_id)
-    body_matches = found_after_edit is not None and found_after_edit["body"] == edited_html
-    results.append(("comment edit round-trip (PUT)", body_matches,
-                    f"body now {found_after_edit['body']!r}" if found_after_edit
+    stored_body = found_after_edit["body"] if found_after_edit else ""
+    body_matches = (found_after_edit is not None
+                    and richtext.leankit_html_to_markdown(stored_body)
+                    == richtext.leankit_html_to_markdown(edited_html))
+    results.append(("comment edit round-trip (PUT), normalization-insensitive", body_matches,
+                    f"canonical-Markdown match; stored body {stored_body!r}" if found_after_edit
                     else "comment vanished after edit"))
+    if found_after_edit is not None:
+        _report_html_diff("comment edit HTML vs stored", edited_html, stored_body, results)
     edited_after = found_after_edit.get("edited") if found_after_edit else None
     results.append(("comment edited timestamp moves after PUT (fact-finding)", None,
                     f"before={edited_before!r} after={edited_after!r}"))

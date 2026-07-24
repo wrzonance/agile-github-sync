@@ -318,7 +318,8 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
         ("PUT", "card/S1/comment/1"),     # edit-timestamp fact-finding probe (issue #66)
         ("DELETE", "card/S1/comment/1"),  # comment delete (speculative shape)
         ("PATCH", "card/S1"),             # deliberate stale-version probe
-        ("PATCH", "card/S1"),             # GitHub issue #1 body -> description richtext round-trip (#78)
+        ("PATCH", "card/S1"),             # issue #1 richtext round-trip: write rendered HTML (#78)
+        ("PATCH", "card/S1"),             # issue #1 richtext round-trip: write re-derived HTML (convergence)
         ("DELETE", "card/S2"),            # cleanup child
         ("DELETE", "card/S1"),            # cleanup parent
     ]
@@ -339,8 +340,9 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
     assert "comment list readback finds the created comment" in out
     assert "comment edit round-trip" in out
     assert "comment delete + readback gone" in out
-    assert "read the configured repo issue #1 body" in out or "issue #1 body (" in out
-    assert "render-stable through the sync's richtext layer" in out
+    assert "issue #1 body (" in out   # step 22 printed the repo + body length
+    assert "converges under the sync's richtext layer" in out
+    assert "comment edit HTML vs stored" in out   # comment-body normalization fact-finding
 
 
 def test_github_richtext_roundtrip_skips_informationally_when_issue_1_is_absent(tenant_env, capsys):

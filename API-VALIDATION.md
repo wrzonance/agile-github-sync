@@ -418,3 +418,28 @@ Fact-finding aside: the description length probe wrote **20007 chars and the ser
 stored them** despite the configured `AP_DESCRIPTION_MAX_LENGTH=20000`. The configured cap is a
 client-side conservative guard, not a server-enforced limit -- the server did not reject the
 oversize body.
+
+### CONFIRMED (2026-07-24): AgilePlace NORMALIZES stored description/comment HTML
+
+The issue #78 richtext round-trip step (step 22) caught it live: AgilePlace does not store rendered
+HTML verbatim -- it **normalizes** it. A real issue #1 body (147 chars of markdown) rendered to 224
+chars of HTML; the server stored 221 chars back. The `leankit_html_to_markdown` of the readback was
+148 chars, so content survives semantically -- the divergence is HTML-level (entity spelling,
+whitespace, self-closing tags, or attribute changes; the enhanced smoke step now prints the verbatim
+sent/stored diff so a re-run pins exactly what). Plain comment bodies (`<p>...</p>`) DID come back
+verbatim, so normalization may only bite richer HTML; the comment edit step now uses richer HTML
+(bold/list/code) to probe it.
+
+**Implication and how the sync handles it (golden rule: compare/record what the SERVER stores, never
+what was sent):**
+- **description_sync (issue #65) is already robust** -- it never compares raw stored HTML. It
+  compares `_canonicalize_ap_description` (= `leankit_html_to_markdown` of the stored HTML) against
+  the canonical Markdown of the GitHub body, a normalization-insensitive md-level compare. Server
+  HTML normalization is absorbed by that canonicalization, so there is no perpetual false drift.
+- **comment_sync** fingerprints the AP body with a sha256 hash taken **from the post-write readback**
+  (the stored, normalized form). Next run reads the same stored form -> same hash -> no false drift.
+  The only exposed case was the refetch-failure fallback, which used to hash what-was-SENT; it now
+  leaves the hash unconfirmed and adopts a baseline next run (see comment_sync's amended docstring).
+- **smoke step 22** PASS/FAIL is a **convergence** invariant, not byte-equality: it writes the
+  sync's re-derived HTML back and requires a fixed point (second readback == first readback, or ==
+  the re-derived HTML), i.e. "after the first sync write, later runs see no drift."

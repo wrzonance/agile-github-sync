@@ -761,9 +761,34 @@ def test_rebuild_ledger_preserves_existing_origin_timestamps_on_refetch_failure(
     row = rows[0]
     assert row["gh_id"] == 1 and row["ap_id"] == 2
     assert row["gh_created"] == _T0 and row["gh_edited"] == _T1  # preserved from fallback, not blanked
-    # AP-targeted edit + refetch failure: record the hash of exactly what we WROTE (P1 #3), never the
-    # stale fallback body -- else the next run would misread our own edit as AP drift and overwrite GH.
-    assert row["ap_hash"] == _hash("rendered new body")
+    # AP-targeted edit + refetch failure: leave ap_hash as the UNCONFIRMED sentinel (None), NOT the
+    # hash of what we wrote -- AgilePlace normalizes stored HTML, so a what-we-wrote hash would
+    # mis-register as AP drift next run. The next run adopts a baseline instead (confirm_ap_baseline).
+    assert row["ap_hash"] is None
+
+
+def test_unconfirmed_ap_hash_adopts_a_baseline_next_run_never_reverse_edits(monkeypatch):
+    """Refetch-failure fail-safe (server-normalization robustness): a row whose ap_hash is the
+    unconfirmed None sentinel must NOT be treated as AP drift. The next run plans a ledger-only
+    confirm_ap_baseline that records the current AP body hash -- no reverse-edit against the GH
+    origin -- so AP drift detection resumes without churn."""
+    # Pure planner: None ap_hash + a live pair with no GH drift -> confirm_ap_baseline, not edit.
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_hash=None)]
+    gh_comments = [_gh(1, author="alice", body="origin", edited=_T0)]
+    ap_comments = [_ap(2, name="alice", body="<p>server-normalized mirror body</p>")]
+    plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
+    assert _kinds(plan) == ["confirm_ap_baseline"]
+    assert plan.actions[0].target_side is None  # ledger-only, no I/O
+
+    # Through the wiring: apply persists ap_hash = the observed (normalized) body's hash.
+    issues_state = {ISSUE_URL: {"comments": [_row(1, 2, "gh", gh_edited=_T0, ap_hash=None)]}}
+    monkeypatch.setattr(ghkit, "list_issue_comments",
+                        lambda cfg, number: [_gh(1, author="alice", body="origin", edited=_T0)])
+    monkeypatch.setattr(agileplace_comments, "list_comments",
+                        lambda cfg, card_id: [_ap(2, name="alice", body="<p>server-normalized mirror body</p>")])
+    comment_sync.sync_comments(_cfg(), True, _issue(), _card(), issues_state)
+    row = issues_state[ISSUE_URL]["comments"][0]
+    assert row["ap_hash"] == _hash("<p>server-normalized mirror body</p>")
 
 
 # --- exception boundary: a GitHub write can raise SystemExit too, not just AgilePlace -----------

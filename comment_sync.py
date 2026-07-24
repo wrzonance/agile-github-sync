@@ -21,6 +21,12 @@ cardId/createdBy/createdOn/id/text), so AP-side drift is detected by a **content
 ApComment ``body``) observed at the last successful sync, refreshed after every sync-authored AP
 write. GH drift stays timestamp-based (``updated_at`` is real). When BOTH sides drift, **GitHub
 wins** -- AP recency is unknowable without a timestamp -- replacing the original most-recent-wins.
+
+AgilePlace NORMALIZES stored HTML (confirmed live 2026-07-24), so the fingerprint is ALWAYS taken
+from the post-write readback, never from what the sync sent. If that readback fails after an AP
+write, ``ap_hash`` is left as the UNCONFIRMED sentinel ``None``: the next run treats it not as drift
+but as a baseline to adopt (the ``confirm_ap_baseline`` ledger-only action). Accepted blind spot: a
+human AP edit in that one window is adopted silently, undetected once.
 """
 from __future__ import annotations
 
@@ -84,7 +90,7 @@ def is_sync_authored(side: str, author_identifier: str | None, identity: dict | 
 
 CommentActionKind = Literal[
     "mirror_new", "edit_mirror", "delete_mirror_and_tombstone", "restore_mirror",
-    "tombstone_both_gone", "adopt_orphan", "drop_unpairable_orphan",
+    "tombstone_both_gone", "adopt_orphan", "drop_unpairable_orphan", "confirm_ap_baseline",
 ]
 
 
@@ -215,7 +221,10 @@ def _plan_drift(row: dict, gh_id: int, ap_id: int, gh_comment: dict, ap_comment:
     ledger bookkeeping, independent of which side's content happens to be canonical this round."""
     gh_drifted = _side_drifted(_parse_timestamp(gh_comment.get("edited")),
                                _parse_timestamp(row.get("gh_edited")))
-    ap_drifted = _ap_body_hash(ap_comment) != row.get("ap_hash")
+    # ap_hash None is the UNCONFIRMED sentinel (a prior AP write whose readback failed): never treat
+    # it as drift -- `confirm_ap_baseline` adopts the current body as the baseline next run instead.
+    ledgered_hash = row.get("ap_hash")
+    ap_drifted = ledgered_hash is not None and _ap_body_hash(ap_comment) != ledgered_hash
     if not gh_drifted and not ap_drifted:
         return None
     if gh_drifted and ap_drifted:
@@ -272,7 +281,15 @@ def _plan_ledger_row(row: dict, gh_by_id: dict, ap_by_id: dict) -> CommentAction
         return gone_or_present
     # _plan_gone_or_present returns None only when both sides are present -- exhaustive over the
     # (gh present/absent) x (ap present/absent) combinations, so both are guaranteed non-None here.
-    return _plan_drift(row, gh_id, ap_id, gh_comment, ap_comment, origin_side)
+    drift = _plan_drift(row, gh_id, ap_id, gh_comment, ap_comment, origin_side)
+    if drift is not None:
+        return drift
+    if row.get("ap_hash") is None:
+        # No drift, but ap_hash is the UNCONFIRMED sentinel (a prior AP write whose readback failed).
+        # Adopt the current AP body as the baseline now -- ledger-only, no I/O, no mirror edit -- so
+        # AP drift detection resumes next run. Recorded from the fresh fetch in `_apply_ledger_effect`.
+        return CommentAction("confirm_ap_baseline", None, (gh_id, ap_id), None, None, (gh_id, ap_id))
+    return None
 
 
 # =================================================================================================
@@ -587,21 +604,6 @@ def _row_from_ids(gh_id: int, ap_id: int, origin_side: str, gh_comment: dict | N
     }
 
 
-def _post_write_ap_hash(action: CommentAction, ap_comment: dict | None, confirmed: bool) -> str | None:
-    """The `ap_hash` to record after `action` -- the fingerprint of the AP body now on the server.
-    If this action wrote the AP side (`target_side == "ap"`) the authoritative source is the
-    post-write readback (`ap_comment`, when the refetch `confirmed`); on refetch failure we fall back
-    to exactly what we wrote (`action.rendered_body`, which AP stores verbatim -- confirmed live) so
-    our own edit never mis-registers as AP drift next run (P1 #3: never record a value that would
-    make the next run overwrite the origin). If this action did NOT write AP, the observed body is
-    already current. None only when there is no AP body to hash."""
-    if action.target_side == "ap":
-        if confirmed and ap_comment is not None:
-            return _ap_body_hash(ap_comment)
-        return _ap_body_hash({"body": action.rendered_body})
-    return _ap_body_hash(ap_comment) if ap_comment is not None else None
-
-
 def _apply_edit_effects(row: dict, action: CommentAction, fresh_gh_by_id: dict,
                         fresh_ap_by_id: dict, confirmed: bool) -> None:
     gh_id, ap_id = action.ledger_key
@@ -610,9 +612,17 @@ def _apply_edit_effects(row: dict, action: CommentAction, fresh_gh_by_id: dict,
         row["gh_created"], row["gh_edited"] = gh_comment.get("created"), gh_comment.get("edited")
     if ap_comment is not None:
         row["ap_created"] = ap_comment.get("created")
-    new_hash = _post_write_ap_hash(action, ap_comment, confirmed)
-    if new_hash is not None:  # never blank a known hash on the (rare) no-AP-body edge
-        row["ap_hash"] = new_hash
+    if action.target_side == "ap":
+        # We wrote the AP side. Its fingerprint MUST come from the post-write readback -- AgilePlace
+        # NORMALIZES stored HTML (confirmed live 2026-07-24), so hashing what we SENT would differ
+        # from the stored form and mis-register as AP drift next run. On refetch failure we can't
+        # know the stored hash, so record the UNCONFIRMED sentinel (None): the next run adopts the
+        # observed body as the new baseline (`confirm_ap_baseline`) instead of treating our own write
+        # as drift. Accepted blind spot: a human AP edit in that one window is adopted undetected once.
+        row["ap_hash"] = _ap_body_hash(ap_comment) if (confirmed and ap_comment is not None) else None
+    elif ap_comment is not None:
+        # We did NOT write AP: the observed body is already the current stored form.
+        row["ap_hash"] = _ap_body_hash(ap_comment)
 
 
 def _apply_create_result(action: CommentAction, observed: dict | None, rows_by_key: dict,
@@ -683,6 +693,12 @@ def _apply_ledger_effect(action: CommentAction, observed: dict | None, rows_by_k
         _apply_delete_tombstone(action, rows_by_key, fresh_gh_by_id, fresh_ap_by_id)
         return
     if kind == "drop_unpairable_orphan":
+        return
+    if kind == "confirm_ap_baseline":
+        row = rows_by_key.get(action.ledger_key)
+        ap_comment = fresh_ap_by_id.get(action.ledger_key[1])
+        if row is not None and ap_comment is not None:
+            row["ap_hash"] = _ap_body_hash(ap_comment)  # adopt current AP body as the new baseline
         return
     if kind == "adopt_orphan":
         gh_id, ap_id = action.ledger_key
