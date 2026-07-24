@@ -68,3 +68,43 @@ def gather_board_reads(cfg: dict, *, description_card_ids, dependency_card_ids,
                         out[family][cid] = None
     return BoardReads(descriptions={k: v for k, v in out["desc"].items() if v is not None},
                       dependencies=out["deps"], ap_comments=out["comm"], children=out["kids"])
+
+
+def hydrate_run_reads(cfg: dict, online: bool, syncable_issues: list, card_for, epics: list,
+                      max_workers: int = 8) -> None:
+    """Complete the run's matched card snapshots in place with everything the reconciliation
+    loops would otherwise fetch one card at a time: `description` (the real API key --
+    agileplace_description.card_description's documented zero-I/O path), `_prefetchedDeps`,
+    `_prefetchedApComments`, and (epic parents only) `_prefetchedChildIds`.
+
+    In-place hydration follows the run's own snapshot idiom (`_planOnly`, `has_open_pr`): the
+    card dict IS the run's snapshot, and completing it here keeps every consumer signature and
+    sync.py's wiring unchanged. Only real, matched cards are touched -- plan-only cards keep
+    their existing zero-network conventions. A key hydrated to None carries that reader's own
+    failure sentinel (consumers already skip on it); a description that failed stays ABSENT so
+    the consumer's serial get_card fallback fails loud at today's call site. Offline -> no-op."""
+    if not online:
+        return
+    matched: dict[str, dict] = {}
+    for issue in syncable_issues:
+        card = card_for(issue)
+        if card and card.get("id") and not card.get("_planOnly"):
+            matched[str(card["id"])] = card
+    epic_ids = [str(c["id"]) for e in epics
+                if (c := card_for(e)) and c.get("id") and not c.get("_planOnly")]
+    reads = gather_board_reads(
+        cfg,
+        description_card_ids=[cid for cid, c in matched.items() if "description" not in c],
+        dependency_card_ids=list(matched),
+        comment_card_ids=list(matched) if cfg.get("comment_sync_identity") else [],
+        child_parent_ids=epic_ids,
+        max_workers=max_workers,
+    )
+    for cid, card in matched.items():
+        if cid in reads.descriptions:
+            card["description"] = reads.descriptions[cid]
+        card["_prefetchedDeps"] = reads.dependencies.get(cid)
+        if cid in reads.ap_comments:
+            card["_prefetchedApComments"] = reads.ap_comments[cid]
+        if cid in reads.children:
+            card["_prefetchedChildIds"] = reads.children[cid]

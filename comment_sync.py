@@ -466,8 +466,12 @@ def _warn_comment_sync_disabled() -> None:
          "to enable", file=sys.stderr)
 
 
+_PREFETCH_MISS = object()  # "no hydrated snapshot" -- distinct from None ("prefetch read failed")
+
+
 def _fetch_both_sides(cfg: dict, number: int, card_id,
-                      gh_comments: list[dict] | None = None) -> tuple[list[dict], list[dict]] | None:
+                      gh_comments: list[dict] | None = None,
+                      ap_comments=_PREFETCH_MISS) -> tuple[list[dict], list[dict]] | None:
     """Both sides' comment snapshots for one issue/card pair. None when EITHER read fails, so a
     broken side never plans against a stale/empty snapshot of the other -- mirrors the read
     tri-state contract at the wiring layer: `ghkit.list_issue_comments` already returns None on
@@ -476,18 +480,28 @@ def _fetch_both_sides(cfg: dict, number: int, card_id,
 
     `gh_comments`, when not None, is this issue's already-normalized slice of the run's batched
     issue graph (issue #98) -- used verbatim, skipping the per-issue GitHub read; None keeps
-    today's per-issue read (the batch's overflow/normalization fallback path)."""
+    today's per-issue read (the batch's overflow/normalization fallback path).
+
+    `ap_comments` (issue #99) carries the card's hydrated `_prefetchedApComments` snapshot:
+    a list is used verbatim, None means the prefetch's own AgilePlace read failed (skip this
+    issue with the same WARN the serial SystemExit branch prints), and _PREFETCH_MISS (no
+    hydration ran) keeps today's serial read."""
     if gh_comments is None:
         gh_comments = ghkit.list_issue_comments(cfg, number)
     if gh_comments is None:
         print(f"WARN  issue #{number} comment sync skipped: GitHub comment read failed",
              file=sys.stderr)
         return None
-    try:
-        ap_comments = agileplace_comments.list_comments(cfg, card_id)
-    except SystemExit as exc:
-        print(f"WARN  issue #{number} comment sync skipped: AgilePlace comment read failed: {exc}",
-             file=sys.stderr)
+    if ap_comments is _PREFETCH_MISS:
+        try:
+            ap_comments = agileplace_comments.list_comments(cfg, card_id)
+        except SystemExit as exc:
+            print(f"WARN  issue #{number} comment sync skipped: AgilePlace comment read failed: "
+                  f"{exc}", file=sys.stderr)
+            return None
+    elif ap_comments is None:
+        print(f"WARN  issue #{number} comment sync skipped: AgilePlace comment read failed "
+              f"(prefetch)", file=sys.stderr)
         return None
     return gh_comments, ap_comments
 
@@ -764,7 +778,8 @@ def sync_comments(cfg: dict, apply: bool, issue: dict, card: dict, issues_state:
         _warn_comment_sync_disabled()
         return
     number, card_id = issue["number"], card.get("id")
-    fetched = _fetch_both_sides(cfg, number, card_id, gh_comments=gh_comments)
+    fetched = _fetch_both_sides(cfg, number, card_id, gh_comments=gh_comments,
+                                ap_comments=card.get("_prefetchedApComments", _PREFETCH_MISS))
     if fetched is None:
         return
     gh_comments, ap_comments = fetched

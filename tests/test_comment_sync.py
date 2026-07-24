@@ -966,3 +966,38 @@ def test_fetch_both_sides_without_prefetch_reads_per_issue(monkeypatch):
     monkeypatch.setattr(agileplace_comments, "list_comments", lambda cfg, cid: [])
 
     assert comment_sync._fetch_both_sides({}, 5, "C1", gh_comments=None) == (gh, [])
+
+
+def test_fetch_both_sides_uses_prefetched_ap_comments(monkeypatch):
+    """Issue #99: a hydrated AgilePlace comment snapshot bypasses the serial list_comments."""
+    monkeypatch.setattr(agileplace_comments, "list_comments",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("prefetched snapshot must bypass the serial read")))
+    monkeypatch.setattr(ghkit, "list_issue_comments", lambda cfg, number: [])
+    ap = [{"id": "9", "author": "x", "body": "b", "created": "c", "edited": None}]
+
+    assert comment_sync._fetch_both_sides({}, 5, "C1", ap_comments=ap) == ([], ap)
+
+
+def test_fetch_both_sides_prefetched_ap_failure_skips_with_warn(monkeypatch, capsys):
+    """A hydrated None means the prefetch's AgilePlace read failed -- same skip + WARN contract
+    as the serial SystemExit branch."""
+    monkeypatch.setattr(ghkit, "list_issue_comments", lambda cfg, number: [])
+
+    assert comment_sync._fetch_both_sides({}, 5, "C1", ap_comments=None) is None
+    assert "issue #5 comment sync skipped: AgilePlace comment read failed" \
+        in capsys.readouterr().err
+
+
+def test_sync_comments_reads_the_hydrated_card_snapshot(monkeypatch):
+    """sync_comments consumes card['_prefetchedApComments'] (board_reads.hydrate_run_reads'
+    snapshot idiom) without a serial AgilePlace read."""
+    monkeypatch.setattr(agileplace_comments, "list_comments",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("hydrated card must bypass the serial read")))
+    identity = {"gh_login": "bot", "ap_author": "bot@example.invalid"}
+    card = {"id": "C1", "_prefetchedApComments": []}
+    issue = {"number": 5, "url": "https://github.com/o/r/issues/5"}
+
+    comment_sync.sync_comments({"comment_sync_identity": identity}, False, issue, card,
+                               {}, gh_comments=[])
