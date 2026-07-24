@@ -507,7 +507,7 @@ def test_find_marked_issue_resumes_regardless_of_issue_state(state):
 # --- title-derived customId collision guard (issue #62 follow-up) -------------
 #
 # _is_candidate accepts a card by its OWN (possibly blank) customId, but promotion writes back a
-# customId DERIVED FROM THE CARD'S TITLE (_writeback_key -> title_key of a [KEY] prefix). If that
+# customId DERIVED FROM THE CARD'S TITLE (_writeback_header -> title_key of a [KEY] prefix). If that
 # derived key already belongs to a different URL-owned card -- an existing issue's issue_custom_id,
 # or another candidate this run -- the writeback creates a customId collision that the next sync's
 # _reconciled_custom_id_index fail-closed guard aborts on. promote() must skip such cards -- but
@@ -592,18 +592,18 @@ def test_promote_resumes_rather_than_skips_when_the_collision_is_the_cards_own_m
     assert writeback == [(card_id, 40)]
 
 
-# --- _writeback_key ------------------------------------------------------------
+# --- _writeback_header ----------------------------------------------------------
 
-def test_writeback_key_uses_bracketed_title_prefix_when_present():
-    assert intake._writeback_key("[EP-0C] Some card", 42) == "EP-0C"
-
-
-def test_writeback_key_falls_back_to_issue_number_without_bracket_prefix():
-    assert intake._writeback_key("Plain title, no bracket", 42) == "42"
+def test_writeback_header_uses_bracketed_title_prefix_when_present():
+    assert intake._writeback_header("[EP-0C] Some card", 42) == "EP-0C (GitHub Issue #42)"
 
 
-def test_writeback_key_is_sourced_from_the_cards_own_title_not_a_fetch():
-    assert intake._writeback_key("[EP-01] A", 5) != intake._writeback_key("[EP-02] B", 5)
+def test_writeback_header_falls_back_to_issue_number_without_bracket_prefix():
+    assert intake._writeback_header("Plain title, no bracket", 42) == "GitHub Issue #42"
+
+
+def test_writeback_header_is_sourced_from_the_cards_own_title_not_a_fetch():
+    assert intake._writeback_header("[EP-01] A", 5) != intake._writeback_header("[EP-02] B", 5)
 
 
 # --- invariant 2: writeback ordering is fixed ---------------------------------
@@ -631,7 +631,7 @@ def test_writeback_writes_custom_id_before_link_in_two_separate_calls(monkeypatc
     assert calls[1]["path"] == "/externalLink"
 
 
-def test_writeback_customid_matches_writeback_key(monkeypatch):
+def test_writeback_customid_matches_writeback_header(monkeypatch):
     calls = []
     monkeypatch.setattr(agileplace, "patch_card",
                          lambda cfg, apply, card, ops, **k: calls.append(ops[0]))
@@ -640,7 +640,7 @@ def test_writeback_customid_matches_writeback_key(monkeypatch):
 
     intake._writeback({}, False, card, issue)
 
-    assert calls[0]["value"] == "EP-0C"
+    assert calls[0]["value"] == "EP-0C (GitHub Issue #7)"
 
 
 def test_writeback_customid_failure_never_reaches_the_external_link_write(monkeypatch):
@@ -1085,3 +1085,27 @@ def test_promote_never_reseeds_a_resumed_candidate(monkeypatch):
 
     assert result.resumed == 1
     assert result.created == 0
+
+
+# --- issue #93: header-format customId ------------------------------------------------------
+
+def test_writeback_header_carries_the_issue_number():
+    assert intake._writeback_header("[0C1] Fix the thing", 5) == "0C1 (GitHub Issue #5)"
+
+
+def test_writeback_header_unkeyed_title_is_the_bare_github_reference():
+    assert intake._writeback_header("Fix the thing", 7) == "GitHub Issue #7"
+
+
+def test_is_candidate_disqualifies_a_header_format_custom_id():
+    """A managed card already rewritten to '0C1 (GitHub Issue #5)' must normalize back to '0C1'
+    for the managed-set check -- NOT become an intake candidate (which would file a duplicate
+    GitHub issue for a card the sync already owns)."""
+    card = {"id": "C9", "title": "Some card", "laneId": "L1",
+            "customId": "0C1 (GitHub Issue #5)"}
+    assert not intake._is_candidate(card, {"L1"}, set(), {"0C1"})
+
+
+def test_is_candidate_still_disqualifies_an_old_format_custom_id():
+    card = {"id": "C9", "title": "Some card", "laneId": "L1", "customId": "0C1"}
+    assert not intake._is_candidate(card, {"L1"}, set(), {"0C1"})

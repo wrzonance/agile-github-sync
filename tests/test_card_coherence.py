@@ -444,3 +444,20 @@ def test_fence_run_indices_never_mutates_inputs_and_never_raises():
 
     # Malformed/empty inputs must never raise.
     assert fence_run_indices({}, [], [], {}, {}).syncable_issues == []
+
+
+def test_retirement_reservation_matches_a_header_format_retiring_card():
+    """issue #93: a retiring card already rewritten to 'KEY (GitHub Issue #2)' still reserves the
+    key 'KEY' -- the active issue sharing it must defer, exactly as with an old-format card."""
+    active = {"url": "https://github.com/o/r/issues/1", "title": "[KEY] one", "number": 1}
+    retired = {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2,
+              "state_reason": "NOT_PLANNED"}
+    retiring_card = {"id": "200", "customId": "KEY (GitHub Issue #2)"}
+    all_card_by_url = {retired["url"]: retiring_card}
+    all_card_by_cid = {"KEY": retiring_card}  # sync builds this index normalized (Task 3)
+
+    result = fence_run_indices({}, [active], [retired], all_card_by_url, all_card_by_cid)
+
+    assert result.syncable_issues == [], "the active issue must be deferred, not adopt the retiring card"
+    assert len(result.warnings) == 1
+    assert result.warnings[0].startswith("WARN  deferring active card [KEY]: customId is held by")

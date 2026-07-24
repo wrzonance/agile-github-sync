@@ -44,7 +44,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import agileplace
-from stages import issue_custom_id
+from stages import header_match_key, issue_custom_id
 
 
 def _claimed_card_id(issue: dict, all_card_by_url: dict[str, dict],
@@ -205,7 +205,7 @@ def fence_run_indices(contested: dict[str, set[str]], active_issues: list[dict],
         return any(card is retired or same_card(card, retired) for retired in retired_cards)
 
     retired_card_by_cid = {
-        agileplace.custom_id_value(card): card
+        header_match_key(agileplace.custom_id_value(card)): card
         for card in retired_cards if agileplace.custom_id_value(card)
     }
     card_by_url = {

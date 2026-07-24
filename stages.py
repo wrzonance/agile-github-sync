@@ -7,6 +7,8 @@ lane comes from the epic issue's own Status or fallback signals, not from task r
 """
 from __future__ import annotations
 
+import re
+
 STAGES = ("Intake", "Backlog", "Ready", "In progress", "In review", "Done")
 RETIRED_STATE_REASONS = frozenset({"NOT_PLANNED", "DUPLICATE"})
 
@@ -112,3 +114,35 @@ def epic_key_for_task(task_key: str) -> str | None:
 def issue_custom_id(issue: dict) -> str:
     """The customId written to and read from AgilePlace for one GitHub issue."""
     return title_key(issue["title"]) or str(issue["number"])
+
+
+# issue #93: the header format written to a card's customId. Only the FINAL ' (GitHub Issue #N)'
+# suffix is meaningful; header_match_key's greedy group leaves any earlier lookalike text intact.
+_KEYED_HEADER_RE = re.compile(r"(?s)(.+) \(GitHub Issue #\d+\)")
+_BARE_HEADER_RE = re.compile(r"GitHub Issue #(\d+)")
+
+
+def issue_card_header(issue: dict) -> str:
+    """The customId header WRITTEN to a card: the sync key plus a visible GitHub issue reference
+    ('0C1 (GitHub Issue #5)'), or bare 'GitHub Issue #5' when the title carries no [KEY] (the
+    keyed form would redundantly read '5 (GitHub Issue #5)'). issue_custom_id() stays the MATCH
+    key; header_match_key() is this format's exact inverse."""
+    key = title_key(issue["title"])
+    number = issue["number"]
+    return f"{key} (GitHub Issue #{number})" if key else f"GitHub Issue #{number}"
+
+
+def header_match_key(value: str | None) -> str:
+    """The MATCH key encoded in a card's customId header -- the exact inverse of
+    issue_card_header(), applied to every card-side read so old-format ('0C1') and header-format
+    ('0C1 (GitHub Issue #5)') cards resolve to the same key during the transition. A bare
+    'GitHub Issue #5' folds to '5' (the unkeyed fallback key). Any other value (old-format,
+    human-authored, smoke) passes through unchanged; None/empty normalizes to ''."""
+    value = value or ""
+    keyed = _KEYED_HEADER_RE.fullmatch(value)
+    if keyed:
+        return keyed.group(1)
+    bare = _BARE_HEADER_RE.fullmatch(value)
+    if bare:
+        return bare.group(1)
+    return value

@@ -154,14 +154,15 @@ def test_existing_retired_card_is_retired_and_flags_stay_human_owned(
         tmp_path,
         monkeypatch,
         [_github_issue(10, "NOT_PLANNED"), dependent],
-        cards=[_card(10, "L2", blocked=True), _card(20, "L1", blocked=True)],
+        cards=[_card(10, "L2", blocked=True),
+               {**_card(20, "L1", blocked=True), "customId": "GitHub Issue #20"}],
         blocked_by={10: [], 20: [10]},
         lanes=lanes,
         project_snapshot={},
     )
 
     out = capsys.readouterr().out
-    assert "DRY   retire [10] -> 'Done' (NOT_PLANNED)" in out
+    assert "DRY   retire [10] -> 'Done'; customId->GitHub Issue #10 (NOT_PLANNED)" in out
     create_card.assert_not_called()
     edit_label.assert_not_called()
     blocked_by_read.assert_called_once_with(_config(tmp_path), [20])
@@ -169,10 +170,28 @@ def test_existing_retired_card_is_retired_and_flags_stay_human_owned(
     assert ops_by_card == {
         "C10": [
             {"op": "replace", "path": "/laneId", "value": "L5"},
+            {"op": "replace", "path": "/customId", "value": "GitHub Issue #10"},
         ],
     }
     assert not any("/isBlocked" in json.dumps(ops) or "/blockReason" in json.dumps(ops)
                    for ops in ops_by_card.values())
+
+
+def test_retired_card_legacy_custom_id_upgrades_to_header_format(tmp_path, monkeypatch):
+    """Issue #93's one-time header sweep covers retired cards too: a URL-owned retired card
+    still carrying a legacy customId gets the header rewrite queued even when its lane is
+    already Done, so 'one --apply run revises the whole board' holds for retired cards."""
+    _, patch_card, _, _ = _run_main(
+        tmp_path,
+        monkeypatch,
+        [_github_issue(10, "NOT_PLANNED")],
+        cards=[_card(10, "L5", blocked=False)],
+        lanes=[{"id": "L5", "title": "Done", "cardStatus": "finished"}],
+    )
+
+    assert patch_card.call_args.args[3] == [
+        {"op": "replace", "path": "/customId", "value": "GitHub Issue #10"},
+    ]
 
 
 def test_retirement_uses_authoritative_closure_when_other_reads_fail(
@@ -190,9 +209,10 @@ def test_retirement_uses_authoritative_closure_when_other_reads_fail(
     out = capsys.readouterr().out
     assert "open-PR read FAILED" in out
     assert "Projects v2 read FAILED -- leaving active-issue lanes untouched" in out
-    assert "DRY   retire [10] -> 'Done' (DUPLICATE)" in out
+    assert "DRY   retire [10] -> 'Done'; customId->GitHub Issue #10 (DUPLICATE)" in out
     assert patch_card.call_args.args[3] == [
         {"op": "replace", "path": "/laneId", "value": "L5"},
+        {"op": "replace", "path": "/customId", "value": "GitHub Issue #10"},
     ]
 
 
@@ -263,9 +283,11 @@ def test_active_issue_cannot_claim_url_owned_retired_card_by_custom_id(
 
 def test_retirement_leaves_blocked_flag_and_reason_to_humans(tmp_path, monkeypatch):
     """Pre-Phase-2 the sync scrubbed stale reason text during retirement; now the flag and
-    its reason belong to humans, so a card already in its Done lane gets NO patch at all."""
+    its reason belong to humans, so a steady-state card (Done lane, header-format customId)
+    gets NO patch at all."""
     card = {
         **_card(10, "L5", blocked=False),
+        "customId": "GitHub Issue #10",
         "blockedStatus": {"isBlocked": False, "reason": "stale reason"},
     }
 
@@ -317,6 +339,7 @@ def test_active_card_is_not_renamed_to_retired_card_custom_id(
     assert patch_card.call_args.args[2]["id"] == "C10"
     assert patch_card.call_args.args[3] == [
         {"op": "replace", "path": "/laneId", "value": "L5"},
+        {"op": "replace", "path": "/customId", "value": "GitHub Issue #10"},
     ]
 
 

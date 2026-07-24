@@ -776,3 +776,15 @@ def test_protect_open_pr_stage_prints_no_warn_on_misconfigured_stage_lane_map(ca
     assert "WARN" not in out
 
 
+def test_reconciled_index_releases_a_renamed_header_format_custom_id():
+    """issue #93: the card stores the HEADER ('X (GitHub Issue #1)'); the index and the release
+    bookkeeping operate on the normalized KEY ('X'). A rename [X]->[Y] must still release 'X'."""
+    issue = {"number": 1, "title": "[Y] renamed", "url": "https://example.test/issues/1"}
+    card = {"id": "C1", "customId": "X (GitHub Issue #1)"}
+    reconciled, released = _reconciled_custom_id_index(
+        [issue], {issue["url"]: card}, {"X": card})
+    assert "X" not in reconciled
+    assert reconciled["Y"] is card
+    assert released == frozenset({"X"})
+
+

@@ -892,3 +892,26 @@ def test_planned_card_snapshot_type_title_never_reaches_the_post_body():
     assert body["title"] == "Title"
     assert body["typeId"] == "42"
     assert "Bug" not in body.values()
+
+
+# --- issue #93: link_label keeps the external-link label short -----------------------------
+
+def test_create_card_link_label_overrides_the_derived_label():
+    """The sync passes the SHORT key label; the header-format custom_id must not leak into it
+    (would read 'GitHub 0C1 (GitHub Issue #5)')."""
+    with patch("agileplace.api", return_value={"id": "new"}) as api_mock:
+        create_card(CFG, True, "Title", "0C1 (GitHub Issue #5)", "https://example.com", None,
+                    link_label="GitHub 0C1")
+    _, kwargs = api_mock.call_args
+    assert kwargs["body"]["externalLink"] == {"label": "GitHub 0C1",
+                                              "url": "https://example.com"}
+
+
+def test_create_card_without_link_label_keeps_the_derived_label_byte_identical():
+    """Every existing caller (smoke.py included) passes no link_label and must send the exact
+    body it always sent."""
+    with patch("agileplace.api", return_value={"id": "new"}) as api_mock:
+        create_card(CFG, True, "Title", "CID-1", "https://example.com", None)
+    _, kwargs = api_mock.call_args
+    assert kwargs["body"]["externalLink"] == {"label": "GitHub CID-1",
+                                              "url": "https://example.com"}

@@ -221,7 +221,9 @@ AGILEPLACE_HARD_CAP_LINES = 800
 # exact bytes, measured immediately before issue #66's task 8 (the file was already confirmed
 # untouched by #66's tasks 1-7 via `git diff --stat origin/main -- agileplace.py` reporting no
 # diff), pins the stronger byte-for-byte invariant the line-count tests above cannot express.
-AGILEPLACE_SHA256 = "c3fb07615550c503fdb7766864b394d1c79ca32f9473eeb2b1b33ca14a05f95e"
+# Re-pinned for issue #93's create_card link_label parameter (the only agileplace.py change that
+# feature makes).
+AGILEPLACE_SHA256 = "2a0539fe835285161beb17a9e4f5d7d01c53cbbf0ac011c96c2fd99703cc5c07"
 
 # Names issue #79 moved out of sync.py into metadata_sync.py. sync_metadata/sync_dates are the two
 # public entry points (still reachable as `sync.sync_metadata` via sync.py's own import -- hence the

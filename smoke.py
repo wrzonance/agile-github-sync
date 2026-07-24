@@ -7,10 +7,10 @@ connect/disconnect children, description write + length probe (issue #65), a com
 edit/delete round-trip (issue #66 -- the delete shape is speculative, never exposed by the web UI),
 a typeId replace and a typed card create (each verified via refetch, skipped as informational when
 the board has no eligible card type configured), a deliberately stale-version PATCH that MUST be
-rejected, and a live richtext round-trip of the configured repo's GitHub issue #1 body through the
-card description (issue #78 fidelity) -- then deletes every throwaway card and confirms they are
-gone. The steps mirror the ``[live-check]`` items in API-VALIDATION.md so one confirmed run retires
-them.
+rejected, a live richtext round-trip of the configured repo's GitHub issue #1 body through the
+card description (issue #78 fidelity), and a customId header-format round-trip (issue #93) --
+then deletes every throwaway card and confirms they are gone. The steps mirror the ``[live-check]``
+items in API-VALIDATION.md so one confirmed run retires them.
 
 GitHub is never WRITTEN (the issue #1 richtext step performs a READ only -- `gh issue list`; dry
 runs already exercise every gh read live), and the sync state file is never read or written. Every
@@ -420,6 +420,25 @@ def _check_github_richtext_roundtrip(cfg: dict, parent_id: str, results: list) -
                     f"(md_back {len(md_back)} chars)"))
 
 
+def _check_custom_id_header(cfg: dict, parent_id: str, run_id: str, results: list) -> None:
+    """Step 23: header-format customId round-trip (issue #93). The sync now writes customIds like
+    '0C1 (GitHub Issue #5)'; this proves the live API accepts and preserves parens, '#', and
+    spaces verbatim. The probe value keeps the per-run smoke prefix so stages.header_match_key()
+    normalizes a leaked leftover to this run's unique key -- NEVER write a bare 'GitHub Issue #N'
+    here (that would normalize to a real unkeyed issue's match key and could be adopted by a
+    later sync run). This step must run LAST among the parent-card checks: it overwrites the
+    parent card's customId away from the plain per-run prefix that earlier steps still key their
+    own lookups against, and only the run's final cleanup (which deletes the card outright) comes
+    after it."""
+    _step(23, "customId header-format round-trip -- parens/#/spaces must survive verbatim")
+    header = f"{PARENT_CUSTOM_ID_PREFIX}{run_id} (GitHub Issue #999999)"
+    fresh = agileplace.get_card(cfg, parent_id)
+    agileplace.patch_card(cfg, True, fresh, [agileplace.op_custom_id(header)])
+    echoed = agileplace.custom_id_value(agileplace.get_card(cfg, parent_id))
+    results.append(("customId header-format round-trip", echoed == header,
+                    f"read back {echoed!r}"))
+
+
 def _find_comment(comments: list[dict], comment_id: int) -> dict | None:
     return next((comment for comment in comments if comment.get("id") == comment_id), None)
 
@@ -636,6 +655,7 @@ def _run_checks(cfg: dict, lane_id: str | None, run_id: str, created: list[str],
     _check_type_id_writes(cfg, lane_id, parent_id, run_id, created, results)
     _check_stale_patch(cfg, parent_id, baseline_version, results)
     _check_github_richtext_roundtrip(cfg, parent_id, results)
+    _check_custom_id_header(cfg, parent_id, run_id, results)
 
 
 def _summarize(results: list) -> int:

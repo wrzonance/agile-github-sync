@@ -42,7 +42,9 @@ def _card():
     # "description": "" (issue #65) keeps agileplace_description.card_description() on its zero-I/O path --
     # without the key it falls back to the real (unmocked) agileplace.get_card(), which hits the
     # live HTTP client and SystemExits (confirmed live in the design spike).
-    return {"id": "C1", "version": 1, "customId": "1",
+    # customId carries the issue #93 header format (the post-transition board state); the
+    # old-format upgrade path keeps its own dedicated test below.
+    return {"id": "C1", "version": 1, "customId": "GitHub Issue #1",
             "externalLink": {"url": ISSUE_URL}, "tags": [],
             "plannedStart": "2026-02-01", "plannedFinish": None, "laneId": None,
             "description": ""}
@@ -381,7 +383,8 @@ _LANES = [
 # --- customId lifecycle (issue #11) --------------------------------------------------------------
 
 def test_keyless_issue_uses_number_custom_id_after_external_link_is_lost(tmp_path):
-    card = {**_card(), "customId": "1", "externalLink": {"url": "https://example.test/lost-link"}}
+    card = {**_card(), "customId": "GitHub Issue #1",
+            "externalLink": {"url": "https://example.test/lost-link"}}
     parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "Backlog",
                           "start": None, "target": None}}
     raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
@@ -412,7 +415,7 @@ def test_title_key_rename_joins_custom_id_repair_into_single_card_patch(tmp_path
     patch_card_mock.assert_called_once()
     ops = patch_card_mock.call_args.args[3]
     assert len(ops) == 2
-    assert {"op": "replace", "path": "/customId", "value": "XYZ"} in ops
+    assert {"op": "replace", "path": "/customId", "value": "XYZ (GitHub Issue #1)"} in ops
     assert {"op": "replace", "path": "/laneId", "value": "L2"} in ops
 
 
@@ -508,7 +511,7 @@ def test_reused_key_is_created_after_rename_repair_is_visible(tmp_path):
         "title": "[ABC] new widget",
         "url": "https://github.com/acme/repo/issues/2",
     }
-    renamed_card = {**_card(), "customId": "XYZ"}
+    renamed_card = {**_card(), "customId": "XYZ (GitHub Issue #1)"}
     parsed = {ISSUE_URL: {"item_id": "PVTI_1", "number": 1, "status": "Backlog",
                           "start": None, "target": None}}
     raw_items = [{"id": "PVTI_1", "content": {"url": ISSUE_URL}}]
@@ -527,7 +530,7 @@ def test_reused_key_is_created_after_rename_repair_is_visible(tmp_path):
     create_card_mock.assert_called_once()
     assert create_card_mock.call_args.args[2:5] == (
         "new widget",
-        "ABC",
+        "ABC (GitHub Issue #2)",
         reused_key_issue["url"],
     )
     patch_card_mock.assert_not_called()
@@ -810,3 +813,35 @@ def test_non_epic_cards_do_not_trigger_child_reads(tmp_path):
 # that used to live here has moved to tests/test_sync_intake_call_site.py (this file was already
 # over its 800-line budget; that file is this feature's dedicated, lighter-weight home -- see its
 # own module docstring).
+
+
+# --- issue #93: customId header format ------------------------------------------------------
+
+def test_old_format_custom_id_upgrades_to_header_format(tmp_path):
+    """A pre-#93 card ('1') drifts from the desired header ('GitHub Issue #1'); the existing
+    reconciliation queues the rewrite -- this IS the migration."""
+    _, _, patch_card_mock, _ = _run_main_once(
+        tmp_path, ({}, []), card={**_card(), "customId": "1"})
+    ops = [op for call in patch_card_mock.call_args_list for op in call.args[3]]
+    assert {"op": "replace", "path": "/customId", "value": "GitHub Issue #1"} in ops
+
+
+def test_header_format_custom_id_queues_no_rewrite(tmp_path):
+    _, _, patch_card_mock, _ = _run_main_once(tmp_path, ({}, []))
+    ops = [op for call in patch_card_mock.call_args_list for op in call.args[3]]
+    assert not [op for op in ops if op["path"] == "/customId"]
+
+
+def test_custom_id_fallback_matches_a_header_format_card(tmp_path):
+    """A header-format card with NO external link must still match via the customId fallback
+    (normalized index) rather than triggering a duplicate create."""
+    card = {k: v for k, v in _card().items() if k != "externalLink"}
+    _, _, _, create_card_mock = _run_main_once(tmp_path, ({}, []), card=card)
+    create_card_mock.assert_not_called()
+
+
+def test_created_card_uses_header_custom_id_and_short_link_label(tmp_path):
+    _, _, _, create_card_mock = _run_main_once(tmp_path, ({}, []), existing_cards=[])
+    args, kwargs = create_card_mock.call_args
+    assert args[3] == "GitHub Issue #1"          # the custom_id argument is the header
+    assert kwargs["link_label"] == "GitHub 1"    # the link label stays the short key

@@ -12,6 +12,7 @@ import board_layout  # noqa: E402
 import ghkit  # noqa: E402
 import ghproject  # noqa: E402
 import sync  # noqa: E402
+from stages import header_match_key, issue_card_header  # noqa: E402
 
 
 def _issue(number: int, title: str, *, epic: bool = False) -> dict:
@@ -90,7 +91,8 @@ def _run_hierarchy(tmp_path: Path, monkeypatch, issues: list[dict], cards: list[
         agileplace,
         "create_card",
         Mock(side_effect=lambda _cfg, _apply, _title, custom_id, _url, _lane_id,
-             type_id=None, type_title=None: planned_cards.get(custom_id, {})),
+             type_id=None, type_title=None, link_label=None:
+             planned_cards.get(header_match_key(custom_id), {})),
     )
     monkeypatch.setattr(agileplace, "patch_card", Mock())
     monkeypatch.setattr(agileplace, "connect_children", connect_children)
@@ -146,8 +148,10 @@ def test_plan_only_epic_skips_server_child_read(tmp_path, monkeypatch):
     epic = _issue(1, "[EP] Epic", epic=True)
     child = _issue(2, "[CHILD] Task")
     planned_cards = {
-        "EP": agileplace._planned_card_snapshot("Epic", "EP", epic["url"], None),
-        "CHILD": agileplace._planned_card_snapshot("Task", "CHILD", child["url"], None),
+        "EP": agileplace._planned_card_snapshot(
+            "Epic", issue_card_header(epic), epic["url"], None),
+        "CHILD": agileplace._planned_card_snapshot(
+            "Task", issue_card_header(child), child["url"], None),
     }
 
     connect, disconnect, child_reads = _run_hierarchy(
