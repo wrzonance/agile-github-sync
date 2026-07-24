@@ -44,11 +44,13 @@ class FakeTenant:
 
     def __init__(self, *, accept_stale: bool = False, fail_child_create_body: str | None = None,
                  ignore_external_link: bool = False, ignore_tag_add: bool = False,
-                 duplicate_status: int = 409, ignore_comment_delete: bool = False):
+                 duplicate_status: int = 409, ignore_comment_delete: bool = False,
+                 ignore_custom_id: bool = False):
         self.accept_stale = accept_stale
         self.fail_child_create_body = fail_child_create_body
         self.ignore_external_link = ignore_external_link
         self.ignore_tag_add = ignore_tag_add
+        self.ignore_custom_id = ignore_custom_id
         self.duplicate_status = duplicate_status  # live contract is 409; override to model outages
         self.ignore_comment_delete = ignore_comment_delete  # models the speculative DELETE shape missing
         self.created_custom_ids: list[str] = []
@@ -198,6 +200,9 @@ class FakeTenant:
             elif op["path"] == "/externalLink":
                 if not self.ignore_external_link:
                     card["externalLink"] = op["value"]
+            elif op["path"] == "/customId":
+                if not self.ignore_custom_id:
+                    card["customId"] = op["value"]
             elif op["path"] == "/description":
                 card["description"] = op["value"]
             elif op["path"] == "/isBlocked":
@@ -323,6 +328,7 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
         ("PATCH", "card/S1"),             # deliberate stale-version probe
         ("PATCH", "card/S1"),             # issue #1 richtext round-trip: write rendered HTML (#78)
         ("PATCH", "card/S1"),             # issue #1 richtext round-trip: write re-derived HTML (convergence)
+        ("PATCH", "card/S1"),             # customId header-format round-trip (issue #93)
         ("DELETE", "card/S2"),            # cleanup child
         ("DELETE", "card/S1"),            # cleanup parent
     ]
@@ -346,6 +352,7 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
     assert "issue #1 body (" in out   # step 22 printed the repo + body length
     assert "converges under the sync's richtext layer" in out
     assert "comment edit HTML vs stored" in out   # comment-body normalization fact-finding
+    assert "customId header-format round-trip" in out
 
 
 def test_github_richtext_roundtrip_skips_informationally_when_issue_1_is_absent(tenant_env, capsys):
@@ -400,6 +407,19 @@ def test_ignored_external_link_write_is_reported_as_failure(tenant_env, capsys):
     out = capsys.readouterr().out
     assert "FAIL" in out
     assert "externalLink" in out
+
+
+def test_ignored_custom_id_write_is_reported_as_failure(tenant_env, capsys):
+    """A 2xx PATCH is not proof: the header must be read back, so a server that silently ignores
+    the /customId replace (or normalizes away the parens/#) is reported as a failing shape."""
+    tenant = FakeTenant()
+    tenant.ignore_custom_id = True
+    tenant_env(tenant)
+
+    assert smoke.main([]) == 1
+
+    out = capsys.readouterr().out
+    assert "FAIL  customId header-format round-trip" in out
 
 
 def test_tag_add_never_visible_still_summarizes_and_cleans_up(tenant_env, capsys):

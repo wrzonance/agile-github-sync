@@ -454,3 +454,9 @@ what was sent):**
 - **smoke step 22** PASS/FAIL is a **convergence** invariant, not byte-equality: it writes the
   sync's re-derived HTML back and requires a fixed point (second readback == first readback, or ==
   the re-derived HTML), i.e. "after the first sync write, later runs see no drift."
+
+## Card header format (issue #93)
+
+- [live-check] `customId` accepts and preserves an issue #93 header-format value
+  (`KEY (GitHub Issue #N)` -- parens, `#`, spaces) verbatim on PATCH replace, confirmed by
+  refetch. Exercised by smoke step 23.

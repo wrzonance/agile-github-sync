@@ -14,6 +14,9 @@ With `--apply`, each run:
    card's external-link URL, with the card's customId as a fallback. Issues closed as
    `NOT_PLANNED`/`DUPLICATE` never get new cards; if one already has a URL-matched card, the run
    retires it to Done without syncing its metadata back to GitHub.
+   Card headers (the AgilePlace `customId`) carry the issue reference -- `0C1 (GitHub Issue #5)`,
+   or `GitHub Issue #5` for issues without a `[KEY]` title prefix. Existing cards are upgraded in
+   place by the ordinary sync run.
 2. Moves each card to the lane for its stage. For open issues, the stage is the issue's Status on
    the GitHub Projects v2 board (Backlog / Ready / In progress / In review / Done), which is the
    source of truth. A closed issue always resolves to Done, even when its Project item retains a
