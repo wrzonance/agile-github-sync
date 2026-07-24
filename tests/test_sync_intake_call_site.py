@@ -119,7 +119,9 @@ def test_main_does_not_create_a_duplicate_card_for_a_resumed_active_issue(tmp_pa
     whether or not --apply is set, and the marker-resume writeback needs no live get_card refetch."""
     active_url = "https://github.com/acme/repo/issues/7"
     active_issue = {"number": 7, "title": "Raw idea", "state": "OPEN", "labels": [],
-                    "milestone": None, "assignees": [], "url": active_url}
+                    "milestone": None, "assignees": [], "url": active_url,
+                    # issue #97: the marker-resume prescan reads the run's issue snapshot itself
+                    "body": intake.marker_for_card("C-intake")}
     intake_card = {"id": "C-intake", "version": 1, "laneId": "lane-intake", "title": "Raw idea",
                   "description": ""}  # issue #65: this card reaches the per-issue loop below
     intake_lane = {"id": "lane-intake", "title": "New Requests"}
@@ -131,10 +133,7 @@ def test_main_does_not_create_a_duplicate_card_for_a_resumed_active_issue(tmp_pa
         existing_cards=[intake_card], lanes_return=[intake_lane], issue_return=active_issue)
 
     with stack, patch("sync.env_config", return_value=cfg), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py"]), \
-         patch("ghkit.list_issue_bodies",
-               return_value=[{"number": 7, "url": active_url, "state": "OPEN",
-                              "body": intake.marker_for_card("C-intake")}]):
+         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py"]):
         sync.main()
 
     create_card_mock.assert_not_called()
@@ -236,7 +235,6 @@ def test_main_wires_intake_promote_and_never_moves_the_promoted_cards_lane(tmp_p
     # usable-version snapshot so the writeback's second PATCH proceeds normally.
     with stack, patch("sync.env_config", return_value=cfg), \
          patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
-         patch("ghkit.list_issue_bodies", return_value=[]), \
          patch("ghkit.create_issue", return_value=created_issue) as create_issue_mock, \
          patch("agileplace.get_card",
                return_value={"id": intake_card["id"], "version": 2}):
