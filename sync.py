@@ -391,7 +391,8 @@ def _apply_lane_move(cfg: dict, apply: bool, issue: dict, card: dict, key: str, 
 
 def _retire_card(issue: dict, card: dict, lanes: list, stage_map: dict | None,
                  apply: bool, queue) -> None:
-    """Move one URL-matched retired issue card to Done (lane only -- flags are human-owned)."""
+    """Move one URL-matched retired issue card to Done and keep its customId header current
+    (issue #93's one-time sweep covers retired cards too -- flags stay human-owned)."""
     key = issue_custom_id(issue)
     reason = issue["state_reason"]
     if not card.get("id"):
@@ -409,6 +410,10 @@ def _retire_card(issue: dict, card: dict, lanes: list, stage_map: dict | None,
         actions.append(f"already '{board_layout.lane_title(target)}'")
     else:
         print(f"WARN  [{key}] cannot retire to Done: no unambiguous Done lane ({reason})")
+    header = issue_card_header(issue)
+    if agileplace.custom_id_value(card) != header:
+        ops.append(agileplace.op_custom_id(header))
+        actions.append(f"customId->{header}")
     if ops:
         queue(card, ops, f"retire:{reason}")
     action = "; ".join(actions) or "no card changes available"
