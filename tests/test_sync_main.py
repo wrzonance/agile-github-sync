@@ -873,9 +873,9 @@ def test_main_prefers_graph_blocked_by_and_skips_the_per_issue_reader(tmp_path):
 
 
 def test_main_graph_blocked_by_none_skips_all_dependency_writes(tmp_path, capsys):
-    """graph.blocked_by is None (all-or-nothing failure inside the batch) -> same contract as
-    blocked_by_map returning None: WARN once, touch no dependencies, and never fall back to the
-    per-issue REST loop (its result could not be more complete than the batch's)."""
+    """A syncable issue in the batch's blocked_by_failed set -> same contract as blocked_by_map
+    returning None: WARN once, touch no dependencies, and never fall back to the per-issue REST
+    loop (its result could not be more complete than the batch's)."""
     card = _card()
     stack, _run_mock, _patch_card, _create = _mock_io(card, ({}, []), field_meta_return=None)
 
@@ -883,7 +883,9 @@ def test_main_graph_blocked_by_none_skips_all_dependency_writes(tmp_path, capsys
          patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py"]), \
          patch("ghkit_snapshot.fetch_issue_graph",
-               return_value=ghkit_snapshot.IssueGraph(comments={}, blocked_by=None, sub_issues={})), \
+               return_value=ghkit_snapshot.IssueGraph(
+                   comments={}, blocked_by={}, sub_issues={},
+                   blocked_by_failed=frozenset({_issue()["number"]}))), \
          patch("ghkit.blocked_by_map",
                side_effect=AssertionError("graph failure must not re-run the per-issue loop")):
         sync.main()

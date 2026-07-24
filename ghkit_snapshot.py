@@ -9,9 +9,13 @@ and a whole-query failure returns None so callers keep today's behavior end to e
 
 Contracts preserved exactly:
 - comments normalize to ghkit._normalize_gh_comment's shape with id = databaseId (the REST id),
-  so existing comment-sync ledgers keep matching;
-- blocked_by is all-or-nothing (None on any malformed/overflowing entry) and WARN-skips
-  cross-repo blockers with the same message _local_blocker_numbers prints;
+  so existing comment-sync ledgers keep matching -- and the comments clause is only queried at
+  all when comment sync is configured (or smoke forces it), so a disabled default never
+  downloads every issue's comment bodies;
+- blocked-by failures are recorded per issue (blocked_by_failed) and resolve_blocked_by applies
+  blocked_by_map's all-or-nothing rule over the REQUESTED numbers only, so an unrelated issue's
+  malformed/overflowing blockedBy cannot disable dependency sync for everyone; cross-repo
+  blockers are WARN-skipped with the same message _local_blocker_numbers prints;
 - field shapes verified live against github.com GraphQL, 2026-07-24.
 """
 from __future__ import annotations
@@ -25,32 +29,41 @@ import ghkit
 _PAGE_SIZE = 50
 _MAX_PAGES = 40  # 2000 issues -- defensive, mirrors agileplace's own pagination guards
 
-_QUERY = """query($owner:String!,$name:String!,$cursor:String){
+_COMMENTS_CLAUSE = ("comments(first:100){totalCount "
+                    "nodes{databaseId author{login} body createdAt updatedAt}}")
+
+_QUERY_TEMPLATE = """query($owner:String!,$name:String!,$cursor:String){
 repository(owner:$owner,name:$name){
   issues(first:%d, states:[OPEN,CLOSED], after:$cursor){
     pageInfo{hasNextPage endCursor}
     nodes{
       number
-      comments(first:100){totalCount nodes{databaseId author{login} body createdAt updatedAt}}
+      %s
       blockedBy(first:50){totalCount nodes{number repository{nameWithOwner}}}
       subIssues(first:100){totalCount nodes{number}}
     }
   }
-}}""" % _PAGE_SIZE
+}}"""
+
+
+def _query(include_comments: bool) -> str:
+    return _QUERY_TEMPLATE % (_PAGE_SIZE, _COMMENTS_CLAUSE if include_comments else "")
 
 
 class IssueGraph(NamedTuple):
     """Per-issue GitHub read snapshot. Absence from `comments`/`sub_issues` means "fetch that
-    item through the existing per-item reader"; `blocked_by is None` means the whole blocked-by
-    snapshot is unusable (skip all dependency writes, same as blocked_by_map returning None)."""
+    item through the existing per-item reader". `blocked_by_failed` holds the issue numbers
+    whose blockedBy was malformed or overflowing -- resolve_blocked_by fails the whole snapshot
+    (None, same as blocked_by_map) only when a REQUESTED number is in that set."""
     comments: dict[int, list[dict]]
-    blocked_by: dict[int, list[int]] | None
+    blocked_by: dict[int, list[int]]
     sub_issues: dict[int, list[int]]
+    blocked_by_failed: frozenset = frozenset()
 
 
-def _run_page(cfg: dict, ctx: ghkit.RepoContext, cursor: str | None) -> dict | None:
+def _run_page(cfg: dict, ctx: ghkit.RepoContext, query: str, cursor: str | None) -> dict | None:
     """One GraphQL page as parsed JSON, or None on any transport/parse failure."""
-    args = ["api", "graphql", "--hostname", ctx.host, "-f", f"query={_QUERY}",
+    args = ["api", "graphql", "--hostname", ctx.host, "-f", f"query={query}",
             "-f", f"owner={ctx.owner}", "-f", f"name={ctx.name}"]
     if cursor:
         args += ["-f", f"cursor={cursor}"]
@@ -109,30 +122,41 @@ def resolve_blocked_by(cfg: dict, graph: IssueGraph | None, online: bool,
     """The run's blocked-by snapshot, preferring the batched graph (issue #98).
 
     Offline -> None (skip all dependency writes, AgilePlace unreachable); no syncable issues ->
-    {} (nothing to reconcile); a present graph -> its blocked_by verbatim (None inside it is the
-    batch's own all-or-nothing failure -- never re-run the per-issue loop, whose result could not
-    be more complete); no graph -> the existing per-issue reader."""
+    {} (nothing to reconcile); a present graph -> its blocked_by filtered to the requested
+    numbers, or None when any REQUESTED number's blockedBy failed in the batch (blocked_by_map's
+    all-or-nothing rule, at blocked_by_map's own scope -- an unrelated issue's failure never
+    disables everyone, and the per-issue loop is never re-run since its result could not be more
+    complete); no graph -> the existing per-issue reader."""
     if not online:
         return None
     if not issue_numbers:
         return {}
     if graph is not None:
-        return graph.blocked_by
+        if graph.blocked_by_failed.intersection(issue_numbers):
+            return None
+        return {n: graph.blocked_by[n] for n in issue_numbers if n in graph.blocked_by}
     return ghkit.blocked_by_map(cfg, issue_numbers)
 
 
-def fetch_issue_graph(cfg: dict) -> IssueGraph | None:
-    """The whole repo's issue graph in ceil(N/50) gh spawns. None on any page failure."""
+def fetch_issue_graph(cfg: dict, include_comments: bool | None = None) -> IssueGraph | None:
+    """The whole repo's issue graph in ceil(N/50) gh spawns. None on any page failure.
+
+    `include_comments` defaults to whether comment sync is configured (its only consumer);
+    smoke passes True explicitly to validate the full query shape live."""
     ctx = ghkit._repo_context(cfg)
     if ctx is None:
         return None
+    if include_comments is None:
+        include_comments = bool(cfg.get("comment_sync_identity"))
+    query = _query(include_comments)
     target_repo = f"{ctx.owner}/{ctx.name}"
     comments: dict[int, list[dict]] = {}
-    blocked_by: dict[int, list[int]] | None = {}
+    blocked_by: dict[int, list[int]] = {}
     sub_issues: dict[int, list[int]] = {}
+    blocked_by_failed: set[int] = set()
     cursor = None
     for _ in range(_MAX_PAGES):
-        payload = _run_page(cfg, ctx, cursor)
+        payload = _run_page(cfg, ctx, query, cursor)
         try:
             conn = payload["data"]["repository"]["issues"]
             nodes, page_info = conn["nodes"], conn["pageInfo"]
@@ -148,19 +172,24 @@ def fetch_issue_graph(cfg: dict) -> IssueGraph | None:
                     comments[number] = [_normalize_comment(n) for n in c["nodes"]]
                 except (TypeError, ValueError):
                     pass  # absent -> the per-issue reader covers this one issue
-            if blocked_by is not None:
-                try:
-                    blockers = _local_blockers(node, number, target_repo)
-                    if blockers:
-                        blocked_by[number] = blockers
-                except (TypeError, ValueError):
-                    blocked_by = None  # all-or-nothing, same as blocked_by_map
+            try:
+                blockers = _local_blockers(node, number, target_repo)
+                if blockers:
+                    blocked_by[number] = blockers
+            except (TypeError, ValueError):
+                blocked_by_failed.add(number)  # scoped: resolve_blocked_by fails only over these
             s = node.get("subIssues") or {}
-            if isinstance(s.get("nodes"), list) and s.get("totalCount", 0) <= 100:
-                nums = [n.get("number") for n in s["nodes"] if isinstance(n, dict)]
-                if all(isinstance(n, int) and not isinstance(n, bool) for n in nums):
+            s_nodes = s.get("nodes")
+            # Every node must be a well-formed {number: int} -- a single malformed/null element
+            # leaves the epic ABSENT (non-destructive per-epic fallback), never a silently
+            # incomplete list that sync_child_connections would treat as authoritative.
+            if (isinstance(s_nodes, list) and s.get("totalCount", 0) <= 100
+                    and all(isinstance(n, dict) for n in s_nodes)):
+                nums = [n.get("number") for n in s_nodes]
+                if all(isinstance(v, int) and not isinstance(v, bool) for v in nums):
                     sub_issues[number] = nums
         if not page_info.get("hasNextPage"):
-            return IssueGraph(comments=comments, blocked_by=blocked_by, sub_issues=sub_issues)
+            return IssueGraph(comments=comments, blocked_by=blocked_by, sub_issues=sub_issues,
+                              blocked_by_failed=frozenset(blocked_by_failed))
         cursor = page_info.get("endCursor")
     return None  # pagination guard tripped -- treat as a whole-read failure
