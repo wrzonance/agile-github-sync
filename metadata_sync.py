@@ -15,6 +15,8 @@ Moved verbatim (docstrings and bodies unchanged) from sync.py's prior lines 494-
 """
 from __future__ import annotations
 
+import subprocess
+
 import agileplace
 import ghkit
 import ghproject
@@ -22,6 +24,11 @@ from reconcile import reconcile, reconcile_value
 from stages import issue_custom_id
 
 MS_PREFIX = "milestone:"
+
+# gh subprocess failures a single label write may hit without poisoning the rest of the run. Config
+# problems (ghkit.run's SystemExit for a bad TARGET_REPO_PATH) and the edit_label unsafe-name
+# ValueError stay fatal -- those are not per-label conditions.
+_GH_LABEL_ERRORS = (subprocess.CalledProcessError, subprocess.TimeoutExpired)
 
 
 def _label_set(labels, ignore: frozenset) -> set[str]:
@@ -36,6 +43,41 @@ def _filter_gh_safe_labels(names: frozenset[str], *, key: str, action: str) -> f
         print(f"WARN  [{key}] label {bad!r} contains a comma or a double quote -- gh CSV-splits "
               f"--add-label/--remove-label values; skipping {action} on GitHub")
     return safe
+
+
+def _add_label_with_create(cfg, apply, number: int, name: str, key: str) -> bool:
+    """One reconciled label add, resilient to the label not existing in the repo: on a gh failure,
+    create the label (maintainer decision, issue #91 -- the tag mirrors as intended) and retry the
+    add once. Returns True only when the add is confirmed (or dry-run planned), so the caller's
+    merge-base arithmetic never records a label GitHub doesn't actually carry -- the same
+    confirmed-write gating sync_dates uses. Never lets a per-label gh failure escape to abort the
+    run (the issue #91 crash class)."""
+    try:
+        ghkit.edit_label(cfg, apply, number, name, add=True)
+        return True
+    except _GH_LABEL_ERRORS:
+        pass
+    try:
+        ghkit.create_label(cfg, apply, name)
+        ghkit.edit_label(cfg, apply, number, name, add=True)
+        return True
+    except _GH_LABEL_ERRORS:
+        print(f"WARN  [{key}] could not add label {name!r} on GitHub even after gh label create -- "
+              f"skipping add on GitHub (retried next run)")
+        return False
+
+
+def _remove_label_guarded(cfg, apply, number: int, name: str, key: str) -> bool:
+    """One reconciled label remove, guarded so a gh failure WARNs and continues instead of aborting
+    the run. Returns True only on a confirmed remove; a failed remove leaves the label actually on
+    GitHub, so the caller keeps it in the merge base and retries next run."""
+    try:
+        ghkit.edit_label(cfg, apply, number, name, add=False)
+        return True
+    except _GH_LABEL_ERRORS:
+        print(f"WARN  [{key}] could not remove label {name!r} on GitHub -- "
+              f"skipping remove on GitHub (retried next run)")
+        return False
 
 
 def _card_milestones(card: dict, base: str | None, gh: str | None) -> tuple[str | None, set[str]]:
@@ -107,15 +149,16 @@ def sync_metadata(cfg, apply, issue, card, ignore, issues_state, queue) -> None:
 
     gh_add_safe = _filter_gh_safe_labels(r.gh_add, key=key, action="add")
     gh_remove_safe = _filter_gh_safe_labels(r.gh_remove, key=key, action="remove")
-    for item in sorted(gh_add_safe):
-        ghkit.edit_label(cfg, apply, issue["number"], item, add=True)
-    for item in sorted(gh_remove_safe):
-        ghkit.edit_label(cfg, apply, issue["number"], item, add=False)
-    # A name skipped from an add was never actually written to GitHub -> pull it back out of the new
-    # base; a name skipped from a remove is still actually on GitHub -> keep it in the new base. The
-    # two terms never overlap: gh_add/gh_remove are disjoint set-differences of the same final/gh_now
-    # pair (reconcile.py), so a name can't be skipped from both an add and a remove in the same run.
-    new_base = (r.new_base - (r.gh_add - gh_add_safe)) | (r.gh_remove - gh_remove_safe)
+    gh_add_done = frozenset(item for item in sorted(gh_add_safe)
+                            if _add_label_with_create(cfg, apply, issue["number"], item, key))
+    gh_remove_done = frozenset(item for item in sorted(gh_remove_safe)
+                               if _remove_label_guarded(cfg, apply, issue["number"], item, key))
+    # A name skipped OR failed on an add was never actually written to GitHub -> pull it back out of
+    # the new base (retried next run); a name skipped or failed on a remove is still actually on
+    # GitHub -> keep it in the new base. The two terms never overlap: gh_add/gh_remove are disjoint
+    # set-differences of the same final/gh_now pair (reconcile.py), so a name can't be skipped from
+    # both an add and a remove in the same run.
+    new_base = (r.new_base - (r.gh_add - gh_add_done)) | (r.gh_remove - gh_remove_done)
     tags_to_remove: set[str] = set(r.ap_remove)
     tag_ops = [agileplace.op_tag(t) for t in sorted(r.ap_add)]
 
