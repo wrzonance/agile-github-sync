@@ -926,3 +926,22 @@ def test_main_prefers_graph_sub_issues_for_epics(tmp_path):
          patch("ghkit.sub_issue_numbers",
                side_effect=AssertionError("graph supersedes the per-epic sub-issue read")):
         sync.main()
+
+
+def test_main_hydrates_board_reads_once_before_reconciliation(tmp_path):
+    """Issue #99: main() runs the bounded AgilePlace read phase exactly once, with the run's
+    syncable issues and epics, before any reconciliation loop consumes the snapshots."""
+    card = _card()
+    stack, _run_mock, _patch_card, _create = _mock_io(card, ({}, []), field_meta_return=None)
+    hydrate = stack.enter_context(patch("board_reads.hydrate_run_reads"))
+
+    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+         patch("sys.argv", ["sync.py"]):
+        sync.main()
+
+    hydrate.assert_called_once()
+    call_cfg, call_online, call_syncable, _call_card_for, call_epics = hydrate.call_args.args
+    assert call_online is True
+    assert [i["number"] for i in call_syncable] == [_issue()["number"]]
+    assert call_epics == []

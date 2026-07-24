@@ -22,6 +22,7 @@ from collections.abc import Mapping
 
 import agileplace
 import board_layout
+import board_reads
 import card_types
 import ghkit
 import ghkit_snapshot
@@ -152,8 +153,8 @@ def sync_child_connections(cfg: dict, apply: bool, epics: list[dict], card_for, 
         # A plan-only parent has not reached AgilePlace yet, so its authoritative server-side child
         # set is empty. Never send its synthetic identity across a real read boundary.
         existing_snapshot = (
-            frozenset()
-            if parent.get("_planOnly")
+            frozenset() if parent.get("_planOnly")
+            else parent["_prefetchedChildIds"] if "_prefetchedChildIds" in parent
             else agileplace.card_child_ids(cfg, str(parent["id"]))
         )
         existing = set(existing_snapshot or ())
@@ -259,7 +260,8 @@ def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by:
         if card.get("_planOnly"):
             current = set()  # a fresh card has no server-side dependencies; never read a plan-only id
         else:
-            entries = agileplace.card_dependencies(cfg, cid)
+            entries = (card["_prefetchedDeps"] if "_prefetchedDeps" in card
+                       else agileplace.card_dependencies(cfg, cid))
             if entries is None:
                 print(f"WARN  [{key}] dependency state unknown -- leaving this card's dependencies untouched")
                 continue
@@ -655,6 +657,10 @@ def main() -> None:
 
     def card_for(issue):
         return _matching_card(issue, card_by_url, card_by_cid)
+
+    # Issue #99: complete the matched card snapshots (descriptions, dependencies, comments,
+    # children) through one bounded concurrent read phase; reconciliation below stays serial.
+    board_reads.hydrate_run_reads(cfg, online, syncable_issues, card_for, epics)
 
     card_ops: dict = {}
 
