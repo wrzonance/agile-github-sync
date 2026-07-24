@@ -5,8 +5,8 @@ Contracts pinned here:
   - comments normalize to ghkit._normalize_gh_comment's exact shape with id = databaseId;
   - an overflowing (>100) or unnormalizable comment collection leaves that ISSUE absent
     (per-issue fallback), never poisons the rest of the snapshot;
-  - blocked_by is all-or-nothing (None on any malformed/overflowing entry, mirroring
-    blocked_by_map) and WARN-skips cross-repo blockers;
+  - blocked-by failures are per-issue (blocked_by_failed); resolve_blocked_by applies the
+    all-or-nothing rule over REQUESTED numbers only, and cross-repo blockers are WARN-skipped;
   - sub-issue overflow (>100) leaves that epic absent (per-epic fallback);
   - any page/transport failure returns None (callers keep today's per-item behavior).
 """
@@ -89,18 +89,12 @@ def test_blocked_by_repo_match_is_casefolded(monkeypatch):
     assert ghkit_snapshot.fetch_issue_graph(CFG).blocked_by == {7: [3]}
 
 
-def test_blocked_by_overflow_fails_closed_to_none(monkeypatch):
-    node = _node(7, blocked=[], b_total=51)
-    monkeypatch.setattr(ghkit_snapshot, "_run_page", Mock(return_value=_page([node])))
-    graph = ghkit_snapshot.fetch_issue_graph(CFG)
-    assert graph.blocked_by is None
-    assert graph.comments == {7: []}  # other portions survive
-
-
-def test_blocked_by_malformed_entry_fails_closed_to_none(monkeypatch):
+def test_blocked_by_malformed_entry_marks_only_that_issue_failed(monkeypatch):
     node = _node(7, blocked=[{"number": 3}])  # no repository -> not repository-qualified
     monkeypatch.setattr(ghkit_snapshot, "_run_page", Mock(return_value=_page([node])))
-    assert ghkit_snapshot.fetch_issue_graph(CFG).blocked_by is None
+    graph = ghkit_snapshot.fetch_issue_graph(CFG)
+    assert graph.blocked_by_failed == frozenset({7})
+    assert graph.comments == {7: []}  # other portions survive
 
 
 def test_sub_issues_collected_and_overflow_leaves_epic_absent(monkeypatch):
@@ -143,6 +137,72 @@ def test_run_page_parses_gh_stdout(monkeypatch):
         return SimpleNamespace(stdout=json.dumps(payload))
 
     monkeypatch.setattr(ghkit, "run", fake_run)
-    assert ghkit_snapshot._run_page(CFG, CTX, None) == payload
+    assert ghkit_snapshot._run_page(CFG, CTX, ghkit_snapshot._query(True), None) == payload
     assert captured["args"][:2] == ["api", "graphql"]
     assert "--hostname" in captured["args"] and "github.com" in captured["args"]
+
+
+# --- draft-phase Codex review fixes (stack review, 2026-07-24) --------------------------------
+
+def test_malformed_sub_issue_node_leaves_epic_absent(monkeypatch):
+    """A null/malformed element in subIssues.nodes must NOT be silently dropped with the rest
+    recorded as authoritative -- an incomplete 'authoritative' set could authorize disconnecting
+    the omitted managed child. The epic stays absent so the non-destructive per-epic fallback
+    runs instead."""
+    node = _node(9, subs=[{"number": 91}, None, {"number": 92}])
+    monkeypatch.setattr(ghkit_snapshot, "_run_page", Mock(return_value=_page([node])))
+    graph = ghkit_snapshot.fetch_issue_graph(CFG)
+    assert 9 not in graph.sub_issues
+
+
+def test_blocked_by_failure_is_scoped_to_the_failing_issue(monkeypatch):
+    """An unrelated issue with overflowing/malformed blockedBy must not disable dependency
+    reconciliation for every syncable issue -- the old per-issue reader only failed over the
+    REQUESTED numbers, and resolve_blocked_by preserves that scope."""
+    over = _node(7, blocked=[], b_total=51)
+    ok = _node(8, blocked=[{"number": 3, "repository": {"nameWithOwner": "acme/repo"}}])
+    monkeypatch.setattr(ghkit_snapshot, "_run_page", Mock(return_value=_page([over, ok])))
+    graph = ghkit_snapshot.fetch_issue_graph(CFG)
+
+    assert graph.blocked_by_failed == frozenset({7})
+    assert graph.blocked_by == {8: [3]}
+    # requested set touches the failed issue -> all-or-nothing None, same as blocked_by_map
+    assert ghkit_snapshot.resolve_blocked_by(CFG, graph, True, [7, 8]) is None
+    # requested set avoids it -> the snapshot stays usable
+    assert ghkit_snapshot.resolve_blocked_by(CFG, graph, True, [8]) == {8: [3]}
+
+
+def test_comments_clause_is_omitted_without_comment_sync_identity(monkeypatch):
+    """With comment sync disabled (no identity -- the default), the batch must not download
+    comment bodies for every issue: the clause is omitted from the query and the comments map
+    stays empty (sync_comments self-disables before ever reading it)."""
+    captured = {}
+
+    def fake_run_page(cfg, ctx, query, cursor):
+        captured["query"] = query
+        return _page([{"number": 5,
+                       "blockedBy": {"totalCount": 0, "nodes": []},
+                       "subIssues": {"totalCount": 0, "nodes": []}}])
+
+    monkeypatch.setattr(ghkit_snapshot, "_run_page", fake_run_page)
+    graph = ghkit_snapshot.fetch_issue_graph(CFG)  # CFG has no comment_sync_identity
+
+    assert "comments(" not in captured["query"]
+    assert graph.comments == {}
+    assert graph.sub_issues == {5: []}
+
+
+def test_comments_clause_is_included_with_identity_or_when_forced(monkeypatch):
+    captured = {}
+
+    def fake_run_page(cfg, ctx, query, cursor):
+        captured["query"] = query
+        return _page([_node(5)])
+
+    monkeypatch.setattr(ghkit_snapshot, "_run_page", fake_run_page)
+    ghkit_snapshot.fetch_issue_graph({**CFG, "comment_sync_identity": {"gh_login": "b"}})
+    assert "comments(" in captured["query"]
+
+    captured.clear()
+    ghkit_snapshot.fetch_issue_graph(CFG, include_comments=True)  # smoke's explicit override
+    assert "comments(" in captured["query"]

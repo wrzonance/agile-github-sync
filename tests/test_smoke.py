@@ -285,7 +285,7 @@ def tenant_env(monkeypatch):
                                "created": "2026-01-01T00:00:00Z",
                                "edited": "2026-01-01T00:00:00Z"}]}
         monkeypatch.setattr(smoke.ghkit_snapshot, "fetch_issue_graph",
-                            lambda cfg: smoke.ghkit_snapshot.IssueGraph(
+                            lambda cfg, include_comments=None: smoke.ghkit_snapshot.IssueGraph(
                                 comments=dict(graph_comments), blocked_by={}, sub_issues={}))
         monkeypatch.setattr(smoke.ghkit, "list_issue_comments",
                             lambda cfg, number: list(graph_comments.get(number, [])))
@@ -528,7 +528,8 @@ def test_issue_graph_batch_failure_fails_the_run(tenant_env, capsys, monkeypatch
     """A None graph on the live host means #98's batched read path is broken there -- smoke must
     FAIL, not shrug."""
     tenant_env(FakeTenant())
-    monkeypatch.setattr(smoke.ghkit_snapshot, "fetch_issue_graph", lambda cfg: None)
+    monkeypatch.setattr(smoke.ghkit_snapshot, "fetch_issue_graph",
+                        lambda cfg, include_comments=None: None)
 
     assert smoke.main(["--yes"]) == 1
     assert "FAIL  issue-graph batched read (issue #98)" in capsys.readouterr().out

@@ -668,7 +668,7 @@ def _check_issue_graph_batch(cfg: dict, results: list) -> None:
     falls back to (ledger ids must be identical across both paths). GitHub READS only -- smoke
     performs no GitHub writes; no cards involved."""
     _step(24, "batched issue-graph read cross-checks the per-issue comment reader")
-    graph = ghkit_snapshot.fetch_issue_graph(cfg)
+    graph = ghkit_snapshot.fetch_issue_graph(cfg, include_comments=True)
     if graph is None:
         results.append(("issue-graph batched read (issue #98)", False,
                         "fetch_issue_graph returned None -- GraphQL query failed on this host"))
