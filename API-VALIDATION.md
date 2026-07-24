@@ -393,25 +393,24 @@ three previously-speculative items are now retired:
    list readback shows 0 comments -- the "speculative" shape is real. The web UI never exposed
    comment deletion, but the io v2 endpoint honors it.
 
-### Open `[live-check]`: the AP comment `edited` timestamp is not populated
+### CONFIRMED (2026-07-24): AgilePlace comments carry NO edit timestamp -> AP drift is body-hash based
 
-The live run's fact-finding surfaced ONE gap: the comment `edited` timestamp came back **`None`
-even immediately after a successful `PUT` edit** (`created=…Z`, `edited=None`; before/after the PUT
-both `None`). None of `_normalize_ap_comment`'s candidate keys (`lastModified`, `modifiedOn`,
-`updatedOn`, `editedOn`) matched, so either the field has a different name or AgilePlace genuinely
-does not expose a comment edit time.
+The `smoke.py` raw-shape probe confirmed it live: **an AgilePlace comment object exposes NO edit
+timestamp at all.** The full set of top-level keys, both from the list readback after a `PUT` and in
+the `PUT` response body, is `cardId`, `createdBy`, `createdOn`, `id`, `text` -- there is no
+`lastModified`/`modifiedOn`/`updatedOn`/`editedOn` or any other date/time-ish key beyond `createdOn`.
+So the comment `edited` timestamp is (and will stay) `None`.
 
-**Consequence if real:** AP-side comment edits are UNDETECTABLE by the drift model (a `None`
-ledgered value equals the `None` current value, so `_side_drifted` never fires) -> **AP -> GH edit
-propagation silently never happens.** This fails SAFE -- no corruption (nothing is overwritten), the
-GH -> AP direction is unaffected (GitHub always returns `updated_at`) -- but that half of the
-bidirectional-edit feature would be inert.
-
-`smoke.py` now dumps, after the edit, the RAW persisted comment's top-level keys + any date/time-ish
-key values AND a fact-finding PUT's raw response body (`_probe_comment_edit_shape`), so a re-run
-reveals the real edit-timestamp field name if one exists, or confirms none does. **Do not redesign
-drift handling yet** -- if the re-run confirms no edit timestamp, that is a design amendment for the
-maintainer to weigh (see the PR's Design decisions QUESTION).
+**Design amendment (user-approved, see the design doc's AMENDED note + the PR's Design decisions).**
+Because a timestamp comparison can never detect an AP-side edit, AP drift is now detected by a
+**content fingerprint**: the ledger row carries `ap_hash` = sha256 hex of the AP comment body (the
+raw `text` HTML as fetched), recorded at the last successful sync and refreshed after every
+sync-authored AP write. GH drift stays timestamp-based (`updated_at` is real). When BOTH sides drift,
+**GitHub wins** (AP recency is unknowable without a timestamp), replacing the original
+most-recent-wins. The vestigial `ap_edited` ledger field is removed; `ap_created` stays (from
+`createdOn`, used for chronology). `smoke.py`'s `_probe_comment_edit_shape` steps remain as cheap
+fact-finding -- they would surface an edit-timestamp field if a future AgilePlace version ever adds
+one.
 
 ### INFO (issue #65): server accepted a description over the configured cap
 

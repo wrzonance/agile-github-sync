@@ -110,10 +110,16 @@ def _ap(id, name=None, email=None, aid=None, body="", created=_T0, edited=_T0):
             "created": created, "edited": edited}
 
 
-def _row(gh_id, ap_id, origin, gh_created=_T0, gh_edited=_T0, ap_created=_T0, ap_edited=_T0,
+def _hash(body: str = "") -> str:
+    """The ledgered ap_hash for an AP comment carrying `body` -- AP drift is body-hash based
+    (AgilePlace exposes no comment edit timestamp)."""
+    return comment_sync._ap_body_hash({"body": body})
+
+
+def _row(gh_id, ap_id, origin, gh_created=_T0, gh_edited=_T0, ap_created=_T0, ap_hash=None,
         deleted=False):
     return {"gh_id": gh_id, "ap_id": ap_id, "origin": origin, "gh_created": gh_created,
-            "gh_edited": gh_edited, "ap_created": ap_created, "ap_edited": ap_edited,
+            "gh_edited": gh_edited, "ap_created": ap_created, "ap_hash": ap_hash,
             "deleted": deleted}
 
 
@@ -237,7 +243,7 @@ def test_echo_prevention_ledgered_sync_authored_prefixed_comment_is_never_remirr
     ledger entry must never produce a new mirror_new/adopt_orphan action for that pair -- it's
     simply the steady-state mirror, found via the ledger row's own ids."""
     prefix = build_provenance_prefix("ap", "bob")
-    ledger = [_row(1, 2, "ap")]
+    ledger = [_row(1, 2, "ap", ap_hash=_hash("Hello"))]
     gh_comments = [_gh(1, author="syncbot", body=f"{prefix}\n\nHello")]
     ap_comments = [_ap(2, name="bob", body="Hello")]
 
@@ -327,7 +333,7 @@ def test_unparseable_live_timestamp_excludes_that_side_from_drift():
     decision (with a WARN, at the wiring layer) rather than being treated as drifted. The plan
     itself carries the (pure, I/O-free) warning text -- `sync_comments` is what actually prints it,
     per `test_sync_comments_warns_on_stderr_for_unparseable_live_timestamp`."""
-    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_hash=_hash("v1"))]
     gh_comments = [_gh(1, author="alice", body="v1", edited="not-a-timestamp")]
     ap_comments = [_ap(2, name="alice", body="v1", edited=_T0)]
 
@@ -368,7 +374,7 @@ def test_mirror_new_actions_are_chronologically_ordered_across_interleaved_sourc
 
 
 def test_edit_mirror_when_origin_side_drifted():
-    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_hash=_hash("stale mirror text"))]
     gh_comments = [_gh(1, author="alice", body="updated text", edited=_T1)]
     ap_comments = [_ap(2, name="alice", body="stale mirror text", edited=_T0)]
 
@@ -382,17 +388,20 @@ def test_edit_mirror_when_origin_side_drifted():
     assert "updated text" in action.rendered_body
 
 
-def test_both_sides_drifted_most_recent_edit_wins():
-    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
-    gh_comments = [_gh(1, author="alice", body="gh edit", edited=_T1)]
-    ap_comments = [_ap(2, name="alice", body="ap edit, more recent", edited="2024-01-03T00:00:00Z")]
+def test_both_sides_drifted_github_wins():
+    """Amended tie-break (design doc 2026-07-23): AgilePlace exposes no comment edit timestamp, so
+    most-recent-wins can't run when BOTH sides drift -- GitHub wins deterministically. GH drift is
+    timestamp-based; AP drift is a body-hash mismatch."""
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_hash=_hash("stale ap body"))]
+    gh_comments = [_gh(1, author="alice", body="gh edit", edited=_T1)]              # GH drifted
+    ap_comments = [_ap(2, name="alice", body="ap edit, unknowable recency")]        # AP drifted (hash)
 
     plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
 
     assert _kinds(plan) == ["edit_mirror"]
     action = plan.actions[0]
-    assert action.target_side == "gh"
-    assert "ap edit, more recent" in action.rendered_body
+    assert action.target_side == "ap"          # GH wins -> canonical=gh -> write the AP mirror
+    assert "gh edit" in action.rendered_body   # GH's content propagates, not AP's
 
 
 def test_delete_mirror_and_tombstone_when_origin_side_gone():
@@ -446,7 +455,7 @@ def test_drop_unpairable_orphan_when_no_origin_candidate_matches():
 
 
 def test_steady_state_no_drift_produces_no_action():
-    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_hash=_hash("unchanged mirror"))]
     gh_comments = [_gh(1, author="alice", body="unchanged", edited=_T0)]
     ap_comments = [_ap(2, name="alice", body="unchanged mirror", edited=_T0)]
 
@@ -500,7 +509,7 @@ def test_sync_comments_warns_on_stderr_for_unparseable_live_timestamp(monkeypatc
     """The plan-level warning built by `resolve_comment_sync` (see
     `test_unparseable_live_timestamp_excludes_that_side_from_drift`) must actually reach the
     operator: `sync_comments` prints it to stderr, even on a run whose plan has zero actions."""
-    issues_state = {ISSUE_URL: {"comments": [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]}}
+    issues_state = {ISSUE_URL: {"comments": [_row(1, 2, "gh", gh_edited=_T0, ap_hash=_hash("v1"))]}}
     monkeypatch.setattr(ghkit, "list_issue_comments",
                         lambda cfg, number: [_gh(1, author="alice", body="v1", edited="garbage")])
     monkeypatch.setattr(agileplace_comments, "list_comments",
@@ -549,7 +558,7 @@ def test_sync_run_ledger_never_leaves_a_partial_pair_and_every_origin_has_one_mi
     ids (a live pair) or be tombstoned (never exactly one id with deleted=False), and every living
     origin comment must have picked up exactly one living mirror."""
     issues_state = {ISSUE_URL: {"comments": [
-        _row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0),  # will drift gh->ap, edit_mirror
+        _row(1, 2, "gh", gh_edited=_T0, ap_hash=_hash("stale mirror text")),  # drift gh->ap, edit
         _row(3, 4, "ap"),                               # ap origin gone -> delete gh mirror
         _row(5, 6, "gh"),                               # both gone -> tombstone
     ]}}
@@ -594,14 +603,15 @@ def test_sync_run_ledger_never_leaves_a_partial_pair_and_every_origin_has_one_mi
     live_pairs = {(r["gh_id"], r["ap_id"]) for r in rows if not r["deleted"]}
     assert live_pairs == {(1, 2), (10, 50)}
 
-    # Echo prevention: the edited row's own persisted timestamps must be the FRESH, post-write
-    # values (both sides now report _T1) -- not the stale pre-write ledgered value. A bug in
-    # `_apply_edit_timestamps` that failed to refresh a side (or swapped gh/ap) would leave this
-    # stuck at _T0, and the next run's drift check would re-plan an edit_mirror for a comment that
-    # never actually changed.
+    # Echo prevention: the edited row's own persisted fingerprints must be the FRESH, post-write
+    # values -- GH's edited timestamp is _T1, and the AP hash matches the AP mirror's now-edited
+    # body -- not the stale pre-write values. A bug in `_apply_edit_effects` that failed to refresh a
+    # side would leave these stale, and the next run's drift check would re-plan an edit_mirror for a
+    # comment that never actually changed.
     row_1_2 = next(r for r in rows if r["gh_id"] == 1 and r["ap_id"] == 2)
     assert row_1_2["gh_edited"] == _T1
-    assert row_1_2["ap_edited"] == _T1
+    ap_2 = next(c for c in ap_state if c["id"] == 2)
+    assert row_1_2["ap_hash"] == comment_sync._ap_body_hash(ap_2)
 
     # Re-running the pure planner against the rebuilt ledger and the post-write live state must
     # find a steady state (no actions) -- the strongest possible confirmation that every succeeded
@@ -676,7 +686,7 @@ def test_adopt_orphan_persists_full_pair_with_timestamps_through_wiring(monkeypa
     assert row["gh_id"] == 5 and row["ap_id"] == 10
     assert row["deleted"] is False
     assert row["gh_created"] == _T0 and row["gh_edited"] == _T0
-    assert row["ap_created"] == _T0 and row["ap_edited"] == _T1
+    assert row["ap_created"] == _T0 and row["ap_hash"] == _hash("Hello")
 
 
 # --- adopt_orphan origin_side must not be inferred from an id-equality heuristic ----------------
@@ -741,8 +751,8 @@ def test_rebuild_ledger_preserves_existing_origin_timestamps_on_refetch_failure(
     ap_mirror = _ap(2, email="sync@example.com", body="<p>comment by alice on GitHub</p>x", edited=_T1)
     monkeypatch.setattr(comment_sync, "_fetch_both_sides", lambda cfg, number, card_id: None)
 
-    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
-    action = CommentAction("edit_mirror", "ap", (1, 2), "rendered", 2, (1, 2))
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_hash=_hash("old mirror body"))]
+    action = CommentAction("edit_mirror", "ap", (1, 2), "rendered new body", 2, (1, 2))
 
     rows = comment_sync._rebuild_ledger(_cfg(), 1, "42", ledger, [(action, None)],
                                         {1: gh_origin}, {2: ap_mirror})
@@ -751,6 +761,9 @@ def test_rebuild_ledger_preserves_existing_origin_timestamps_on_refetch_failure(
     row = rows[0]
     assert row["gh_id"] == 1 and row["ap_id"] == 2
     assert row["gh_created"] == _T0 and row["gh_edited"] == _T1  # preserved from fallback, not blanked
+    # AP-targeted edit + refetch failure: record the hash of exactly what we WROTE (P1 #3), never the
+    # stale fallback body -- else the next run would misread our own edit as AP drift and overwrite GH.
+    assert row["ap_hash"] == _hash("rendered new body")
 
 
 # --- exception boundary: a GitHub write can raise SystemExit too, not just AgilePlace -----------
@@ -850,10 +863,9 @@ def test_reverse_edit_of_a_mirror_writes_the_origin_prefix_less_never_doubled():
     (doubled) `comment by ... on ...` header. Invariant: the prefix appears zero times in the origin
     write."""
     prefix = build_provenance_prefix("gh", "alice")  # origin is GH, mirror is AP
-    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_edited=_T0)]
+    ledger = [_row(1, 2, "gh", gh_edited=_T0, ap_hash=_hash("stale pre-edit mirror body"))]
     gh_comments = [_gh(1, author="alice", body="original", edited=_T0)]  # origin unchanged
-    ap_comments = [_ap(2, name="alice", body=f"<p>{prefix}</p><p>edited on the mirror</p>",
-                       edited=_T1)]  # mirror drifted
+    ap_comments = [_ap(2, name="alice", body=f"<p>{prefix}</p><p>edited on the mirror</p>")]  # mirror drifted (hash)
 
     plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
 
@@ -906,14 +918,3 @@ def test_execute_one_action_warns_not_crashes_when_ap_response_shape_is_invalid(
     assert "WARN" in capsys.readouterr().err
 
 
-def test_present_but_unparseable_ap_edited_timestamp_produces_a_plan_warning():
-    """Issue #66 Codex P2 #8: an unrecognized AgilePlace timestamp format is now surfaced. A live AP
-    comment whose `edited` is present but unparseable yields a planner WARNING (excluded from drift,
-    but no longer SILENTLY -- previously normalization nulled it before the planner could warn)."""
-    ledger = [_row(1, 2, "gh")]
-    gh_comments = [_gh(1, author="alice", edited=_T0)]
-    ap_comments = [_ap(2, name="alice", edited="not-an-iso-timestamp")]
-
-    plan = resolve_comment_sync(IDENTITY, ledger, gh_comments, ap_comments)
-
-    assert any("unparseable" in w for w in plan.warnings)

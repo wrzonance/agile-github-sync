@@ -11,12 +11,20 @@ filesystem I/O at import or plan time; only the wiring layer performs I/O, and o
 
 Ledger rows (see sync.py's issues_state[url]["comments"]) are the CommentLedgerEntry shape:
 ``{"gh_id": int|None, "ap_id": int|None, "origin": "gh"|"ap", "gh_created": str|None,
-"gh_edited": str|None, "ap_created": str|None, "ap_edited": str|None, "deleted": bool}``. A
+"gh_edited": str|None, "ap_created": str|None, "ap_hash": str|None, "deleted": bool}``. A
 persisted row either has both ids non-None (a live pair) or ``deleted`` is True (a tombstone --
 ids kept forever, content never stored, so a stale re-read can never resurrect it as new).
+
+AgilePlace comments carry NO edit timestamp (confirmed live 2026-07-24: raw keys are
+cardId/createdBy/createdOn/id/text), so AP-side drift is detected by a **content fingerprint** --
+``ap_hash`` is the sha256 hex of the AP comment body (the raw ``text`` HTML as fetched, stored in
+ApComment ``body``) observed at the last successful sync, refreshed after every sync-authored AP
+write. GH drift stays timestamp-based (``updated_at`` is real). When BOTH sides drift, **GitHub
+wins** -- AP recency is unknowable without a timestamp -- replacing the original most-recent-wins.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -180,27 +188,38 @@ def _plan_gone_or_present(row: dict, gh_id: int, ap_id: int, gh_comment: dict | 
     return None
 
 
+def _ap_body_hash(comment: dict) -> str:
+    """sha256 hex of an AP comment's body -- the raw AgilePlace comment HTML (the `text` field, as
+    fetched and stored in ApComment `body`). AP comments carry no edit timestamp (confirmed live
+    2026-07-24), so this fingerprint is how AP-side edit drift is detected. Total: a missing/non-str
+    body hashes as the empty string, so the value is always a stable hex digest."""
+    return hashlib.sha256(_comment_body(comment).encode("utf-8")).hexdigest()
+
+
 def _side_drifted(live_edited: datetime | None, ledgered_edited: datetime | None) -> bool:
     """A side has drifted when its current edited-timestamp is parseable AND differs from the
     ledgered value. An unparseable LIVE timestamp is excluded from the decision (we genuinely can't
-    tell) rather than treated as drift -- see _parse_timestamp's totality contract."""
+    tell) rather than treated as drift -- see _parse_timestamp's totality contract. GH-only:
+    AgilePlace has no edit timestamp, so AP drift uses `_ap_body_hash` (see `_plan_drift`)."""
     return live_edited is not None and live_edited != ledgered_edited
 
 
 def _plan_drift(row: dict, gh_id: int, ap_id: int, gh_comment: dict, ap_comment: dict,
                 origin_side: str) -> CommentAction | None:
-    """Both sides are present -- compare each side's live edited-timestamp against its ledgered
-    value. Neither drifted -> steady state, no action. One side drifted -> it's canonical. Both
-    drifted -> most recent live edit wins (design doc: "comments are cheap to re-edit"). The
+    """Both sides are present. GH drift = live edited-timestamp differs from the ledgered one. AP
+    drift = the live AP body hash differs from the ledgered `ap_hash` (AgilePlace exposes no comment
+    edit timestamp, confirmed live 2026-07-24). Neither drifted -> steady state, no action. One side
+    drifted -> it's canonical. BOTH drifted -> **GitHub wins** -- AP recency is unknowable without a
+    timestamp, so the original most-recent-wins can't run; deterministic GH-wins replaces it. The
     provenance prefix always names the ORIGIN's own current author -- origin/mirror is permanent
     ledger bookkeeping, independent of which side's content happens to be canonical this round."""
-    gh_live, ap_live = _parse_timestamp(gh_comment.get("edited")), _parse_timestamp(ap_comment.get("edited"))
-    gh_drifted = _side_drifted(gh_live, _parse_timestamp(row.get("gh_edited")))
-    ap_drifted = _side_drifted(ap_live, _parse_timestamp(row.get("ap_edited")))
+    gh_drifted = _side_drifted(_parse_timestamp(gh_comment.get("edited")),
+                               _parse_timestamp(row.get("gh_edited")))
+    ap_drifted = _ap_body_hash(ap_comment) != row.get("ap_hash")
     if not gh_drifted and not ap_drifted:
         return None
     if gh_drifted and ap_drifted:
-        canonical_side = "gh" if (gh_live or datetime.min) >= (ap_live or datetime.min) else "ap"
+        canonical_side = "gh"  # both drifted: GitHub wins (AP recency is unknowable -- no edit ts)
     else:
         canonical_side = "gh" if gh_drifted else "ap"
     target_side = _other_side(canonical_side)
@@ -213,32 +232,29 @@ def _plan_drift(row: dict, gh_id: int, ap_id: int, gh_comment: dict, ap_comment:
     return CommentAction("edit_mirror", target_side, (gh_id, ap_id), rendered, target_mirror_id, (gh_id, ap_id))
 
 
-def _timestamp_warning(side: str, comment_id: int | None, raw) -> str | None:
-    """The (pure, no I/O) WARN text for a comment whose `edited` timestamp is PRESENT but fails to
-    parse -- the exact case `_side_drifted` silently excludes from the drift decision. `None` when
-    there's nothing to warn about: a comment that was simply never edited (`raw is None`) is normal,
-    not an anomaly, and would otherwise spam a WARN for the overwhelmingly common case."""
+def _gh_timestamp_warning(comment_id: int | None, raw) -> str | None:
+    """The (pure, no I/O) WARN text for a GH comment whose `edited` (updated_at) timestamp is PRESENT
+    but fails to parse -- the exact case `_side_drifted` silently excludes from the GH drift decision.
+    `None` when there's nothing to warn about (never edited / parseable). GH-only: AgilePlace has no
+    comment edit timestamp, so there is no AP analogue to warn about."""
     if raw is None or _parse_timestamp(raw) is not None:
         return None
-    return (f"comment sync: unparseable edited timestamp on {side} comment {comment_id!r} "
+    return (f"comment sync: unparseable edited timestamp on gh comment {comment_id!r} "
            f"({raw!r}) -- excluded from drift comparison")
 
 
 def _row_timestamp_warnings(row: dict, gh_by_id: dict, ap_by_id: dict) -> list[str]:
-    """Warnings for one live ledger row's freshly fetched gh/ap comments, if either side's live
-    `edited` timestamp is present but unparseable. `[]` for a tombstoned/malformed row, or a row
-    with nothing to warn about -- never raises."""
+    """Warnings for one live ledger row's freshly fetched GH comment, if its live `edited` timestamp
+    is present but unparseable. `[]` for a tombstoned/malformed row, or a row with nothing to warn
+    about -- never raises. AP has no edit timestamp (drift is hash-based), so it can't warn here."""
     if row.get("deleted") is True:
         return []
     gh_id, ap_id = row.get("gh_id"), row.get("ap_id")
     if not _valid_id(gh_id) or not _valid_id(ap_id):
         return []
-    gh_comment, ap_comment = gh_by_id.get(gh_id), ap_by_id.get(ap_id)
-    candidates = (
-        _timestamp_warning("gh", gh_id, gh_comment.get("edited")) if gh_comment is not None else None,
-        _timestamp_warning("ap", ap_id, ap_comment.get("edited")) if ap_comment is not None else None,
-    )
-    return [w for w in candidates if w is not None]
+    gh_comment = gh_by_id.get(gh_id)
+    warning = _gh_timestamp_warning(gh_id, gh_comment.get("edited")) if gh_comment is not None else None
+    return [warning] if warning is not None else []
 
 
 def _plan_ledger_row(row: dict, gh_by_id: dict, ap_by_id: dict) -> CommentAction | None:
@@ -565,19 +581,38 @@ def _row_from_ids(gh_id: int, ap_id: int, origin_side: str, gh_comment: dict | N
     return {
         "gh_id": gh_id, "ap_id": ap_id, "origin": origin_side,
         "gh_created": (gh_comment or {}).get("created"), "gh_edited": (gh_comment or {}).get("edited"),
-        "ap_created": (ap_comment or {}).get("created"), "ap_edited": (ap_comment or {}).get("edited"),
+        "ap_created": (ap_comment or {}).get("created"),
+        "ap_hash": _ap_body_hash(ap_comment) if ap_comment is not None else None,
         "deleted": False,
     }
 
 
-def _apply_edit_timestamps(row: dict, action: CommentAction, fresh_gh_by_id: dict,
-                           fresh_ap_by_id: dict) -> None:
+def _post_write_ap_hash(action: CommentAction, ap_comment: dict | None, confirmed: bool) -> str | None:
+    """The `ap_hash` to record after `action` -- the fingerprint of the AP body now on the server.
+    If this action wrote the AP side (`target_side == "ap"`) the authoritative source is the
+    post-write readback (`ap_comment`, when the refetch `confirmed`); on refetch failure we fall back
+    to exactly what we wrote (`action.rendered_body`, which AP stores verbatim -- confirmed live) so
+    our own edit never mis-registers as AP drift next run (P1 #3: never record a value that would
+    make the next run overwrite the origin). If this action did NOT write AP, the observed body is
+    already current. None only when there is no AP body to hash."""
+    if action.target_side == "ap":
+        if confirmed and ap_comment is not None:
+            return _ap_body_hash(ap_comment)
+        return _ap_body_hash({"body": action.rendered_body})
+    return _ap_body_hash(ap_comment) if ap_comment is not None else None
+
+
+def _apply_edit_effects(row: dict, action: CommentAction, fresh_gh_by_id: dict,
+                        fresh_ap_by_id: dict, confirmed: bool) -> None:
     gh_id, ap_id = action.ledger_key
     gh_comment, ap_comment = fresh_gh_by_id.get(gh_id), fresh_ap_by_id.get(ap_id)
     if gh_comment is not None:
         row["gh_created"], row["gh_edited"] = gh_comment.get("created"), gh_comment.get("edited")
     if ap_comment is not None:
-        row["ap_created"], row["ap_edited"] = ap_comment.get("created"), ap_comment.get("edited")
+        row["ap_created"] = ap_comment.get("created")
+    new_hash = _post_write_ap_hash(action, ap_comment, confirmed)
+    if new_hash is not None:  # never blank a known hash on the (rare) no-AP-body edge
+        row["ap_hash"] = new_hash
 
 
 def _apply_create_result(action: CommentAction, observed: dict | None, rows_by_key: dict,
@@ -657,7 +692,7 @@ def _apply_ledger_effect(action: CommentAction, observed: dict | None, rows_by_k
     if kind == "edit_mirror":
         row = rows_by_key.get(action.ledger_key)
         if row is not None:
-            _apply_edit_timestamps(row, action, fresh_gh_by_id, fresh_ap_by_id)
+            _apply_edit_effects(row, action, fresh_gh_by_id, fresh_ap_by_id, confirmed)
         return
     # mirror_new / restore_mirror
     _apply_create_result(action, observed, rows_by_key, fresh_gh_by_id, fresh_ap_by_id, confirmed)

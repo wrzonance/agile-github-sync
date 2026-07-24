@@ -355,12 +355,12 @@ def _comment_time_like(obj: dict) -> dict:
 
 
 def _probe_comment_edit_shape(cfg: dict, parent_id: str, comment_id, results: list) -> None:
-    """Fact-finding for issue #66's open question: the AP comment `edited` timestamp came back None
-    even after a PUT, so none of _normalize_ap_comment's candidate keys (lastModified/modifiedOn/
-    updatedOn/editedOn) matched. Dump the RAW persisted comment's top-level keys, and a second
-    fact-finding PUT's raw response body -- values only for date/time-like keys -- so a live re-run
-    reveals which field (if any) carries the edit time, or confirms AP exposes none. Never pass/fail
-    (informational). See API-VALIDATION.md."""
+    """Fact-finding for issue #66. CONFIRMED live 2026-07-24: an AgilePlace comment carries NO edit
+    timestamp -- its only keys are cardId/createdBy/createdOn/id/text -- so AP-side drift is detected
+    by a body-hash (design amendment; see API-VALIDATION.md + comment_sync). These steps are kept as
+    cheap fact-finding: they dump the RAW persisted comment's top-level keys and a fact-finding PUT's
+    raw response body (values only for date/time-like keys), so a future AgilePlace version that DID
+    add an edit-timestamp field would surface here. Never pass/fail (informational)."""
     raw = agileplace.api(cfg, "GET", agileplace_comments._comment_collection_path(parent_id))
     raw_list = raw.get("comments") if isinstance(raw, dict) else raw if isinstance(raw, list) else []
     raw_comment = next((c for c in (raw_list or []) if str(c.get("id")) == str(comment_id)), None)

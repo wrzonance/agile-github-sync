@@ -1,6 +1,7 @@
 """Whole-run dry/apply parity tests at the real process and HTTP boundaries."""
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -600,3 +601,102 @@ def test_configure_clears_ambient_comment_sync_env_keeping_baseline_deterministi
 
     assert _comment_creates_planned(dry.output) == (0, 0)
     assert _comment_creates_executed(apply) == (0, 0)
+
+
+# --- Comment sync: AP-edit detected via body hash -> GH mirror edit (issue #66 amendment) --------
+#
+# AgilePlace comments carry NO edit timestamp (confirmed live 2026-07-24), so an AP-side edit is
+# detected by a body-hash mismatch against the ledgered ap_hash. This seeds a LEDGERED gh<->ap pair
+# whose AP origin body has changed since the last sync, and pins that the run plans+executes exactly
+# one GH mirror edit (edit_mirror target=gh) across dry and apply -- the wiring for the amended drift
+# model. Exhaustive hash-drift logic (GH-wins tie-break, echo, refetch-failure) stays in the unit suite.
+
+_AP_ORIGIN_OLD = "<p>original ap origin body</p>"          # what the ledgered ap_hash was taken from
+_AP_ORIGIN_EDITED = "<p>EDITED ap origin body</p>"         # a human changed it since -> hash mismatch
+
+
+def _ap_hash(body: str) -> str:
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _seed_comment_ledger(state_path: Path, row: dict) -> None:
+    """Pre-write the sync-state file with one comments-ledger row on the epic (issue 1 / card C1),
+    so a run starts from an already-synced pair. target/board/schema must match what main() loads."""
+    state = {
+        "schema": sync.STATE_SCHEMA, "target": "acme/widgets", "board": "42",
+        "issues": {EPIC_URL: {"card_id": "C1", "comments": [row]}},
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+
+class _CommentEditFixtureWorld(FixtureWorld):
+    """A LEDGERED gh<->ap comment pair on issue-1 / card-C1 whose AP origin body has been edited since
+    the last sync (GH mirror unchanged). AP carries no edit timestamp, so the edit surfaces as a
+    body-hash mismatch and the GH mirror is updated. Issue 2 / card C2 carry no comments."""
+
+    def run_process(self, argv, **kwargs):
+        args = tuple(argv[1:])
+        if args and args[0] == "api" and len(args) > 3 and _is_gh_comment_path(args[3]):
+            path = args[3]
+            if path.endswith("/comments"):  # list
+                number = int(path.split("/issues/")[1].split("/")[0])
+                page = [{"id": 901, "user": {"login": "syncbot"},
+                         "body": "comment by bob on Agile Place\n\nold mirror text",
+                         "created_at": "2024-01-01T00:00:00Z",
+                         "updated_at": "2024-01-01T00:00:00Z"}] if number == 1 else []
+                return self._completed(argv, [page])
+            self.process_writes.append(args)  # PATCH edit (or DELETE)
+            return self._completed(argv, {"id": 901})
+        return super().run_process(argv, **kwargs)
+
+    def open_url(self, request, **kwargs):
+        parsed = urllib.parse.urlparse(request.full_url)
+        path = parsed.path.removeprefix("/io/")
+        if path.endswith("/comment") or "/comment/" in path:
+            method = request.get_method()
+            if method != "GET":
+                body = json.loads(request.data) if request.data else None
+                headers = {key.lower(): value for key, value in request.header_items()}
+                self.http_writes.append(HttpWrite(method, path, body, headers))
+            if method == "GET":
+                card_id = path.split("/")[1]
+                comments = [{"id": 801,
+                             "createdBy": {"fullName": "bob", "emailAddress": "bob@example.com"},
+                             "text": _AP_ORIGIN_EDITED,
+                             "createdOn": "2024-01-01T00:00:00Z"}] if card_id == "C1" else []
+                return _Response({"comments": comments})
+            return _Response({})
+        return super().open_url(request, **kwargs)
+
+
+_GH_COMMENT_PATCH_RE = re.compile(r"^DRY   gh api issue comment \d+ -- PATCH$")
+
+
+def _comment_edits_planned(output: str) -> int:
+    return sum(1 for line in output.splitlines() if _GH_COMMENT_PATCH_RE.match(line))
+
+
+def _comment_edits_executed(run: RunResult) -> int:
+    return sum(1 for w in run.process_writes
+               if w and w[0] == "api" and len(w) > 3 and "/issues/comments/" in w[3] and "PATCH" in w)
+
+
+def test_comment_sync_ap_edit_detected_via_hash_edits_gh_mirror(monkeypatch, tmp_path):
+    """Issue #66 amendment: AgilePlace exposes no comment edit timestamp, so an AP-side edit is
+    detected by a body-hash mismatch against the ledger. A ledgered pair whose AP origin body changed
+    since the last sync must plan and execute exactly one GH mirror edit, 1:1 across dry and apply."""
+    _configure_comment_identity(monkeypatch, tmp_path)
+    row = {
+        "gh_id": 901, "ap_id": 801, "origin": "ap",
+        "gh_created": "2024-01-01T00:00:00Z", "gh_edited": "2024-01-01T00:00:00Z",  # GH unchanged
+        "ap_created": "2024-01-01T00:00:00Z", "ap_hash": _ap_hash(_AP_ORIGIN_OLD), "deleted": False,
+    }
+    for name in ("dry-state.json", "apply-state.json"):
+        _seed_comment_ledger(tmp_path / name, row)
+
+    dry = _run(monkeypatch, tmp_path, apply=False, world_factory=_CommentEditFixtureWorld)
+    apply = _run(monkeypatch, tmp_path, apply=True, world_factory=_CommentEditFixtureWorld)
+
+    assert _comment_edits_planned(dry.output) == 1          # AP hash drift -> GH mirror edit planned
+    assert _comment_edits_executed(apply) == 1              # and executed (PATCH issues/comments/901)
+    assert _comment_creates_planned(dry.output) == (0, 0)   # no creates: the pair is already ledgered
