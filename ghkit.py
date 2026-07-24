@@ -324,8 +324,10 @@ def create_label(cfg: dict, apply: bool, name: str) -> None:
     gh errors (including already-exists) propagate; the metadata_sync caller treats the create as
     best-effort ahead of its single add retry."""
     if apply:
-        run(cfg, ["label", "create", name, "--color", "ededed",
-                  "--description", "created by agile-github-sync"])
+        # options first, then `--` so a dash-prefixed name stays positional instead of being
+        # parsed as a flag
+        run(cfg, ["label", "create", "--color", "ededed",
+                  "--description", "created by agile-github-sync", "--", name])
         print(f"gh    label create {name}")
     else:
         print(f"DRY   gh label create '{name}'")

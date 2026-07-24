@@ -507,8 +507,20 @@ def test_create_label_applies_via_gh(monkeypatch, capsys):
     monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: calls.append(args))
     create_label({}, True, "ADR")
     assert len(calls) == 1
-    assert calls[0][:3] == ["label", "create", "ADR"]
+    assert calls[0][:2] == ["label", "create"]
+    assert calls[0][-2:] == ["--", "ADR"]  # name last, behind the terminator (see dash test below)
     assert capsys.readouterr().out.startswith("gh    label create ADR")
+
+
+def test_create_label_protects_dash_prefixed_names(monkeypatch):
+    """A label like '-blocked' must reach gh as a positional argument, not be parsed as a flag:
+    options first, then the `--` terminator, then the name."""
+    calls = []
+    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: calls.append(args))
+    create_label({}, True, "-blocked")
+    assert len(calls) == 1
+    assert calls[0][-2:] == ["--", "-blocked"]
+    assert "--color" in calls[0] and calls[0].index("--color") < calls[0].index("--")
 
 
 def test_create_label_dry_run_prints_and_never_shells(monkeypatch, capsys):
@@ -544,6 +556,35 @@ def test_sync_metadata_creates_missing_label_and_retries_add(monkeypatch, capsys
     assert edit_calls == [("ADR", True), ("ADR", True)]  # failed add, then the post-create retry
     assert created == ["ADR"]
     assert "ADR" in issues_state[issue["url"]]["labels"]  # confirmed write -> base advances
+
+
+def test_sync_metadata_retries_add_even_when_create_fails(monkeypatch, capsys):
+    """A concurrent creator can make `gh label create` fail with already-exists while the label IS
+    now available -- the creation failure must not skip the one add retry. First add fails, create
+    raises, the retry succeeds, and the base records the label as applied."""
+    issue = _issue(labels=[])
+    card = _card(tags=["ADR"])
+    issues_state = {issue["url"]: {"labels": [], "milestone": None}}
+
+    edit_calls = []
+
+    def fake_edit(cfg, apply, number, label, *, add):
+        edit_calls.append((label, add))
+        if len(edit_calls) == 1:
+            raise _gh_error()
+
+    def fake_create(cfg, apply, name):
+        raise _gh_error(name)
+
+    monkeypatch.setattr("ghkit.edit_label", fake_edit)
+    monkeypatch.setattr("ghkit.create_label", fake_create)
+    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+
+    sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
+
+    assert edit_calls == [("ADR", True), ("ADR", True)]  # retry ran despite the create failure
+    assert "ADR" in issues_state[issue["url"]]["labels"]  # confirmed write -> base advances
+    assert capsys.readouterr().out.count("WARN") == 0
 
 
 def test_sync_metadata_skips_add_and_continues_when_create_and_retry_fail(monkeypatch, capsys):

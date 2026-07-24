@@ -59,6 +59,11 @@ def _add_label_with_create(cfg, apply, number: int, name: str, key: str) -> bool
         pass
     try:
         ghkit.create_label(cfg, apply, name)
+    except _GH_LABEL_ERRORS:
+        # a concurrent creator can make the create fail with already-exists while the label IS
+        # now available -- the retry below still decides the outcome
+        pass
+    try:
         ghkit.edit_label(cfg, apply, number, name, add=True)
         return True
     except _GH_LABEL_ERRORS:
