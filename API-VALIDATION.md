@@ -421,14 +421,25 @@ oversize body.
 
 ### CONFIRMED (2026-07-24): AgilePlace NORMALIZES stored description/comment HTML
 
-The issue #78 richtext round-trip step (step 22) caught it live: AgilePlace does not store rendered
-HTML verbatim -- it **normalizes** it. A real issue #1 body (147 chars of markdown) rendered to 224
-chars of HTML; the server stored 221 chars back. The `leankit_html_to_markdown` of the readback was
-148 chars, so content survives semantically -- the divergence is HTML-level (entity spelling,
-whitespace, self-closing tags, or attribute changes; the enhanced smoke step now prints the verbatim
-sent/stored diff so a re-run pins exactly what). Plain comment bodies (`<p>...</p>`) DID come back
-verbatim, so normalization may only bite richer HTML; the comment edit step now uses richer HTML
-(bold/list/code) to probe it.
+The issue #78 richtext round-trip step (step 22) caught it live, and the enhanced sent-vs-stored diff
+pinned it exactly: **AgilePlace UNESCAPES the `&gt;` entity in text nodes** -- it does not store
+rendered description HTML verbatim. Synthetic example of the one transform observed:
+
+```
+sent:   <p>&gt; quoted</p>
+stored: <p>> quoted</p>
+```
+
+Attributes, links, and all other markup were stored verbatim (a 224-char body lost exactly 3 chars,
+one per `&gt;`->`>`). **Comment** bodies -- even richer HTML (bold/list/code) -- were stored
+VERBATIM; comment-body normalization was not observed. Step 22 PASSES via the convergence invariant:
+writing the sync's re-derived HTML reaches a fixed point (second readback == first readback) live, so
+descriptions do not perpetually re-drift.
+
+Why this is safe end to end: richtext's `leankit_html_to_markdown` escapes a leading `>` to `\>`
+(and `markdown_to_leankit_html` renders it back to `&gt;`), so a server-unescaped `<p>> quoted</p>`
+is never misread as Markdown blockquote syntax on the next round trip -- pinned by
+`tests/test_richtext_shared.py::test_leading_structural_chars_are_escaped_only_at_true_line_start`.
 
 **Implication and how the sync handles it (golden rule: compare/record what the SERVER stores, never
 what was sent):**
