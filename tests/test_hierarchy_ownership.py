@@ -12,7 +12,7 @@ import board_layout  # noqa: E402
 import ghkit  # noqa: E402
 import ghproject  # noqa: E402
 import sync  # noqa: E402
-from stages import header_match_key  # noqa: E402
+from stages import header_match_key, issue_card_header  # noqa: E402
 
 
 def _issue(number: int, title: str, *, epic: bool = False) -> dict:
@@ -148,8 +148,10 @@ def test_plan_only_epic_skips_server_child_read(tmp_path, monkeypatch):
     epic = _issue(1, "[EP] Epic", epic=True)
     child = _issue(2, "[CHILD] Task")
     planned_cards = {
-        "EP": agileplace._planned_card_snapshot("Epic", "EP", epic["url"], None),
-        "CHILD": agileplace._planned_card_snapshot("Task", "CHILD", child["url"], None),
+        "EP": agileplace._planned_card_snapshot(
+            "Epic", issue_card_header(epic), epic["url"], None),
+        "CHILD": agileplace._planned_card_snapshot(
+            "Task", issue_card_header(child), child["url"], None),
     }
 
     connect, disconnect, child_reads = _run_hierarchy(
