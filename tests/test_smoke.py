@@ -246,15 +246,31 @@ class FakeTenant:
         return _Response({})
 
 
+# Real-world markdown (heading, bold/italic, link, list, inline code) for the issue #1 richtext
+# round-trip step. Chosen because it is render-stable through the richtext layer (issue #78), which
+# the step's PASS/FAIL invariant requires. The gh read is faked (no real GitHub call in the suite).
+_SMOKE_ISSUE_BODY = (
+    "# Title\n\nA paragraph with **bold** and _italic_ and a [link](https://example.com).\n\n"
+    "- one\n- two\n\n`inline code` here."
+)
+
+
 @pytest.fixture
 def tenant_env(monkeypatch):
-    def install(world: FakeTenant, answer: str | None = "smoke"):
+    def install(world: FakeTenant, answer: str | None = "smoke",
+                issue_bodies: object = "__default__"):
         monkeypatch.setattr("config.ENV_FILE", Path("/nonexistent/.env"))
         for name, value in (("AGILEPLACE_TOKEN", "test-token"),
                             ("AGILEPLACE_HOST", "tenant.test"),
                             ("AGILEPLACE_BOARD_ID", "42")):
             monkeypatch.setenv(name, value)
         monkeypatch.setattr("urllib.request.urlopen", world.urlopen)
+        # The issue #1 richtext step reads GitHub via ghkit; fake it so no real gh call happens.
+        # Default: a render-stable issue #1 body. Tests pass issue_bodies=[] / None to drive SKIPs.
+        bodies = ([{"number": 1, "url": "https://g.test/acme/widgets/issues/1",
+                    "state": "OPEN", "body": _SMOKE_ISSUE_BODY}]
+                  if issue_bodies == "__default__" else issue_bodies)
+        monkeypatch.setattr(smoke.ghkit, "list_issue_bodies", lambda cfg: bodies)
         if answer is None:
             def refuse(_prompt=""):
                 raise AssertionError("input() must not be called with --yes")
@@ -302,6 +318,7 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
         ("PUT", "card/S1/comment/1"),     # edit-timestamp fact-finding probe (issue #66)
         ("DELETE", "card/S1/comment/1"),  # comment delete (speculative shape)
         ("PATCH", "card/S1"),             # deliberate stale-version probe
+        ("PATCH", "card/S1"),             # GitHub issue #1 body -> description richtext round-trip (#78)
         ("DELETE", "card/S2"),            # cleanup child
         ("DELETE", "card/S1"),            # cleanup parent
     ]
@@ -322,6 +339,21 @@ def test_confirmed_run_executes_whole_sequence_and_cleans_up(tenant_env, capsys)
     assert "comment list readback finds the created comment" in out
     assert "comment edit round-trip" in out
     assert "comment delete + readback gone" in out
+    assert "read the configured repo issue #1 body" in out or "issue #1 body (" in out
+    assert "render-stable through the sync's richtext layer" in out
+
+
+def test_github_richtext_roundtrip_skips_informationally_when_issue_1_is_absent(tenant_env, capsys):
+    """The issue #1 richtext step must be an informational SKIP (never a failure) when issue #1
+    doesn't exist -- and the whole run still passes and cleans up."""
+    world = tenant_env(FakeTenant(), issue_bodies=[])
+
+    assert smoke.main([]) == 0
+
+    out = capsys.readouterr().out
+    assert "SKIP" in out and "issue #1 was not found" in out
+    assert "FAIL" not in out
+    assert set(world.cards) == {"P1"}  # cleanup still ran
 
 
 def test_unexpected_duplicate_create_failure_fails_the_run(tenant_env, capsys):

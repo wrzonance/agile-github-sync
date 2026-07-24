@@ -6,13 +6,16 @@ the sync uses -- card create, versioned PATCH tag add/remove, externalLink add o
 connect/disconnect children, description write + length probe (issue #65), a comment create/list/
 edit/delete round-trip (issue #66 -- the delete shape is speculative, never exposed by the web UI),
 a typeId replace and a typed card create (each verified via refetch, skipped as informational when
-the board has no eligible card type configured), and a deliberately stale-version PATCH that MUST be
-rejected -- then deletes every throwaway card and confirms they are gone. The steps mirror the
-``[live-check]`` items in API-VALIDATION.md so one confirmed run retires them.
+the board has no eligible card type configured), a deliberately stale-version PATCH that MUST be
+rejected, and a live richtext round-trip of the configured repo's GitHub issue #1 body through the
+card description (issue #78 fidelity) -- then deletes every throwaway card and confirms they are
+gone. The steps mirror the ``[live-check]`` items in API-VALIDATION.md so one confirmed run retires
+them.
 
-GitHub is never touched (dry run already exercises every gh read live), and the sync state file is
-never read or written. Every server rejection is printed with its full, untruncated response body so
-an incorrect write shape is diagnosable straight from the console.
+GitHub is never WRITTEN (the issue #1 richtext step performs a READ only -- `gh issue list`; dry
+runs already exercise every gh read live), and the sync state file is never read or written. Every
+server rejection is printed with its full, untruncated response body so an incorrect write shape is
+diagnosable straight from the console.
 """
 from __future__ import annotations
 
@@ -27,6 +30,8 @@ import agileplace_comments
 import agileplace_description
 import board_layout
 import card_types
+import ghkit
+import richtext
 from config import env_config
 
 PARENT_TITLE = "SMOKE parent (safe to delete)"
@@ -340,6 +345,48 @@ def _check_description(cfg: dict, parent_id: str, results: list) -> None:
                     f"(configured max_length={limit})"))
 
 
+def _check_github_richtext_roundtrip(cfg: dict, parent_id: str, results: list) -> None:
+    """Step 22: a live richtext round-trip of a REAL GitHub issue body through the card description --
+    the exact translation layer description/comment sync uses (issue #78 fidelity), driven by
+    real-world markdown (headings, lists, code fences, links) rather than a synthetic fixture. Reads
+    the configured repo's issue #1 body via ghkit (a gh READ -- smoke performs no GitHub WRITES),
+    renders it to AgilePlace HTML, writes it to the throwaway parent's description through the same
+    op_description/patch_card path as steps 13-14, reads it back, and asserts the #78 render-stable
+    invariant: markdown_to_leankit_html(leankit_html_to_markdown(readback)) == readback (NOT
+    byte-equality of the markdown). An absent, unreadable, or blank issue #1 is an informational
+    SKIP, never a failure; server HTML normalization is fact-finding INFO, not a failure."""
+    _step(22, "live GitHub issue #1 body -> card description richtext round-trip (issue #78)")
+    repo_label = str(cfg.get("target_repo_path") or "the configured repo")
+    bodies = ghkit.list_issue_bodies(cfg)
+    if bodies is None:
+        results.append(("GitHub issue #1 richtext round-trip", None,
+                        f"SKIP: could not read issues from {repo_label} (gh read failed)"))
+        return
+    issue_one = next((i for i in bodies if i.get("number") == 1), None)
+    if issue_one is None or not (issue_one.get("body") or "").strip():
+        state = "has a blank body" if issue_one is not None else "was not found"
+        results.append(("GitHub issue #1 richtext round-trip", None,
+                        f"SKIP: {repo_label} issue #1 {state} -- nothing to round-trip"))
+        return
+
+    markdown = issue_one["body"]
+    print(f"      read {repo_label} issue #1 body ({len(markdown)} chars of markdown)")
+    html = richtext.markdown_to_leankit_html(markdown)
+    fresh = agileplace.get_card(cfg, parent_id)
+    agileplace.patch_card(cfg, True, fresh, [agileplace_description.op_description(html)])
+    readback = agileplace_description.card_description(cfg, agileplace.get_card(cfg, parent_id))
+
+    results.append(("server stored the rendered HTML unchanged (fact-finding)", None,
+                    f"sent {len(html)} chars, server stored {len(readback)} back"
+                    + ("" if readback == html else " -- server NORMALIZED the HTML")))
+    md_back = richtext.leankit_html_to_markdown(readback)
+    rerendered = richtext.markdown_to_leankit_html(md_back)
+    results.append(("issue #1 body is render-stable through the sync's richtext layer (issue #78)",
+                    rerendered == readback,
+                    f"md_back {len(md_back)} chars; re-render "
+                    f"{'reproduces' if rerendered == readback else 'DIVERGES from'} the readback HTML"))
+
+
 def _find_comment(comments: list[dict], comment_id: int) -> dict | None:
     return next((comment for comment in comments if comment.get("id") == comment_id), None)
 
@@ -545,6 +592,7 @@ def _run_checks(cfg: dict, lane_id: str | None, run_id: str, created: list[str],
     _check_comments(cfg, parent_id, results)
     _check_type_id_writes(cfg, lane_id, parent_id, run_id, created, results)
     _check_stale_patch(cfg, parent_id, baseline_version, results)
+    _check_github_richtext_roundtrip(cfg, parent_id, results)
 
 
 def _summarize(results: list) -> int:
