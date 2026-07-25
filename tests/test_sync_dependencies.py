@@ -268,3 +268,32 @@ def test_every_edge_is_mirrored_not_only_incomplete_blockers():
     cards = {1: {"id": "C1"}, 2: {"id": "C2"}}
     calls = _run(issues, {1: [2]}, cards, {"C1", "C2"}, reads={"C1": [], "C2": []})
     assert calls["create"] == [("C1", ["C2"])]
+
+
+# --- issue #99: prefetched dependency snapshots -----------------------------
+
+def test_prefetched_dependency_snapshot_skips_the_serial_read():
+    """A card hydrated with _prefetchedDeps (board_reads.hydrate_run_reads) reconciles from the
+    snapshot -- zero serial card_dependencies reads."""
+    issues = [_issue(1, "A"), _issue(2, "B")]
+    cards = {1: {"id": "C1", "_prefetchedDeps": [{"cardId": "C2", "direction": "incoming"}]},
+             2: {"id": "C2", "_prefetchedDeps": []}}
+
+    calls = _run(issues, {1: [2]}, cards, {"C1", "C2"}, reads={})
+
+    assert calls["reads"] == []
+    assert calls["create"] == []  # desired blocker C2 is already incoming
+    assert calls["delete"] == []
+
+
+def test_prefetched_none_is_unknown_state_and_skips_the_card(capsys):
+    """A hydrated None carries the reader's own failure sentinel -- same skip contract as a
+    failed serial read, with the same WARN."""
+    issues = [_issue(1, "A")]
+    cards = {1: {"id": "C1", "_prefetchedDeps": None}}
+
+    calls = _run(issues, {1: []}, cards, {"C1"}, reads={})
+
+    assert calls["reads"] == []
+    assert calls["create"] == [] and calls["delete"] == []
+    assert "dependency state unknown" in capsys.readouterr().out

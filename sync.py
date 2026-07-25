@@ -22,6 +22,7 @@ from collections.abc import Mapping
 
 import agileplace
 import board_layout
+import board_reads
 import card_types
 import ghkit
 import ghkit_snapshot
@@ -152,8 +153,8 @@ def sync_child_connections(cfg: dict, apply: bool, epics: list[dict], card_for, 
         # A plan-only parent has not reached AgilePlace yet, so its authoritative server-side child
         # set is empty. Never send its synthetic identity across a real read boundary.
         existing_snapshot = (
-            frozenset()
-            if parent.get("_planOnly")
+            frozenset() if parent.get("_planOnly")
+            else parent["_prefetchedChildIds"] if "_prefetchedChildIds" in parent
             else agileplace.card_child_ids(cfg, str(parent["id"]))
         )
         existing = set(existing_snapshot or ())
@@ -259,7 +260,8 @@ def sync_dependencies(cfg: dict, apply: bool, syncable_issues: list, blocked_by:
         if card.get("_planOnly"):
             current = set()  # a fresh card has no server-side dependencies; never read a plan-only id
         else:
-            entries = agileplace.card_dependencies(cfg, cid)
+            entries = (card["_prefetchedDeps"] if "_prefetchedDeps" in card
+                       else agileplace.card_dependencies(cfg, cid))
             if entries is None:
                 print(f"WARN  [{key}] dependency state unknown -- leaving this card's dependencies untouched")
                 continue
@@ -588,9 +590,8 @@ def main() -> None:
     active_issues = [issue for issue in issues if not is_retired_issue(issue)]
     retired_issues = [issue for issue in issues if is_retired_issue(issue)]
     open_pr = ghkit.open_pr_issue_numbers(cfg)
-    # Issue #98: one batched GraphQL read replaces the per-issue comment loop, the per-issue
-    # blocked-by loop, and the per-epic sub-issue reads. None -> each consumer keeps its
-    # existing per-item path.
+    # Issue #98: one batched GraphQL read replaces the per-issue comment/blocked-by loops and
+    # the per-epic sub-issue reads; None -> each consumer keeps its existing per-item path.
     graph = ghkit_snapshot.fetch_issue_graph(cfg) if online else None
     open_pr_read_failed = open_pr is None
     if open_pr_read_failed:
@@ -655,6 +656,13 @@ def main() -> None:
 
     def card_for(issue):
         return _matching_card(issue, card_by_url, card_by_cid)
+
+    # Issue #99: one bounded concurrent read phase completes the matched card snapshots; blocked_by
+    # resolves first (step 4 consumes it) so an unusable snapshot never prefetches dependency reads.
+    blocked_by = ghkit_snapshot.resolve_blocked_by(
+        cfg, graph, online, [i["number"] for i in syncable_issues])
+    board_reads.hydrate_run_reads(cfg, online, syncable_issues, card_for, epics,
+                                  prefetch_deps=blocked_by is not None)
 
     card_ops: dict = {}
 
@@ -745,8 +753,6 @@ def main() -> None:
     # authority is narrower than managed_card_ids here: a card an active issue reached only
     # through the customId fallback confers no removal authority over its dependencies
     # (issue #60) -- see _removal_authority_card_ids.
-    blocked_by = ghkit_snapshot.resolve_blocked_by(
-        cfg, graph, online, [i["number"] for i in syncable_issues])
     if online and blocked_by is None:
         print("WARN  blocked-by snapshot incomplete -- leaving ALL card dependencies untouched this run")
     if blocked_by is not None:

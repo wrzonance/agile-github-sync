@@ -70,7 +70,7 @@ def _run_page(cfg: dict, ctx: ghkit.RepoContext, query: str, cursor: str | None)
     try:
         return json.loads(ghkit.run(cfg, args).stdout)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
-            SystemExit):
+            SystemExit, FileNotFoundError):  # FileNotFoundError: gh itself missing from PATH
         return None
 
 

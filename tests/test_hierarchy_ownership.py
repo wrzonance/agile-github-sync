@@ -172,3 +172,24 @@ def test_plan_only_epic_skips_server_child_read(tmp_path, monkeypatch):
         [planned_cards["CHILD"]["id"]],
     )
     disconnect.assert_not_called()
+
+
+def test_prefetched_child_snapshot_skips_the_serial_read(monkeypatch):
+    """Issue #99: an epic parent hydrated with _prefetchedChildIds reconciles children from the
+    snapshot -- zero serial card_child_ids reads."""
+    epic = _issue(1, "[EP] Epic", epic=True)
+    child = _issue(2, "[CHILD] Task")
+    parent_card = {"id": "C1", "_prefetchedChildIds": frozenset({"C2"})}
+    child_card = {"id": "C2"}
+    monkeypatch.setattr(agileplace, "card_child_ids",
+                        Mock(side_effect=AssertionError("hydrated parent must bypass the read")))
+    connect, disconnect = Mock(), Mock()
+    monkeypatch.setattr(agileplace, "connect_children", connect)
+    monkeypatch.setattr(agileplace, "disconnect_children", disconnect)
+    cards = {1: parent_card, 2: child_card}
+
+    sync.sync_child_connections({}, False, [epic], lambda i: cards[i["number"]], {},
+                                {2: child}, frozenset(), {"C1", "C2"}, sub_issues={1: [2]})
+
+    connect.assert_not_called()     # C2 is already the connected child
+    disconnect.assert_not_called()
