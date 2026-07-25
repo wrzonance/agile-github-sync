@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from card_coherence import (  # noqa: E402
     contested_cards,
+    fence_cid_index,
     fence_run_indices,
     filter_poisoned_edges,
     laneid_op_value,
@@ -182,6 +183,147 @@ def test_contested_cards_never_raises_on_malformed_value_types():
     ]
     all_card_by_cid = {"T": {"id": 800}}
     assert contested_cards(issues, {}, all_card_by_cid) == {}
+
+
+# --- fence_cid_index (issue #95) -----------------------------------------------
+
+def test_fence_cid_index_is_pure():
+    """Never mutates `cards`, and never raises for the malformed shapes the rest of this module
+    already tolerates (missing customId, missing id, non-dict customId, etc)."""
+    cards = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2},  # no customId at all
+        {"id": 3, "customId": {"value": "OTHER"}},
+    ]
+    cards_before = copy.deepcopy(cards)
+
+    fence_cid_index(cards)
+
+    assert cards == cards_before
+    # Malformed/empty inputs must never raise.
+    assert fence_cid_index([]) == ({}, ())
+    assert fence_cid_index([{}]) == ({}, ())
+
+
+def test_fence_cid_index_indexes_every_uncontested_card_by_its_normalized_key():
+    cards = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2, "customId": {"value": "OTHER"}},
+    ]
+    index, warnings = fence_cid_index(cards)
+    assert index == {"KEY": cards[0], "OTHER": cards[1]}
+    assert warnings == ()
+
+
+def test_fence_cid_index_never_silently_overwrites_a_collision():
+    """Two cards normalizing to the same key must NOT last-wins into the index -- unlike a plain
+    dict comprehension, the later card must never silently clobber the earlier one."""
+    first = {"id": 1, "customId": "KEY"}
+    second = {"id": 2, "customId": "KEY"}
+    index, _ = fence_cid_index([first, second])
+    assert "KEY" not in index
+    assert index == {}
+
+
+def test_fence_cid_index_excludes_all_colliding_cards_not_just_the_losers():
+    """Fencing removes EVERY card in the collision group from the index, not just the second (or
+    all-but-one) -- neither the first- nor the last-seen card survives."""
+    cards = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2, "customId": "KEY"},
+        {"id": 3, "customId": "KEY"},
+    ]
+    index, _ = fence_cid_index(cards)
+    assert index == {}
+
+
+def test_fence_cid_index_warns_once_per_colliding_key_naming_every_card():
+    cards = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2, "customId": "KEY"},
+    ]
+    _, warnings = fence_cid_index(cards)
+    assert warnings == (
+        "WARN  customId KEY claimed by 2 cards, excluding from index: ['1', '2']",
+    )
+
+
+def test_fence_cid_index_warning_count_matches_number_of_colliding_keys():
+    """One collision at 'KEY' and a separate, independent collision at 'OTHER' produce exactly two
+    warnings -- an uncontested card ('SOLO') produces none."""
+    cards = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2, "customId": "KEY"},
+        {"id": 3, "customId": "OTHER"},
+        {"id": 4, "customId": "OTHER"},
+        {"id": 5, "customId": "SOLO"},
+    ]
+    index, warnings = fence_cid_index(cards)
+    assert index == {"SOLO": cards[4]}
+    assert len(warnings) == 2
+
+
+def test_fence_cid_index_excludes_cards_with_no_customid():
+    cards = [
+        {"id": 1},
+        {"id": 2, "customId": ""},
+        {"id": 3, "customId": {"value": ""}},
+    ]
+    index, warnings = fence_cid_index(cards)
+    assert index == {}
+    assert warnings == ()
+
+
+def test_fence_cid_index_is_deterministic_regardless_of_input_order():
+    forward = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2, "customId": "KEY"},
+        {"id": 3, "customId": "OTHER"},
+        {"id": 4, "customId": "OTHER"},
+    ]
+    backward = list(reversed(forward))
+
+    index_forward, warnings_forward = fence_cid_index(forward)
+    index_backward, warnings_backward = fence_cid_index(backward)
+
+    assert index_forward == index_backward == {}
+    assert warnings_forward == warnings_backward == (
+        "WARN  customId KEY claimed by 2 cards, excluding from index: ['1', '2']",
+        "WARN  customId OTHER claimed by 2 cards, excluding from index: ['3', '4']",
+    )
+
+
+def test_fence_cid_index_warning_ids_are_sorted_regardless_of_collision_order():
+    cards = [
+        {"id": 9, "customId": "KEY"},
+        {"id": 2, "customId": "KEY"},
+        {"id": 5, "customId": "KEY"},
+    ]
+    _, warnings = fence_cid_index(cards)
+    assert warnings == (
+        "WARN  customId KEY claimed by 3 cards, excluding from index: ['2', '5', '9']",
+    )
+
+
+def test_fence_cid_index_treats_missing_id_as_unknown_in_warning():
+    cards = [
+        {"customId": "KEY"},           # no id at all
+        {"id": None, "customId": "KEY"},  # falsy id
+    ]
+    _, warnings = fence_cid_index(cards)
+    assert warnings == (
+        "WARN  customId KEY claimed by 2 cards, excluding from index: "
+        "['<unknown>', '<unknown>']",
+    )
+
+
+def test_fence_cid_index_accepts_a_tuple_as_well_as_a_list():
+    """`Iterable[dict]` must genuinely cover both call sites: sync.py passes a list, card_coherence's
+    own fence_run_indices passes a tuple (`retired_cards`)."""
+    cards = ({"id": 1, "customId": "KEY"}, {"id": 2, "customId": "OTHER"})
+    index, warnings = fence_cid_index(cards)
+    assert index == {"KEY": cards[0], "OTHER": cards[1]}
+    assert warnings == ()
 
 
 # --- lane_conflict -----------------------------------------------------------

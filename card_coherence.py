@@ -24,6 +24,16 @@ just the set of card ids marked poisoned, so callers elsewhere in the run (e.g. 
 dependency writes) can skip a poisoned card's ops without reaching into `card_ops`'s internal shape
 themselves.
 
+fence_cid_index (issue #95): the reverse axis from contested_cards -- contested_cards fences an
+AgilePlace CARD claimed by >= 2 GitHub ISSUES; fence_cid_index fences a customId KEY claimed by
+>= 2 CARDS (two cards whose customId both normalize, via header_match_key, to the same match key --
+a state the AgilePlace side can reach on its own, independent of anything sync.py's issues do).
+Building a customId -> card index used to be a bare dict comprehension at each of this run's two
+call sites (sync.py's active-card index, and fence_run_indices's retired-card index below); both
+silently let the last card in iteration order clobber the id of every earlier colliding card. This
+function replaces both comprehensions: a colliding key is excluded from the index entirely (fenced,
+never last-wins), with one WARN naming every colliding card's id.
+
 filter_poisoned_edges: the shared "drop poisoned ids out of an already-computed adds/removes pair"
 step both the child-connection loop and sync_dependencies() need -- extracted here (rather than
 duplicated inline in sync.py, as it briefly was) so the two call sites can't drift apart.
@@ -41,6 +51,7 @@ keep working unchanged -- fence_run_indices only ever CONSUMES an already-comput
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import NamedTuple
 
 import agileplace
@@ -160,6 +171,32 @@ def same_card(left: dict | None, right: dict | None) -> bool:
     left_id = str(left.get("id") or "")
     right_id = str(right.get("id") or "")
     return bool(left_id) and left_id == right_id
+
+
+def fence_cid_index(cards: Iterable[dict]) -> tuple[dict[str, dict], tuple[str, ...]]:
+    """Build a customId -> card index over `cards`, keyed by
+    header_match_key(agileplace.custom_id_value(card)). Cards with no customId (empty key) are
+    excluded, same as before. When >= 2 cards normalize to the same non-empty key, ALL of them are
+    excluded from the index (fenced, never last-wins) and one WARN naming every colliding card's id
+    is appended to the returned warnings, sorted by key for determinism.
+
+    Pure: never mutates `cards` or any card dict; never raises for any card dict shape
+    agileplace.custom_id_value/card.get('id') already tolerate elsewhere in this module. Single
+    O(n) pass to group, then O(k) over the (typically tiny) set of colliding keys."""
+    cards_by_key: dict[str, list[dict]] = {}
+    for card in cards:
+        key = header_match_key(agileplace.custom_id_value(card))
+        if key:
+            cards_by_key.setdefault(key, []).append(card)
+
+    index = {key: matches[0] for key, matches in cards_by_key.items() if len(matches) == 1}
+    warnings = tuple(
+        f"WARN  customId {key} claimed by {len(matches)} cards, excluding from index: "
+        f"{sorted(str(c.get('id') or '<unknown>') for c in matches)}"
+        for key, matches in sorted(cards_by_key.items())
+        if len(matches) >= 2
+    )
+    return index, warnings
 
 
 class FencedIndices(NamedTuple):
