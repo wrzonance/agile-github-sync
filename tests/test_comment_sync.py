@@ -943,3 +943,26 @@ def test_execute_one_action_warns_not_crashes_when_ap_response_shape_is_invalid(
     assert "WARN" in capsys.readouterr().err
 
 
+
+
+# --- issue #98: prefetched GitHub comment snapshots ------------------------------------------
+
+def test_fetch_both_sides_uses_prefetched_gh_comments(monkeypatch):
+    """A batched-graph comment list bypasses the per-issue ghkit read entirely; the AgilePlace
+    side still fetches as today."""
+    monkeypatch.setattr(ghkit, "list_issue_comments",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("prefetched snapshot must bypass the per-issue read")))
+    monkeypatch.setattr(agileplace_comments, "list_comments", lambda cfg, cid: [])
+    gh = [{"id": 1, "author": "alice", "body": "hi", "created": "c", "edited": "e"}]
+
+    assert comment_sync._fetch_both_sides({}, 5, "C1", gh_comments=gh) == (gh, [])
+
+
+def test_fetch_both_sides_without_prefetch_reads_per_issue(monkeypatch):
+    """gh_comments=None keeps today's per-issue read (the overflow/normalization fallback)."""
+    gh = [{"id": 2, "author": None, "body": "b", "created": "c", "edited": "e"}]
+    monkeypatch.setattr(ghkit, "list_issue_comments", lambda cfg, number: gh)
+    monkeypatch.setattr(agileplace_comments, "list_comments", lambda cfg, cid: [])
+
+    assert comment_sync._fetch_both_sides({}, 5, "C1", gh_comments=None) == (gh, [])
