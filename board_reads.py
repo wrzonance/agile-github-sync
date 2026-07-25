@@ -32,6 +32,14 @@ class BoardReads(NamedTuple):
     children: dict[str, frozenset | None]
 
 
+class ApCommentsFailure(NamedTuple):
+    """Failure sentinel for one card's prefetched comment read, carrying list_comments' own
+    SystemExit detail across the pool boundary so comment_sync prints the exact serial-format
+    WARN. Consumed duck-typed (a `.detail` attribute on a non-list) -- comment_sync never needs
+    to import this module."""
+    detail: str
+
+
 def _description(cfg: dict, card_id: str) -> str:
     fresh = agileplace.get_card(cfg, card_id)
     return fresh.get("description") or ""
@@ -40,13 +48,16 @@ def _description(cfg: dict, card_id: str) -> str:
 def _comments(cfg: dict, card_id: str):
     try:
         return agileplace_comments.list_comments(cfg, card_id)
-    except SystemExit:  # list_comments' own tri-state idiom -- same catch _fetch_both_sides uses
-        return None
+    except SystemExit as exc:  # list_comments' tri-state idiom -- carry the detail, don't print
+        return ApCommentsFailure(detail=str(exc))
 
 
 def gather_board_reads(cfg: dict, *, description_card_ids, dependency_card_ids,
                        comment_card_ids, child_parent_ids, max_workers: int = 8) -> BoardReads:
-    """Fetch all four read families concurrently under one bound; never raises."""
+    """Fetch all four read families concurrently under one bound; never raises. `max_workers`
+    overrides clamp to 1..8 -- the documented AgilePlace rate-limit ceiling holds regardless of
+    caller input, and 0/negative can never raise out of the executor."""
+    max_workers = max(1, min(8, max_workers))
     jobs = (
         [("desc", cid, _description) for cid in description_card_ids]
         + [("deps", cid, agileplace.card_dependencies) for cid in dependency_card_ids]

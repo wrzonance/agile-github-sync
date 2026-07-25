@@ -483,9 +483,10 @@ def _fetch_both_sides(cfg: dict, number: int, card_id,
     today's per-issue read (the batch's overflow/normalization fallback path).
 
     `ap_comments` (issue #99) carries the card's hydrated `_prefetchedApComments` snapshot:
-    a list is used verbatim, None means the prefetch's own AgilePlace read failed (skip this
-    issue with the same WARN the serial SystemExit branch prints), and _PREFETCH_MISS (no
-    hydration ran) keeps today's serial read."""
+    a list is used verbatim; any non-list (board_reads' duck-typed failure sentinel with the
+    read's own `.detail`, or a bare None) means the prefetch's AgilePlace read failed -- skip
+    this issue printing the serial branch's exact WARN format; _PREFETCH_MISS (no hydration
+    ran) keeps today's serial read."""
     if gh_comments is None:
         gh_comments = ghkit.list_issue_comments(cfg, number)
     if gh_comments is None:
@@ -499,9 +500,10 @@ def _fetch_both_sides(cfg: dict, number: int, card_id,
             print(f"WARN  issue #{number} comment sync skipped: AgilePlace comment read failed: "
                   f"{exc}", file=sys.stderr)
             return None
-    elif ap_comments is None:
-        print(f"WARN  issue #{number} comment sync skipped: AgilePlace comment read failed "
-              f"(prefetch)", file=sys.stderr)
+    elif not isinstance(ap_comments, list):
+        detail = getattr(ap_comments, "detail", "prefetched read failed")
+        print(f"WARN  issue #{number} comment sync skipped: AgilePlace comment read failed: "
+              f"{detail}", file=sys.stderr)
         return None
     return gh_comments, ap_comments
 

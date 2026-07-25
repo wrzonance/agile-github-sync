@@ -206,3 +206,11 @@ def test_comments_clause_is_included_with_identity_or_when_forced(monkeypatch):
     captured.clear()
     ghkit_snapshot.fetch_issue_graph(CFG, include_comments=True)  # smoke's explicit override
     assert "comments(" in captured["query"]
+
+
+def test_run_page_treats_launch_failures_as_recoverable(monkeypatch):
+    """CodeRabbit (#102): ghkit.run can surface SystemExit or FileNotFoundError (gh missing) --
+    both must fall back to None so the whole graph path stays fail-closed."""
+    for exc in (SystemExit("boom"), FileNotFoundError("gh not on PATH")):
+        monkeypatch.setattr(ghkit, "run", Mock(side_effect=exc))
+        assert ghkit_snapshot._run_page(CFG, CTX, ghkit_snapshot._query(True), None) is None

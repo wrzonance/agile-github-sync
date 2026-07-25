@@ -61,7 +61,7 @@ def test_worker_failures_map_to_unknown_not_raise(monkeypatch):
 
     assert "A" not in reads.descriptions      # absent -> the serial lazy fallback path
     assert reads.dependencies == {"B": None}  # None -> "state unknown", today's skip contract
-    assert reads.ap_comments == {"A": None}   # None -> "skip this issue", today's contract
+    assert reads.ap_comments["A"].detail == "AP read failed"  # sentinel -> skip, detail kept
     assert reads.children == {"E": None}      # None -> add-only authority, today's contract
 
 
@@ -174,7 +174,7 @@ def test_hydrate_failed_reads_keep_todays_unknown_semantics(monkeypatch):
 
     assert "description" not in card            # absent -> serial get_card fails loud, as today
     assert card["_prefetchedDeps"] is None      # None -> "state unknown", consumer skips
-    assert card["_prefetchedApComments"] is None
+    assert card["_prefetchedApComments"].detail == "read failed"  # sentinel -> skip w/ detail
     assert card["_prefetchedChildIds"] is None  # None -> add-only authority
 
 
@@ -191,3 +191,40 @@ def test_hydrate_skips_dependency_prefetch_when_reconciliation_is_off(monkeypatc
                                   prefetch_deps=False)
 
     assert "_prefetchedDeps" not in card
+
+
+def test_max_workers_is_clamped_to_the_documented_ceiling(monkeypatch):
+    """CodeRabbit (#102): an override above 8 must not defeat the AgilePlace rate-limit bound,
+    and 0/negative must not raise (the never-raises contract) -- values clamp to 1..8."""
+    seen = {}
+    real_pool = board_reads.ThreadPoolExecutor
+
+    class SpyPool(real_pool):
+        def __init__(self, max_workers=None, **kwargs):
+            seen["workers"] = max_workers
+            super().__init__(max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(board_reads, "ThreadPoolExecutor", SpyPool)
+    monkeypatch.setattr(agileplace, "card_dependencies", lambda _cfg, cid: [])
+
+    board_reads.gather_board_reads({}, description_card_ids=[], dependency_card_ids=["A"],
+                                   comment_card_ids=[], child_parent_ids=[], max_workers=99)
+    assert seen["workers"] == 8
+
+    board_reads.gather_board_reads({}, description_card_ids=[], dependency_card_ids=["A"],
+                                   comment_card_ids=[], child_parent_ids=[], max_workers=0)
+    assert seen["workers"] == 1  # and no ValueError
+
+
+def test_comment_read_failure_carries_the_serial_warn_detail(monkeypatch):
+    """CodeRabbit (#102): the prefetch must not flatten list_comments' SystemExit detail into a
+    generic message -- the failure sentinel carries it for comment_sync's serial-format WARN."""
+    monkeypatch.setattr(agileplace_comments, "list_comments",
+                        Mock(side_effect=SystemExit("AgilePlace GET card/C1/comment failed: HTTP 500")))
+
+    reads = board_reads.gather_board_reads({}, description_card_ids=[], dependency_card_ids=[],
+                                           comment_card_ids=["C1"], child_parent_ids=[])
+
+    failure = reads.ap_comments["C1"]
+    assert not isinstance(failure, list)
+    assert failure.detail == "AgilePlace GET card/C1/comment failed: HTTP 500"

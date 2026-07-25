@@ -961,7 +961,7 @@ def test_main_hydrates_board_reads_once_before_reconciliation(tmp_path):
         sync.main()
 
     hydrate.assert_called_once()
-    call_cfg, call_online, call_syncable, _call_card_for, call_epics = hydrate.call_args.args
+    _call_cfg, call_online, call_syncable, _call_card_for, call_epics = hydrate.call_args.args
     assert call_online is True
     assert [i["number"] for i in call_syncable] == [_issue()["number"]]
     assert call_epics == []
