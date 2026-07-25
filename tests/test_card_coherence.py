@@ -582,8 +582,10 @@ def test_fence_run_indices_never_mutates_inputs_and_never_raises():
     active = [{"url": "https://github.com/o/r/issues/1", "title": "one", "number": 1}]
     retired = [{"url": "https://github.com/o/r/issues/2", "title": "two", "number": 2,
                "state_reason": "NOT_PLANNED"}]
+    # The retired card carries a customId so this fixture also exercises fence_run_indices'
+    # fence_cid_index-backed retirement index (issue #95), not just the customId-less path.
     all_card_by_url = {"https://github.com/o/r/issues/1": {"id": "100"},
-                       "https://github.com/o/r/issues/2": {"id": "200"}}
+                       "https://github.com/o/r/issues/2": {"id": "200", "customId": "ZK-9"}}
     contested = {"100": {active[0]["url"], "https://github.com/o/r/issues/3"}}
     active_before = copy.deepcopy(active)
     retired_before = copy.deepcopy(retired)
