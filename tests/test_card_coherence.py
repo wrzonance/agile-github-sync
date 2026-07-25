@@ -11,11 +11,13 @@ an error. Run: pytest -q
 import copy
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from card_coherence import (  # noqa: E402
     contested_cards,
+    fence_cid_index,
     fence_run_indices,
     filter_poisoned_edges,
     laneid_op_value,
@@ -182,6 +184,238 @@ def test_contested_cards_never_raises_on_malformed_value_types():
     ]
     all_card_by_cid = {"T": {"id": 800}}
     assert contested_cards(issues, {}, all_card_by_cid) == {}
+
+
+# --- fence_cid_index (issue #95) -----------------------------------------------
+
+def test_fence_cid_index_is_pure():
+    """Never mutates `cards`, and never raises for the malformed shapes the rest of this module
+    already tolerates (missing customId, missing id, non-dict customId, etc)."""
+    cards = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2},  # no customId at all
+        {"id": 3, "customId": {"value": "OTHER"}},
+    ]
+    cards_before = copy.deepcopy(cards)
+
+    fence_cid_index(cards)
+
+    assert cards == cards_before
+    # Malformed/empty inputs must never raise.
+    assert fence_cid_index([]) == ({}, {}, ())
+    assert fence_cid_index([{}]) == ({}, {}, ())
+
+
+def test_fence_cid_index_indexes_every_uncontested_card_by_its_normalized_key():
+    cards = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2, "customId": {"value": "OTHER"}},
+    ]
+    index, _collisions, warnings = fence_cid_index(cards)
+    assert index == {"KEY": cards[0], "OTHER": cards[1]}
+    assert warnings == ()
+
+
+def test_fence_cid_index_never_silently_overwrites_a_collision():
+    """Two cards normalizing to the same key must NOT last-wins into the index -- unlike a plain
+    dict comprehension, the later card must never silently clobber the earlier one."""
+    first = {"id": 1, "customId": "KEY"}
+    second = {"id": 2, "customId": "KEY"}
+    index, _, _ = fence_cid_index([first, second])
+    assert "KEY" not in index
+    assert index == {}
+
+
+def test_fence_cid_index_collides_old_format_against_new_header_format():
+    """issue #93: an old-format customId ('0C1') and a new header-format customId written for the
+    same key ('0C1 (GitHub Issue #5)') both normalize via header_match_key to '0C1' -- fence_cid_index
+    must treat them as the same colliding key (mid-transition duplicate), not two independent ones."""
+    old_format = {"id": 1, "customId": "0C1"}
+    new_format = {"id": 2, "customId": "0C1 (GitHub Issue #5)"}
+    index, _collisions, warnings = fence_cid_index([old_format, new_format])
+    assert index == {}
+    assert warnings == (
+        "WARN  customId 0C1 claimed by 2 cards, excluding from index: ['1', '2']",
+    )
+
+
+def test_fence_cid_index_excludes_all_colliding_cards_not_just_the_losers():
+    """Fencing removes EVERY card in the collision group from the index, not just the second (or
+    all-but-one) -- neither the first- nor the last-seen card survives."""
+    cards = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2, "customId": "KEY"},
+        {"id": 3, "customId": "KEY"},
+    ]
+    index, _, _ = fence_cid_index(cards)
+    assert index == {}
+
+
+def test_fence_cid_index_warns_once_per_colliding_key_naming_every_card():
+    cards = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2, "customId": "KEY"},
+    ]
+    _, _, warnings = fence_cid_index(cards)
+    assert warnings == (
+        "WARN  customId KEY claimed by 2 cards, excluding from index: ['1', '2']",
+    )
+
+
+def test_fence_cid_index_warning_count_matches_number_of_colliding_keys():
+    """One collision at 'KEY' and a separate, independent collision at 'OTHER' produce exactly two
+    warnings -- an uncontested card ('SOLO') produces none."""
+    cards = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2, "customId": "KEY"},
+        {"id": 3, "customId": "OTHER"},
+        {"id": 4, "customId": "OTHER"},
+        {"id": 5, "customId": "SOLO"},
+    ]
+    index, _collisions, warnings = fence_cid_index(cards)
+    assert index == {"SOLO": cards[4]}
+    assert len(warnings) == 2
+
+
+def test_fence_cid_index_excludes_cards_with_no_customid():
+    cards = [
+        {"id": 1},
+        {"id": 2, "customId": ""},
+        {"id": 3, "customId": {"value": ""}},
+    ]
+    index, _collisions, warnings = fence_cid_index(cards)
+    assert index == {}
+    assert warnings == ()
+
+
+def test_fence_cid_index_is_deterministic_regardless_of_input_order():
+    forward = [
+        {"id": 1, "customId": "KEY"},
+        {"id": 2, "customId": "KEY"},
+        {"id": 3, "customId": "OTHER"},
+        {"id": 4, "customId": "OTHER"},
+    ]
+    backward = list(reversed(forward))
+
+    index_forward, _, warnings_forward = fence_cid_index(forward)
+    index_backward, _, warnings_backward = fence_cid_index(backward)
+
+    assert index_forward == index_backward == {}
+    assert warnings_forward == warnings_backward == (
+        "WARN  customId KEY claimed by 2 cards, excluding from index: ['1', '2']",
+        "WARN  customId OTHER claimed by 2 cards, excluding from index: ['3', '4']",
+    )
+
+
+def test_fence_cid_index_warning_ids_are_sorted_regardless_of_collision_order():
+    cards = [
+        {"id": 9, "customId": "KEY"},
+        {"id": 2, "customId": "KEY"},
+        {"id": 5, "customId": "KEY"},
+    ]
+    _, _, warnings = fence_cid_index(cards)
+    assert warnings == (
+        "WARN  customId KEY claimed by 3 cards, excluding from index: ['2', '5', '9']",
+    )
+
+
+def test_fence_cid_index_treats_missing_id_as_unknown_in_warning():
+    cards = [
+        {"customId": "KEY"},           # no id at all
+        {"id": None, "customId": "KEY"},  # falsy id
+    ]
+    _, _, warnings = fence_cid_index(cards)
+    assert warnings == (
+        "WARN  customId KEY claimed by 2 cards, excluding from index: "
+        "['<unknown>', '<unknown>']",
+    )
+
+
+def test_fence_cid_index_accepts_a_tuple_as_well_as_a_list():
+    """`Iterable[dict]` must genuinely cover both call sites: sync.py passes a list, card_coherence's
+    own fence_run_indices passes a tuple (`retired_cards`)."""
+    cards = ({"id": 1, "customId": "KEY"}, {"id": 2, "customId": "OTHER"})
+    index, _collisions, warnings = fence_cid_index(cards)
+    assert index == {"KEY": cards[0], "OTHER": cards[1]}
+    assert warnings == ()
+
+
+def test_fence_cid_index_same_object_appearing_twice_is_not_a_collision():
+    """The module docstring requires collision detection to be by identity/id, not raw list
+    membership: the SAME physical card dict appearing more than once in `cards` (as happens at
+    fence_run_indices' retirement call site when two different retiring issues' external links
+    both resolve to the same card) must still index cleanly -- not be fenced out as a bogus
+    >= 2-card collision naming the same id twice."""
+    card = {"id": 1, "customId": "KEY"}
+    index, _collisions, warnings = fence_cid_index([card, card])
+    assert index == {"KEY": card}
+    assert warnings == ()
+
+
+def test_fence_cid_index_distinct_dict_objects_sharing_the_same_id_are_not_a_collision():
+    """Two distinct dict objects that denote the same card (matching non-empty string ids) must be
+    deduplicated the same way as literal identity -- 'compared by identity/id, not object
+    equality' per the module docstring."""
+    first = {"id": 1, "customId": "KEY"}
+    second = {"id": 1, "customId": "KEY"}
+    index, _collisions, warnings = fence_cid_index([first, second])
+    assert index == {"KEY": first}
+    assert warnings == ()
+
+
+def test_fence_cid_index_genuine_collision_still_fences_when_a_duplicate_is_also_present():
+    """A real 2-distinct-card collision must still be fenced even when one of the two ids also
+    appears more than once in the input -- the dedup-by-identity must not mask an actual
+    collision between genuinely distinct cards."""
+    card_a = {"id": 1, "customId": "KEY"}
+    card_b = {"id": 2, "customId": "KEY"}
+    index, _collisions, warnings = fence_cid_index([card_a, card_a, card_b])
+    assert index == {}
+    assert warnings == (
+        "WARN  customId KEY claimed by 2 cards, excluding from index: ['1', '2']",
+    )
+
+
+def test_fence_cid_index_collision_scan_does_not_call_same_card_for_id_bearing_cards():
+    """Complexity pin (review follow-up on issue #95): the module docstring promises 'O(n) + O(k)
+    over colliding keys, no O(n^2) comparison pass', but the dedup-by-identity check used to scan
+    same_card() against every already-seen card in a colliding key's bucket -- O(m) per card, O(n^2)
+    total for a large group of DISTINCT id-bearing cards that all collide on one key (e.g. 4000
+    cards sharing one bad customId from a bulk import/data-entry bug). Every card here carries its
+    own unique, non-empty id, so the O(1) id-set path must handle every one of them -- same_card
+    must never be called at all (it's needed only as the fallback for id-less cards, which have no
+    id to dedup by)."""
+    cards = [{"id": str(i), "customId": "KEY"} for i in range(4000)]
+
+    with patch("card_coherence.same_card", wraps=same_card) as spy:
+        index, _collisions, warnings = fence_cid_index(cards)
+
+    assert index == {}
+    assert len(warnings) == 1
+    assert spy.call_count == 0, (
+        f"same_card was called {spy.call_count} times deduping 4000 id-bearing cards -- the "
+        "id-bearing path must dedupe via an O(1) seen-ids set, never scanning same_card against "
+        "the whole colliding bucket (that reintroduces the O(n^2) pass the invariant forbids)")
+
+
+def test_fence_cid_index_idless_dedup_still_uses_same_card_scoped_to_idless_cards_only():
+    """The same_card fallback must still fire for id-less cards (the case it exists for), and its
+    scan must stay scoped to the id-less cards sharing that key -- not the whole (potentially huge)
+    id-bearing bucket. One id-less card repeated (by object identity) among many distinct id-bearing
+    cards on the same key must dedupe to a single entry, without inflating same_card's call count
+    anywhere near the id-bearing bucket's size."""
+    idless = {"customId": "KEY"}  # no id at all
+    id_bearing = [{"id": str(i), "customId": "KEY"} for i in range(500)]
+    cards = [idless, idless, *id_bearing]
+
+    with patch("card_coherence.same_card", wraps=same_card) as spy:
+        index, _collisions, warnings = fence_cid_index(cards)
+
+    assert index == {}
+    assert len(warnings) == 1
+    # Only the second `idless` occurrence needs a same_card scan (against the one id-less card
+    # already recorded for this key) -- the 500 id-bearing cards never touch same_card.
+    assert spy.call_count == 1
 
 
 # --- lane_conflict -----------------------------------------------------------
@@ -423,12 +657,61 @@ def test_fence_run_indices_defers_an_active_issue_whose_card_is_held_by_retireme
     assert result.warnings[0].startswith("WARN  deferring active card [KEY]: customId is held by")
 
 
+def test_fence_run_indices_defers_two_active_issues_sharing_a_fenced_customid():
+    """issue #95 (Codex draft review): a customId fenced out of the board index for colliding on
+    >= 2 cards must ALSO defer the issues that fall back to it. Two active issues sharing that key,
+    neither URL-matched, would otherwise escape contested_cards() and silently collapse onto one
+    created/reinserted card -- so both customId-only claimants of the multiply-claimed fenced key
+    are deferred."""
+    a = {"url": "https://github.com/o/r/issues/7", "title": "[5] alpha", "number": 7}
+    b = {"url": "https://github.com/o/r/issues/8", "title": "[5] beta", "number": 8}
+    cid_collisions = {"5": ["600", "601"]}
+
+    result = fence_run_indices({}, [a, b], [], {}, {}, cid_collisions)
+
+    assert result.syncable_issues == [], "both issues on the fenced key are deferred"
+    defers = [w for w in result.warnings if w.startswith("WARN  deferring active card [5]")]
+    assert len(defers) == 2
+    assert "600" in defers[0] and "601" in defers[0]
+
+
+def test_fence_run_indices_keeps_a_lone_active_issue_on_a_fenced_customid():
+    """A SINGLE active issue on a fenced customId is safe -- it just gets a fresh card downstream,
+    with no sibling to collapse onto it -- so it must NOT be deferred (deferring it would regress
+    the intended single-issue create path). Deferral is reserved for >= 2 sharing claimants."""
+    lone = {"url": "https://github.com/o/r/issues/5", "title": "[5] widget", "number": 5}
+    cid_collisions = {"5": ["600", "601"]}
+
+    result = fence_run_indices({}, [lone], [], {}, {}, cid_collisions)
+
+    assert result.syncable_issues == [lone], "a lone claimant of a fenced key stays syncable"
+    assert result.warnings == ()
+
+
+def test_fence_run_indices_url_matched_issue_on_a_fenced_customid_is_not_deferred():
+    """Two active issues share a fenced customId, but one matches a card by URL: the URL match is
+    authoritative (mirrors _matching_card's URL-first precedence) and stays syncable; only the
+    customId-only claimant with no URL match is deferred."""
+    url_matched = {"url": "https://github.com/o/r/issues/7", "title": "[5] alpha", "number": 7}
+    cid_only = {"url": "https://github.com/o/r/issues/8", "title": "[5] beta", "number": 8}
+    all_card_by_url = {url_matched["url"]: {"id": "900"}}
+    cid_collisions = {"5": ["600", "601"]}
+
+    result = fence_run_indices({}, [url_matched, cid_only], [], all_card_by_url, {}, cid_collisions)
+
+    assert result.syncable_issues == [url_matched], "URL-matched issue is authoritative, not deferred"
+    defers = [w for w in result.warnings if w.startswith("WARN  deferring active card [5]")]
+    assert len(defers) == 1, "only the customId-only claimant defers"
+
+
 def test_fence_run_indices_never_mutates_inputs_and_never_raises():
     active = [{"url": "https://github.com/o/r/issues/1", "title": "one", "number": 1}]
     retired = [{"url": "https://github.com/o/r/issues/2", "title": "two", "number": 2,
                "state_reason": "NOT_PLANNED"}]
+    # The retired card carries a customId so this fixture also exercises fence_run_indices'
+    # fence_cid_index-backed retirement index (issue #95), not just the customId-less path.
     all_card_by_url = {"https://github.com/o/r/issues/1": {"id": "100"},
-                       "https://github.com/o/r/issues/2": {"id": "200"}}
+                       "https://github.com/o/r/issues/2": {"id": "200", "customId": "ZK-9"}}
     contested = {"100": {active[0]["url"], "https://github.com/o/r/issues/3"}}
     active_before = copy.deepcopy(active)
     retired_before = copy.deepcopy(retired)
@@ -461,3 +744,140 @@ def test_retirement_reservation_matches_a_header_format_retiring_card():
     assert result.syncable_issues == [], "the active issue must be deferred, not adopt the retiring card"
     assert len(result.warnings) == 1
     assert result.warnings[0].startswith("WARN  deferring active card [KEY]: customId is held by")
+
+
+# --- fence_run_indices <- fence_cid_index wiring (issue #95, retirement site) --
+
+def test_fence_run_indices_fences_colliding_retiring_cards_no_silent_overwrite():
+    """Two retired cards colliding on the same normalized customId must not let one silently win
+    the retirement-reservation index: neither is used to defer an active issue sharing that
+    customId, and the WARN naming both retired card ids is folded into fence_run_indices'
+    returned warnings."""
+    active = {"url": "https://github.com/o/r/issues/1", "title": "[KEY] one", "number": 1}
+    retired_a = {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2,
+                "state_reason": "NOT_PLANNED"}
+    retired_b = {"url": "https://github.com/o/r/issues/3", "title": "[KEY] three", "number": 3,
+                "state_reason": "NOT_PLANNED"}
+    card_a = {"id": "200", "customId": "KEY"}
+    card_b = {"id": "201", "customId": "KEY"}
+    all_card_by_url = {retired_a["url"]: card_a, retired_b["url"]: card_b}
+
+    result = fence_run_indices({}, [active], [retired_a, retired_b], all_card_by_url, {})
+
+    assert result.syncable_issues == [active], (
+        "colliding retirement customId must not silently defer the active issue to one winner")
+    assert len(result.warnings) == 1
+    assert result.warnings[0].startswith(
+        "WARN  customId KEY claimed by 2 cards, excluding from index: ['200', '201']")
+
+
+def test_fence_run_indices_warning_order_contested_then_collision_then_deferred():
+    """Warning-collision correspondence and print order: contested-card WARNs first, then
+    retirement-cid-collision WARNs (new, issue #95), then deferred-active-card WARNs -- matching
+    the docstring's documented order."""
+    issue1 = {"url": "https://github.com/o/r/issues/1", "title": "one", "number": 1}
+    issue2 = {"url": "https://github.com/o/r/issues/2", "title": "two", "number": 2}
+    contested = {"100": {issue1["url"], issue2["url"]}}
+
+    retired_a = {"url": "https://github.com/o/r/issues/3", "title": "[KEY] three", "number": 3,
+                "state_reason": "NOT_PLANNED"}
+    retired_b = {"url": "https://github.com/o/r/issues/4", "title": "[KEY] four", "number": 4,
+                "state_reason": "NOT_PLANNED"}
+    card_a = {"id": "200", "customId": "KEY"}
+    card_b = {"id": "201", "customId": "KEY"}
+
+    retired_c = {"url": "https://github.com/o/r/issues/5", "title": "[OTHER] five", "number": 5,
+                "state_reason": "NOT_PLANNED"}
+    card_c = {"id": "300", "customId": "OTHER"}
+    active_other = {"url": "https://github.com/o/r/issues/6", "title": "[OTHER] six", "number": 6}
+
+    all_card_by_url = {
+        retired_a["url"]: card_a,
+        retired_b["url"]: card_b,
+        retired_c["url"]: card_c,
+    }
+
+    result = fence_run_indices(
+        contested, [issue1, issue2, active_other],
+        [retired_a, retired_b, retired_c], all_card_by_url, {},
+    )
+
+    assert len(result.warnings) == 3
+    assert result.warnings[0].startswith("WARN  card 100 claimed by 2 issue URLs")
+    assert result.warnings[1].startswith("WARN  customId KEY claimed by 2 cards")
+    assert result.warnings[2].startswith("WARN  deferring active card [OTHER]:")
+
+
+def test_fence_run_indices_one_card_retired_via_two_urls_is_not_a_false_collision():
+    """One physical AgilePlace card can be reached via TWO different retired issues' external
+    links (two externalLinks on the same card, one per retiring issue) -- `retired_card_by_url`
+    then maps two different URLs onto the SAME card object, so `retired_cards` contains that one
+    card twice. That must not be mistaken for a 2-distinct-card customId collision: a third,
+    active issue sharing the retiring card's customId must still be deferred (the retirement
+    reservation working as intended), not slip through to the create-new-card path."""
+    retired_a = {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2,
+                "state_reason": "NOT_PLANNED"}
+    retired_b = {"url": "https://github.com/o/r/issues/3", "title": "[KEY] three", "number": 3,
+                "state_reason": "NOT_PLANNED"}
+    same_physical_card = {"id": "200", "customId": "KEY"}
+    all_card_by_url = {retired_a["url"]: same_physical_card, retired_b["url"]: same_physical_card}
+    active = {"url": "https://github.com/o/r/issues/4", "title": "[KEY] four", "number": 4}
+
+    result = fence_run_indices({}, [active], [retired_a, retired_b], all_card_by_url, {})
+
+    assert result.syncable_issues == [], (
+        "the active issue sharing the retiring card's customId must still be deferred, not "
+        "treated as unmatched due to a bogus same-card collision")
+    assert result.warnings == (
+        "WARN  deferring active card [KEY]: customId is held by retired card 200",
+    ), "no false customId-collision WARN naming the same card id twice"
+
+
+def test_fence_run_indices_retired_cid_index_is_a_drop_in_replacement_when_uncontested():
+    """When no collision occurs, fence_cid_index-backed wiring must produce the exact same
+    reservation behavior as the dict comprehension it replaces -- one retired card, one matching
+    customId key, one deferred active issue, no extra WARN."""
+    active = {"url": "https://github.com/o/r/issues/1", "title": "[KEY] one", "number": 1}
+    retired = {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2,
+              "state_reason": "NOT_PLANNED"}
+    retiring_card = {"id": "200", "customId": "KEY"}
+    all_card_by_url = {retired["url"]: retiring_card}
+
+    result = fence_run_indices({}, [active], [retired], all_card_by_url, {})
+
+    assert result.syncable_issues == [], "the active issue must still be deferred (drop-in behavior)"
+    assert len(result.warnings) == 1
+    assert result.warnings[0].startswith("WARN  deferring active card [KEY]: customId is held by")
+
+
+def test_board_wide_and_retirement_cid_index_both_warn_on_the_same_collision():
+    """sync.py calls fence_cid_index twice: once board-wide over EVERY card (main(), line 631,
+    building all_card_by_cid) and once retirement-scoped over just the retired subset (inside
+    fence_run_indices, building retired_card_by_cid). A customId collision among the RETIRED cards
+    is visible to both calls -- the retired cards are a subset of the board-wide `cards` list -- and
+    each call is independently pure, computing its own WARN. sync.py prints BOTH lines (naming the
+    same collision) rather than deduplicating across the two call sites; this pins that both call
+    sites actually surface the WARN for the same collision, so neither caller silently swallows the
+    one it doesn't own."""
+    retired_a = {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2,
+                "state_reason": "NOT_PLANNED"}
+    retired_b = {"url": "https://github.com/o/r/issues/3", "title": "[KEY] three", "number": 3,
+                "state_reason": "NOT_PLANNED"}
+    card_a = {"id": "200", "customId": "KEY"}
+    card_b = {"id": "201", "customId": "KEY"}
+    all_cards = [card_a, card_b]
+    all_card_by_url = {retired_a["url"]: card_a, retired_b["url"]: card_b}
+
+    # sync.py main(), line 631: the board-wide index built once over every card on the board.
+    board_wide_index, _, board_wide_warnings = fence_cid_index(all_cards)
+
+    # sync.py main(), line 642: fence_run_indices' own retirement-scoped fence_cid_index call.
+    fenced = fence_run_indices({}, [], [retired_a, retired_b], all_card_by_url, {})
+
+    expected_warning = "WARN  customId KEY claimed by 2 cards, excluding from index: ['200', '201']"
+    assert board_wide_index == {}
+    assert board_wide_warnings == (expected_warning,)
+    assert fenced.warnings == (expected_warning,)
+    # Both call sites independently surface the SAME collision -- a run hitting this shape prints
+    # the WARN twice (once per index it corrupts), not once.
+    assert board_wide_warnings == fenced.warnings

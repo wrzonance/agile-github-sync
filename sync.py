@@ -29,8 +29,9 @@ import ghkit_snapshot
 import ghproject
 import intake
 import vetting_latch
-from card_coherence import (contested_cards, fence_run_indices, filter_poisoned_edges,
-                            laneid_op_value, lane_conflict, poisoned_card_ids, same_card)
+from card_coherence import (contested_cards, fence_cid_index, fence_run_indices,
+                            filter_poisoned_edges, laneid_op_value, lane_conflict,
+                            poisoned_card_ids, same_card)
 from comment_sync import sync_comments
 from config import STATE_FILE, env_config
 from description_sync import sync_description
@@ -623,14 +624,13 @@ def main() -> None:
     cards = agileplace.list_cards(cfg) if online else []
     smap = cfg.get("stage_lane_map")
 
-    all_card_by_url, all_card_by_cid = {}, {}
+    all_card_by_url = {}
     for card in cards:
         for u in agileplace.card_external_urls(card):
             all_card_by_url[u] = card
-        cid = header_match_key(agileplace.custom_id_value(card))
-        if cid:
-            all_card_by_cid[cid] = card
-
+    all_card_by_cid, cid_collisions, cid_warnings = fence_cid_index(cards)
+    for line in cid_warnings:
+        print(line)
     # Issue #70/#75 Layer 1: before any card is touched, detect this run's issues that don't
     # resolve 1:1 onto AgilePlace cards (>= 2 distinct issues claiming the same card id, via
     # either the URL or the customId fallback match path) and exclude those cards from every
@@ -639,7 +639,7 @@ def main() -> None:
     # see that module's docstring for why (and why `contested_cards` is still called here, not
     # there).
     contested = contested_cards(active_issues + retired_issues, all_card_by_url, all_card_by_cid)
-    fenced = fence_run_indices(contested, active_issues, retired_issues, all_card_by_url, all_card_by_cid)
+    fenced = fence_run_indices(contested, active_issues, retired_issues, all_card_by_url, all_card_by_cid, cid_collisions)
     for line in fenced.warnings:
         print(line)
     contested_urls = fenced.contested_urls
