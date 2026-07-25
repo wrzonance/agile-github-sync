@@ -133,26 +133,32 @@ def test_colliding_customid_cards_are_excluded_from_the_board_index_not_last_win
 def test_fence_cid_index_warning_prints_before_contested_and_fence_run_indices_warnings(
         tmp_path, monkeypatch, capsys):
     """The board-index-build WARN must appear before any Layer 1 (contested_cards) WARN in run
-    output, matching the design's stated print order."""
+    output, matching the design's stated print order. This fixture genuinely produces BOTH kinds
+    of WARN in the same run -- a customId collision (via fence_cid_index at board-index-build time)
+    AND a contested card (via contested_cards/fence_run_indices, one card claimed by two issues'
+    external links) -- so the ordering assertion actually exercises the two lines interleaving,
+    rather than passing vacuously because only one of them exists."""
     old_format = _cid_only_card("100", "5")
     header_format = _cid_only_card("200", "GitHub Issue #5")
-    issue = _issue(5, "widget")
+    issue1 = _issue(1, "one")
+    issue2 = _issue(2, "two")
+    contested_card = {
+        "id": "999",
+        "customId": "unrelated",
+        "externalLinks": [{"url": issue1["url"]}, {"url": issue2["url"]}],
+    }
 
-    _run_main(tmp_path, monkeypatch, [issue], cards=[old_format, header_format])
+    _run_main(tmp_path, monkeypatch, [issue1, issue2],
+              cards=[old_format, header_format, contested_card])
 
     out = capsys.readouterr().out
     lines = out.splitlines()
     cid_index = next(i for i, line in enumerate(lines) if line.startswith("WARN  customId 5"))
-    later_warns = [line for line in lines[cid_index + 1:] if line.startswith("WARN  card")]
-    # There are no contested-card WARNs in this fixture (no card is claimed by >= 2 issue URLs),
-    # so this simply asserts the cid-index WARN doesn't appear after some contested-card WARN that
-    # doesn't exist here -- the real ordering guarantee (cid-index WARN before any "WARN card ..."
-    # deferral) is that no such earlier WARN exists.
-    assert not any(line.startswith("WARN  card") for line in lines[:cid_index]), (
+    contested_index = next(i for i, line in enumerate(lines) if line.startswith("WARN  card 999"))
+    assert cid_index < contested_index, (
         "the board-index-build customId WARN must print before contested_cards()/"
         "fence_run_indices() are invoked"
     )
-    assert later_warns == []
 
 
 def test_noncolliding_customid_card_still_matches_via_fallback_drop_in_replacement(

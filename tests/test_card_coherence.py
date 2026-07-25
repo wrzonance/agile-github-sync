@@ -339,6 +339,42 @@ def test_fence_cid_index_accepts_a_tuple_as_well_as_a_list():
     assert warnings == ()
 
 
+def test_fence_cid_index_same_object_appearing_twice_is_not_a_collision():
+    """The module docstring requires collision detection to be by identity/id, not raw list
+    membership: the SAME physical card dict appearing more than once in `cards` (as happens at
+    fence_run_indices' retirement call site when two different retiring issues' external links
+    both resolve to the same card) must still index cleanly -- not be fenced out as a bogus
+    >= 2-card collision naming the same id twice."""
+    card = {"id": 1, "customId": "KEY"}
+    index, warnings = fence_cid_index([card, card])
+    assert index == {"KEY": card}
+    assert warnings == ()
+
+
+def test_fence_cid_index_distinct_dict_objects_sharing_the_same_id_are_not_a_collision():
+    """Two distinct dict objects that denote the same card (matching non-empty string ids) must be
+    deduplicated the same way as literal identity -- 'compared by identity/id, not object
+    equality' per the module docstring."""
+    first = {"id": 1, "customId": "KEY"}
+    second = {"id": 1, "customId": "KEY"}
+    index, warnings = fence_cid_index([first, second])
+    assert index == {"KEY": first}
+    assert warnings == ()
+
+
+def test_fence_cid_index_genuine_collision_still_fences_when_a_duplicate_is_also_present():
+    """A real 2-distinct-card collision must still be fenced even when one of the two ids also
+    appears more than once in the input -- the dedup-by-identity must not mask an actual
+    collision between genuinely distinct cards."""
+    card_a = {"id": 1, "customId": "KEY"}
+    card_b = {"id": 2, "customId": "KEY"}
+    index, warnings = fence_cid_index([card_a, card_a, card_b])
+    assert index == {}
+    assert warnings == (
+        "WARN  customId KEY claimed by 2 cards, excluding from index: ['1', '2']",
+    )
+
+
 # --- lane_conflict -----------------------------------------------------------
 
 def test_lane_conflict_no_lane_op_is_a_noop():
@@ -680,6 +716,31 @@ def test_fence_run_indices_warning_order_contested_then_collision_then_deferred(
     assert result.warnings[0].startswith("WARN  card 100 claimed by 2 issue URLs")
     assert result.warnings[1].startswith("WARN  customId KEY claimed by 2 cards")
     assert result.warnings[2].startswith("WARN  deferring active card [OTHER]:")
+
+
+def test_fence_run_indices_one_card_retired_via_two_urls_is_not_a_false_collision():
+    """One physical AgilePlace card can be reached via TWO different retired issues' external
+    links (two externalLinks on the same card, one per retiring issue) -- `retired_card_by_url`
+    then maps two different URLs onto the SAME card object, so `retired_cards` contains that one
+    card twice. That must not be mistaken for a 2-distinct-card customId collision: a third,
+    active issue sharing the retiring card's customId must still be deferred (the retirement
+    reservation working as intended), not slip through to the create-new-card path."""
+    retired_a = {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2,
+                "state_reason": "NOT_PLANNED"}
+    retired_b = {"url": "https://github.com/o/r/issues/3", "title": "[KEY] three", "number": 3,
+                "state_reason": "NOT_PLANNED"}
+    same_physical_card = {"id": "200", "customId": "KEY"}
+    all_card_by_url = {retired_a["url"]: same_physical_card, retired_b["url"]: same_physical_card}
+    active = {"url": "https://github.com/o/r/issues/4", "title": "[KEY] four", "number": 4}
+
+    result = fence_run_indices({}, [active], [retired_a, retired_b], all_card_by_url, {})
+
+    assert result.syncable_issues == [], (
+        "the active issue sharing the retiring card's customId must still be deferred, not "
+        "treated as unmatched due to a bogus same-card collision")
+    assert result.warnings == (
+        "WARN  deferring active card [KEY]: customId is held by retired card 200",
+    ), "no false customId-collision WARN naming the same card id twice"
 
 
 def test_fence_run_indices_retired_cid_index_is_a_drop_in_replacement_when_uncontested():

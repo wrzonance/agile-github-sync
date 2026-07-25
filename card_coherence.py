@@ -180,14 +180,23 @@ def fence_cid_index(cards: Iterable[dict]) -> tuple[dict[str, dict], tuple[str, 
     excluded from the index (fenced, never last-wins) and one WARN naming every colliding card's id
     is appended to the returned warnings, sorted by key for determinism.
 
+    Collision detection is by card identity/id (same_card), not raw list membership: the same
+    physical card reached more than once in `cards` (e.g. fence_run_indices' retirement call site,
+    where two different retiring issues' external links can resolve to the same card) is folded
+    into a single entry per key rather than counted as a second, distinct claimant.
+
     Pure: never mutates `cards` or any card dict; never raises for any card dict shape
     agileplace.custom_id_value/card.get('id') already tolerate elsewhere in this module. Single
-    O(n) pass to group, then O(k) over the (typically tiny) set of colliding keys."""
+    O(n) pass to group (O(m) per card against that key's so-far-distinct bucket, m typically tiny),
+    then O(k) over the (typically tiny) set of colliding keys."""
     cards_by_key: dict[str, list[dict]] = {}
     for card in cards:
         key = header_match_key(agileplace.custom_id_value(card))
-        if key:
-            cards_by_key.setdefault(key, []).append(card)
+        if not key:
+            continue
+        bucket = cards_by_key.setdefault(key, [])
+        if not any(same_card(card, seen) for seen in bucket):
+            bucket.append(card)
 
     index = {key: matches[0] for key, matches in cards_by_key.items() if len(matches) == 1}
     warnings = tuple(
