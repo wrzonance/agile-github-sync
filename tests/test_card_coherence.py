@@ -225,6 +225,19 @@ def test_fence_cid_index_never_silently_overwrites_a_collision():
     assert index == {}
 
 
+def test_fence_cid_index_collides_old_format_against_new_header_format():
+    """issue #93: an old-format customId ('0C1') and a new header-format customId written for the
+    same key ('0C1 (GitHub Issue #5)') both normalize via header_match_key to '0C1' -- fence_cid_index
+    must treat them as the same colliding key (mid-transition duplicate), not two independent ones."""
+    old_format = {"id": 1, "customId": "0C1"}
+    new_format = {"id": 2, "customId": "0C1 (GitHub Issue #5)"}
+    index, warnings = fence_cid_index([old_format, new_format])
+    assert index == {}
+    assert warnings == (
+        "WARN  customId 0C1 claimed by 2 cards, excluding from index: ['1', '2']",
+    )
+
+
 def test_fence_cid_index_excludes_all_colliding_cards_not_just_the_losers():
     """Fencing removes EVERY card in the collision group from the index, not just the second (or
     all-but-one) -- neither the first- nor the last-seen card survives."""
