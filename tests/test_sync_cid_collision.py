@@ -190,3 +190,37 @@ def test_unrelated_url_matchable_issue_elsewhere_on_board_is_unaffected(
     # the collision among the other two cards.
     patch_card.assert_called_once()
     assert patch_card.call_args_list[0].args[2].get("id") == "999"
+
+
+def test_two_active_issues_sharing_a_fenced_customid_are_deferred_not_collapsed(
+        tmp_path, monkeypatch, capsys):
+    """Regression (issue #95, Codex draft review): fencing a colliding customId out of the board
+    index must not silently REOPEN the last-wins clobber one axis over. Two AgilePlace cards ('600',
+    '601') collide on customId '5' -- fenced from all_card_by_cid -- while TWO active issues both
+    carry a '[5]' prefix (issue_custom_id -> '5') and neither matches a card by URL. Pre-this-fix
+    both issues resolved to no card, escaped contested_cards(), and were both syncable: the first
+    created a fresh card registered under '5', the second then adopted THAT card via the reconciled
+    customId index and silently overwrote the first's header/metadata/description -- exactly the
+    data-loss the index fence was meant to stop, just moved from card-vs-card to issue-vs-issue.
+    Post-fix, a fenced customId shared by >= 2 active issues fails closed: BOTH customId-only
+    claimants are deferred (one WARN each), no card is created for either, and nothing is patched."""
+    first = _cid_only_card("600", "5")
+    second = _cid_only_card("601", "5")
+    issue_a = _issue(7, "[5] alpha")   # title_key -> '5'
+    issue_b = _issue(8, "[5] beta")    # title_key -> '5' (same fenced key, no URL match)
+
+    create_card, patch_card = _run_main(
+        tmp_path, monkeypatch, [issue_a, issue_b], cards=[first, second])
+
+    out = capsys.readouterr().out
+    # The board-index-build fence still fires once, naming both colliding cards.
+    index_warn = [line for line in out.splitlines()
+                  if line.startswith("WARN  customId 5 claimed by")]
+    assert len(index_warn) == 1 and "600" in index_warn[0] and "601" in index_warn[0]
+    # Both active issues are deferred rather than collapsed onto one card.
+    defer_warn = [line for line in out.splitlines()
+                  if line.startswith("WARN  deferring active card [5]")]
+    assert len(defer_warn) == 2, "each customId-only claimant of the fenced key is deferred"
+    # Fail closed: neither issue creates a card, and nothing is overwritten.
+    create_card.assert_not_called()
+    patch_card.assert_not_called()

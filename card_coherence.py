@@ -173,12 +173,20 @@ def same_card(left: dict | None, right: dict | None) -> bool:
     return bool(left_id) and left_id == right_id
 
 
-def fence_cid_index(cards: Iterable[dict]) -> tuple[dict[str, dict], tuple[str, ...]]:
+def fence_cid_index(
+        cards: Iterable[dict]) -> tuple[dict[str, dict], dict[str, list[str]], tuple[str, ...]]:
     """Build a customId -> card index over `cards`, keyed by
     header_match_key(agileplace.custom_id_value(card)). Cards with no customId (empty key) are
     excluded, same as before. When >= 2 cards normalize to the same non-empty key, ALL of them are
     excluded from the index (fenced, never last-wins) and one WARN naming every colliding card's id
     is appended to the returned warnings, sorted by key for determinism.
+
+    Returns a 3-tuple `(index, collisions, warnings)`. `collisions` maps each fenced key to its
+    sorted colliding card ids -- the machine-readable form of the same information the WARN strings
+    carry, so callers can act on a collision beyond printing it: sync.py's main() feeds it to
+    fence_run_indices so an active issue that would otherwise resolve to a fenced key via the
+    customId fallback is deferred rather than left to silently adopt whichever colliding card
+    reconciliation or card creation reinserts under that key downstream (issue #95).
 
     Collision detection is by card identity/id (same_card), not raw list membership: the same
     physical card reached more than once in `cards` (e.g. fence_run_indices' retirement call site,
@@ -217,13 +225,16 @@ def fence_cid_index(cards: Iterable[dict]) -> tuple[dict[str, dict], tuple[str, 
         cards_by_key.setdefault(key, []).append(card)
 
     index = {key: matches[0] for key, matches in cards_by_key.items() if len(matches) == 1}
-    warnings = tuple(
-        f"WARN  customId {key} claimed by {len(matches)} cards, excluding from index: "
-        f"{sorted(str(c.get('id') or '<unknown>') for c in matches)}"
-        for key, matches in sorted(cards_by_key.items())
+    collisions = {
+        key: sorted(str(c.get('id') or '<unknown>') for c in matches)
+        for key, matches in cards_by_key.items()
         if len(matches) >= 2
+    }
+    warnings = tuple(
+        f"WARN  customId {key} claimed by {len(ids)} cards, excluding from index: {ids}"
+        for key, ids in sorted(collisions.items())
     )
-    return index, warnings
+    return index, collisions, warnings
 
 
 class FencedIndices(NamedTuple):
@@ -240,21 +251,35 @@ class FencedIndices(NamedTuple):
 
 def fence_run_indices(contested: dict[str, set[str]], active_issues: list[dict],
                       retired_issues: list[dict], all_card_by_url: dict[str, dict],
-                      all_card_by_cid: dict[str, dict]) -> FencedIndices:
+                      all_card_by_cid: dict[str, dict],
+                      cid_collisions: dict[str, list[str]] | None = None) -> FencedIndices:
     """Apply Layer 1 fencing (the caller's already-computed `contested_cards()` result) to one run's
     raw card indices: exclude every contested card from both match indices and from retirement, then
     derive `syncable_issues` -- every active issue EXCEPT one whose own card is contested, OR whose
     external-link URL or customId is currently held by a DIFFERENT issue's retiring card (a
     'retirement reservation': retiring cards are matched by URL only, so a customId-only overlap
     with a retiring card must still defer the active issue, rather than let it adopt a card that's
-    about to move to Done out from under it).
+    about to move to Done out from under it), OR (issue #95) whose customId is claimed by >= 2 cards
+    board-wide AND shared by >= 2 active issues this run.
 
-    Pure: never mutates `contested`, `active_issues`, `retired_issues`, `all_card_by_url`, or
-    `all_card_by_cid`; never raises; no I/O -- every decision that would otherwise print is instead
-    appended to the returned `warnings` tuple, in the same order sync.py's main() used to print them:
-    contested-card WARNs first (sorted by card id), then retirement-cid-collision WARNs from
-    fence_cid_index (issue #95, sorted by colliding key), then one deferred-active-card WARN per
-    reservation, in `active_issues` order."""
+    `cid_collisions` is the caller's board-wide fence_cid_index(cards) collisions map (fenced
+    customId key -> sorted colliding card ids); default empty means 'no known collisions'. A fenced
+    customId is absent from `all_card_by_cid`, so an active issue with no authoritative URL match
+    whose customId is one of these keys resolves to no card in contested_cards() and escapes Layer 1.
+    A LONE such issue is safe -- it just gets a fresh card, nothing to clobber -- but when TWO OR MORE
+    active issues share that fenced key, reconciliation or card creation reinserts one colliding card
+    under the key and the later issue silently adopts it, overwriting the first (the exact last-wins
+    clobber issue #95 fences the index to prevent). Deferring every customId-only claimant of a
+    multiply-claimed fenced key from `syncable_issues` keeps the fence intact end-to-end.
+
+    Pure: never mutates `contested`, `active_issues`, `retired_issues`, `all_card_by_url`,
+    `all_card_by_cid`, or `cid_collisions`; never raises; no I/O -- every decision that would
+    otherwise print is instead appended to the returned `warnings` tuple, in the same order sync.py's
+    main() used to print them: contested-card WARNs first (sorted by card id), then
+    retirement-cid-collision WARNs from fence_cid_index (issue #95, sorted by colliding key), then
+    one deferred-active-card WARN per deferral (a retirement reservation, or an issue #95 customId
+    collision), in `active_issues` order."""
+    cid_collisions = cid_collisions or {}
     contested_urls = frozenset(u for urls in contested.values() for u in urls)
     warnings = [f"WARN  card {cid} claimed by {len(urls)} issue URLs, deferring: {sorted(urls)}"
                 for cid, urls in sorted(contested.items())]
@@ -269,7 +294,7 @@ def fence_run_indices(contested: dict[str, set[str]], active_issues: list[dict],
     def reserved_for_retirement(card):
         return any(card is retired or same_card(card, retired) for retired in retired_cards)
 
-    retired_card_by_cid, retired_cid_warnings = fence_cid_index(retired_cards)
+    retired_card_by_cid, _retired_collisions, retired_cid_warnings = fence_cid_index(retired_cards)
     warnings.extend(retired_cid_warnings)
     card_by_url = {
         url: card for url, card in all_card_by_url.items()
@@ -294,21 +319,43 @@ def fence_run_indices(contested: dict[str, set[str]], active_issues: list[dict],
             return "customId", custom_id_card
         return None
 
-    active_reservations = {
-        issue["url"]: reservation
-        for issue in active_issues if (reservation := retirement_reservation(issue))
+    active_cid_counts: dict[str, int] = {}
+    for issue in active_issues:
+        key = issue_custom_id(issue)
+        active_cid_counts[key] = active_cid_counts.get(key, 0) + 1
+
+    def defer_reason(issue):
+        """Why this active issue must be deferred from `syncable_issues` this run, or None. A
+        retirement reservation (a retiring card holds this issue's URL or customId) takes
+        precedence; failing that (issue #95), an issue with NO authoritative URL match whose customId
+        is both claimed by >= 2 cards board-wide (fenced out of the index) AND shared by >= 2 active
+        issues this run. A lone issue on a fenced key is safe to give a fresh card -- there is no
+        sibling to collapse onto it -- but two or more would resolve to whichever colliding card
+        reconciliation or card creation reinserts under that key and silently overwrite each other,
+        so all their customId-only claimants are deferred instead."""
+        reservation = retirement_reservation(issue)
+        if reservation:
+            kind, card = reservation
+            return f"{kind} is held by retired card {card.get('id') or '<unknown>'}"
+        key = issue_custom_id(issue)
+        colliding_ids = cid_collisions.get(key)
+        if colliding_ids and active_cid_counts.get(key, 0) >= 2 and not all_card_by_url.get(issue["url"]):
+            return (f"customId claimed by {len(colliding_ids)} cards {colliding_ids} and shared by "
+                    f"{active_cid_counts[key]} active issues")
+        return None
+
+    active_deferrals = {
+        issue["url"]: reason
+        for issue in active_issues if (reason := defer_reason(issue))
     }
     syncable_issues = [
         issue for issue in active_issues
-        if issue["url"] not in active_reservations and issue["url"] not in contested_urls
+        if issue["url"] not in active_deferrals and issue["url"] not in contested_urls
     ]
     for issue in active_issues:
-        reservation = active_reservations.get(issue["url"])
-        if reservation:
-            kind, card = reservation
-            warnings.append(
-                f"WARN  deferring active card [{issue_custom_id(issue)}]: {kind} is held by "
-                f"retired card {card.get('id') or '<unknown>'}")
+        reason = active_deferrals.get(issue["url"])
+        if reason:
+            warnings.append(f"WARN  deferring active card [{issue_custom_id(issue)}]: {reason}")
 
     return FencedIndices(card_by_url=card_by_url, card_by_cid=card_by_cid,
                          syncable_issues=syncable_issues, retired_card_by_url=retired_card_by_url,
