@@ -186,17 +186,35 @@ def fence_cid_index(cards: Iterable[dict]) -> tuple[dict[str, dict], tuple[str, 
     into a single entry per key rather than counted as a second, distinct claimant.
 
     Pure: never mutates `cards` or any card dict; never raises for any card dict shape
-    agileplace.custom_id_value/card.get('id') already tolerate elsewhere in this module. Single
-    O(n) pass to group (O(m) per card against that key's so-far-distinct bucket, m typically tiny),
-    then O(k) over the (typically tiny) set of colliding keys."""
+    agileplace.custom_id_value/card.get('id') already tolerate elsewhere in this module.
+
+    Complexity: a single O(n) pass. A card with a non-empty id dedupes via an O(1) seen-ids set
+    lookup per key (same_card's own id-equality branch, restated as a set membership test). Only
+    an id-less card (which same_card can only ever match by object identity, never by empty-id
+    equality -- see same_card's docstring) falls back to an identity scan, and that scan is scoped
+    to the (typically empty, never large) id-less cards seen for its key, not the whole bucket --
+    so even a large group of DISTINCT id-bearing cards colliding on one key (e.g. a bulk-import
+    customId collision) never triggers an O(n^2) comparison pass. Then O(k) over the (typically
+    tiny) set of colliding keys to build the warnings."""
     cards_by_key: dict[str, list[dict]] = {}
+    seen_ids_by_key: dict[str, set[str]] = {}
+    idless_by_key: dict[str, list[dict]] = {}
     for card in cards:
         key = header_match_key(agileplace.custom_id_value(card))
         if not key:
             continue
-        bucket = cards_by_key.setdefault(key, [])
-        if not any(same_card(card, seen) for seen in bucket):
-            bucket.append(card)
+        card_id = str(card.get("id") or "")
+        if card_id:
+            seen_ids = seen_ids_by_key.setdefault(key, set())
+            if card_id in seen_ids:
+                continue
+            seen_ids.add(card_id)
+        else:
+            idless = idless_by_key.setdefault(key, [])
+            if any(same_card(card, seen) for seen in idless):
+                continue
+            idless.append(card)
+        cards_by_key.setdefault(key, []).append(card)
 
     index = {key: matches[0] for key, matches in cards_by_key.items() if len(matches) == 1}
     warnings = tuple(

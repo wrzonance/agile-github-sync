@@ -11,6 +11,7 @@ an error. Run: pytest -q
 import copy
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -373,6 +374,48 @@ def test_fence_cid_index_genuine_collision_still_fences_when_a_duplicate_is_also
     assert warnings == (
         "WARN  customId KEY claimed by 2 cards, excluding from index: ['1', '2']",
     )
+
+
+def test_fence_cid_index_collision_scan_does_not_call_same_card_for_id_bearing_cards():
+    """Complexity pin (review follow-up on issue #95): the module docstring promises 'O(n) + O(k)
+    over colliding keys, no O(n^2) comparison pass', but the dedup-by-identity check used to scan
+    same_card() against every already-seen card in a colliding key's bucket -- O(m) per card, O(n^2)
+    total for a large group of DISTINCT id-bearing cards that all collide on one key (e.g. 4000
+    cards sharing one bad customId from a bulk import/data-entry bug). Every card here carries its
+    own unique, non-empty id, so the O(1) id-set path must handle every one of them -- same_card
+    must never be called at all (it's needed only as the fallback for id-less cards, which have no
+    id to dedup by)."""
+    cards = [{"id": str(i), "customId": "KEY"} for i in range(4000)]
+
+    with patch("card_coherence.same_card", wraps=same_card) as spy:
+        index, warnings = fence_cid_index(cards)
+
+    assert index == {}
+    assert len(warnings) == 1
+    assert spy.call_count == 0, (
+        f"same_card was called {spy.call_count} times deduping 4000 id-bearing cards -- the "
+        "id-bearing path must dedupe via an O(1) seen-ids set, never scanning same_card against "
+        "the whole colliding bucket (that reintroduces the O(n^2) pass the invariant forbids)")
+
+
+def test_fence_cid_index_idless_dedup_still_uses_same_card_scoped_to_idless_cards_only():
+    """The same_card fallback must still fire for id-less cards (the case it exists for), and its
+    scan must stay scoped to the id-less cards sharing that key -- not the whole (potentially huge)
+    id-bearing bucket. One id-less card repeated (by object identity) among many distinct id-bearing
+    cards on the same key must dedupe to a single entry, without inflating same_card's call count
+    anywhere near the id-bearing bucket's size."""
+    idless = {"customId": "KEY"}  # no id at all
+    id_bearing = [{"id": str(i), "customId": "KEY"} for i in range(500)]
+    cards = [idless, idless, *id_bearing]
+
+    with patch("card_coherence.same_card", wraps=same_card) as spy:
+        index, warnings = fence_cid_index(cards)
+
+    assert index == {}
+    assert len(warnings) == 1
+    # Only the second `idless` occurrence needs a same_card scan (against the one id-less card
+    # already recorded for this key) -- the 500 id-bearing cards never touch same_card.
+    assert spy.call_count == 1
 
 
 # --- lane_conflict -----------------------------------------------------------
@@ -758,3 +801,36 @@ def test_fence_run_indices_retired_cid_index_is_a_drop_in_replacement_when_uncon
     assert result.syncable_issues == [], "the active issue must still be deferred (drop-in behavior)"
     assert len(result.warnings) == 1
     assert result.warnings[0].startswith("WARN  deferring active card [KEY]: customId is held by")
+
+
+def test_board_wide_and_retirement_cid_index_both_warn_on_the_same_collision():
+    """sync.py calls fence_cid_index twice: once board-wide over EVERY card (main(), line 631,
+    building all_card_by_cid) and once retirement-scoped over just the retired subset (inside
+    fence_run_indices, building retired_card_by_cid). A customId collision among the RETIRED cards
+    is visible to both calls -- the retired cards are a subset of the board-wide `cards` list -- and
+    each call is independently pure, computing its own WARN. sync.py prints BOTH lines (naming the
+    same collision) rather than deduplicating across the two call sites; this pins that both call
+    sites actually surface the WARN for the same collision, so neither caller silently swallows the
+    one it doesn't own."""
+    retired_a = {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2,
+                "state_reason": "NOT_PLANNED"}
+    retired_b = {"url": "https://github.com/o/r/issues/3", "title": "[KEY] three", "number": 3,
+                "state_reason": "NOT_PLANNED"}
+    card_a = {"id": "200", "customId": "KEY"}
+    card_b = {"id": "201", "customId": "KEY"}
+    all_cards = [card_a, card_b]
+    all_card_by_url = {retired_a["url"]: card_a, retired_b["url"]: card_b}
+
+    # sync.py main(), line 631: the board-wide index built once over every card on the board.
+    board_wide_index, board_wide_warnings = fence_cid_index(all_cards)
+
+    # sync.py main(), line 642: fence_run_indices' own retirement-scoped fence_cid_index call.
+    fenced = fence_run_indices({}, [], [retired_a, retired_b], all_card_by_url, {})
+
+    expected_warning = "WARN  customId KEY claimed by 2 cards, excluding from index: ['200', '201']"
+    assert board_wide_index == {}
+    assert board_wide_warnings == (expected_warning,)
+    assert fenced.warnings == (expected_warning,)
+    # Both call sites independently surface the SAME collision -- a run hitting this shape prints
+    # the WARN twice (once per index it corrupts), not once.
+    assert board_wide_warnings == fenced.warnings
