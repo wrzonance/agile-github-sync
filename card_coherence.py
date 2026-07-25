@@ -224,9 +224,10 @@ def fence_run_indices(contested: dict[str, set[str]], active_issues: list[dict],
 
     Pure: never mutates `contested`, `active_issues`, `retired_issues`, `all_card_by_url`, or
     `all_card_by_cid`; never raises; no I/O -- every decision that would otherwise print is instead
-    appended to the returned `warnings` tuple, in the same order sync.py's main() used to print them
-    (contested-card WARNs first, sorted by card id; then one deferred-active-card WARN per
-    reservation, in `active_issues` order)."""
+    appended to the returned `warnings` tuple, in the same order sync.py's main() used to print them:
+    contested-card WARNs first (sorted by card id), then retirement-cid-collision WARNs from
+    fence_cid_index (issue #95, sorted by colliding key), then one deferred-active-card WARN per
+    reservation, in `active_issues` order."""
     contested_urls = frozenset(u for urls in contested.values() for u in urls)
     warnings = [f"WARN  card {cid} claimed by {len(urls)} issue URLs, deferring: {sorted(urls)}"
                 for cid, urls in sorted(contested.items())]
@@ -241,10 +242,8 @@ def fence_run_indices(contested: dict[str, set[str]], active_issues: list[dict],
     def reserved_for_retirement(card):
         return any(card is retired or same_card(card, retired) for retired in retired_cards)
 
-    retired_card_by_cid = {
-        header_match_key(agileplace.custom_id_value(card)): card
-        for card in retired_cards if agileplace.custom_id_value(card)
-    }
+    retired_card_by_cid, retired_cid_warnings = fence_cid_index(retired_cards)
+    warnings.extend(retired_cid_warnings)
     card_by_url = {
         url: card for url, card in all_card_by_url.items()
         if not reserved_for_retirement(card) and url not in contested_urls

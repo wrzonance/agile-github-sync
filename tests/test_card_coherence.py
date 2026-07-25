@@ -616,3 +616,82 @@ def test_retirement_reservation_matches_a_header_format_retiring_card():
     assert result.syncable_issues == [], "the active issue must be deferred, not adopt the retiring card"
     assert len(result.warnings) == 1
     assert result.warnings[0].startswith("WARN  deferring active card [KEY]: customId is held by")
+
+
+# --- fence_run_indices <- fence_cid_index wiring (issue #95, retirement site) --
+
+def test_fence_run_indices_fences_colliding_retiring_cards_no_silent_overwrite():
+    """Two retired cards colliding on the same normalized customId must not let one silently win
+    the retirement-reservation index: neither is used to defer an active issue sharing that
+    customId, and the WARN naming both retired card ids is folded into fence_run_indices'
+    returned warnings."""
+    active = {"url": "https://github.com/o/r/issues/1", "title": "[KEY] one", "number": 1}
+    retired_a = {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2,
+                "state_reason": "NOT_PLANNED"}
+    retired_b = {"url": "https://github.com/o/r/issues/3", "title": "[KEY] three", "number": 3,
+                "state_reason": "NOT_PLANNED"}
+    card_a = {"id": "200", "customId": "KEY"}
+    card_b = {"id": "201", "customId": "KEY"}
+    all_card_by_url = {retired_a["url"]: card_a, retired_b["url"]: card_b}
+
+    result = fence_run_indices({}, [active], [retired_a, retired_b], all_card_by_url, {})
+
+    assert result.syncable_issues == [active], (
+        "colliding retirement customId must not silently defer the active issue to one winner")
+    assert len(result.warnings) == 1
+    assert result.warnings[0].startswith(
+        "WARN  customId KEY claimed by 2 cards, excluding from index: ['200', '201']")
+
+
+def test_fence_run_indices_warning_order_contested_then_collision_then_deferred():
+    """Warning-collision correspondence and print order: contested-card WARNs first, then
+    retirement-cid-collision WARNs (new, issue #95), then deferred-active-card WARNs -- matching
+    the docstring's documented order."""
+    issue1 = {"url": "https://github.com/o/r/issues/1", "title": "one", "number": 1}
+    issue2 = {"url": "https://github.com/o/r/issues/2", "title": "two", "number": 2}
+    contested = {"100": {issue1["url"], issue2["url"]}}
+
+    retired_a = {"url": "https://github.com/o/r/issues/3", "title": "[KEY] three", "number": 3,
+                "state_reason": "NOT_PLANNED"}
+    retired_b = {"url": "https://github.com/o/r/issues/4", "title": "[KEY] four", "number": 4,
+                "state_reason": "NOT_PLANNED"}
+    card_a = {"id": "200", "customId": "KEY"}
+    card_b = {"id": "201", "customId": "KEY"}
+
+    retired_c = {"url": "https://github.com/o/r/issues/5", "title": "[OTHER] five", "number": 5,
+                "state_reason": "NOT_PLANNED"}
+    card_c = {"id": "300", "customId": "OTHER"}
+    active_other = {"url": "https://github.com/o/r/issues/6", "title": "[OTHER] six", "number": 6}
+
+    all_card_by_url = {
+        retired_a["url"]: card_a,
+        retired_b["url"]: card_b,
+        retired_c["url"]: card_c,
+    }
+
+    result = fence_run_indices(
+        contested, [issue1, issue2, active_other],
+        [retired_a, retired_b, retired_c], all_card_by_url, {},
+    )
+
+    assert len(result.warnings) == 3
+    assert result.warnings[0].startswith("WARN  card 100 claimed by 2 issue URLs")
+    assert result.warnings[1].startswith("WARN  customId KEY claimed by 2 cards")
+    assert result.warnings[2].startswith("WARN  deferring active card [OTHER]:")
+
+
+def test_fence_run_indices_retired_cid_index_is_a_drop_in_replacement_when_uncontested():
+    """When no collision occurs, fence_cid_index-backed wiring must produce the exact same
+    reservation behavior as the dict comprehension it replaces -- one retired card, one matching
+    customId key, one deferred active issue, no extra WARN."""
+    active = {"url": "https://github.com/o/r/issues/1", "title": "[KEY] one", "number": 1}
+    retired = {"url": "https://github.com/o/r/issues/2", "title": "[KEY] two", "number": 2,
+              "state_reason": "NOT_PLANNED"}
+    retiring_card = {"id": "200", "customId": "KEY"}
+    all_card_by_url = {retired["url"]: retiring_card}
+
+    result = fence_run_indices({}, [active], [retired], all_card_by_url, {})
+
+    assert result.syncable_issues == [], "the active issue must still be deferred (drop-in behavior)"
+    assert len(result.warnings) == 1
+    assert result.warnings[0].startswith("WARN  deferring active card [KEY]: customId is held by")
