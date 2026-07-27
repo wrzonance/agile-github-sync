@@ -79,6 +79,19 @@ Together, items 4 and 5 are what closes the fail-open optimistic-concurrency gap
 (`patch_card` no longer ever sends an unversioned PATCH). Both were confirmed live on 2026-07-20;
 the code still fails closed (refetch, validate, or abort) rather than assuming either shape.
 
+### Board `cardTypes[]` entry shape -- UNCONFIRMED, hedged in code
+
+`GET /io/board/{id}` is confirmed for `lanes[]` (row above), but the public io v2 docs do not pin
+down the shape of each `cardTypes[]` entry, and no recorded smoke run has ever printed one: the
+`typeId` smoke steps were added on 2026-07-22, after the last live validation session below. The
+code reads `id`, `isCardType`, and a display title -- and for that title accepts **`title` or
+`name`** (`card_types.board_type_title`), the same hedge `board_layout.lane_title` has always
+applied to lanes. Getting that key wrong is silent rather than loud: every board card type becomes
+invisible, every derived card type resolves to nothing, and each run just warns that the board
+"defines no such type". `python type_inventory.py` prints what the board actually returns, and
+`smoke.py`'s board-card-type step asserts at least one entry resolves. Replace this section with a
+confirmed row once a live run has been recorded.
+
 ## Model 2 additions, also [live-check]
 
 - `gh project` CLI shapes (`ghproject.py`, init `05`): `item-list --format json` (Status comes back

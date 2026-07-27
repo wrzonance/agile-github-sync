@@ -658,6 +658,29 @@ def _run_checks(cfg: dict, lane_id: str | None, run_id: str, created: list[str],
     _check_github_richtext_roundtrip(cfg, parent_id, results)
     _check_custom_id_header(cfg, parent_id, run_id, results)
     _check_issue_graph_batch(cfg, results)
+    _check_board_card_type_shape(cfg, results)
+
+
+def _check_board_card_type_shape(cfg: dict, results: list) -> None:
+    """Step 25: the board's own `cardTypes[]` entry shape, which the public io v2 docs do NOT pin
+    down (see API-VALIDATION.md). Read-only fact-finding plus one real assertion: at least one entry
+    must yield a title through card_types.board_type_title, the exact reader every typeId write
+    depends on. Getting that key wrong fails silently in production -- every board card type goes
+    invisible and each run merely warns that the board defines no such type -- so the raw keys of
+    the first entry are printed for the record whatever the outcome."""
+    _step(25, "board cardTypes[] entry shape (title/name key) -- unconfirmed in the io v2 docs")
+    entries = board_layout.board_layout(cfg).card_types
+    if not entries:
+        results.append(("board cardTypes[] entries are readable", None,
+                        "SKIP: this board has no card types configured at all"))
+        return
+    print(f"      first entry raw keys: {sorted(entries[0])}")
+    titled = [card_types.board_type_title(entry) for entry in entries]
+    eligible = [title for entry, title in zip(entries, titled)
+                if title and entry.get("isCardType")]
+    results.append(("board cardTypes[] titles resolve via board_type_title", any(titled),
+                    f"{len(entries)} entry(ies), {len(eligible)} eligible: "
+                    f"{', '.join(sorted(eligible)) or '<none>'}"))
 
 
 def _check_issue_graph_batch(cfg: dict, results: list) -> None:

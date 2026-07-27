@@ -270,6 +270,15 @@ PRE_CHANGE_TEST_COUNT = 1198
 # -- without these files listed, the passed_count >= PRE_CHANGE_TEST_COUNT floor alone would be the
 # only safety net for them, and its slack is smaller than several of these files' own test counts,
 # so one of them silently losing its tests would not be caught.
+#
+# The card-type mapping + description-recency change adds one wholly new test file
+# (tests/test_type_inventory.py) and leaves PRE_CHANGE_TEST_COUNT where #66 pinned it: the suite
+# only grew. Its sync.py delta is deliberately ZERO net lines -- sync.py sits at exactly the
+# 800-line hard cap, so both features were wired by editing existing call sites in place (two
+# argument additions) and putting every new line in card_types.py, description_sync.py, and two new
+# modules (timestamps.py, type_inventory.py). The inventory report is a standalone script rather
+# than a `sync.py --list-types` flag for that same reason, following probe_dependencies.py's and
+# smoke.py's existing precedent for read-only side scripts.
 NEW_TEST_FILES = (
     "tests/test_card_coherence.py",
     "tests/test_sync_contested_cards.py",
@@ -285,6 +294,7 @@ NEW_TEST_FILES = (
     "tests/test_comment_sync.py",
     "tests/test_ghkit_comments.py",
     "tests/test_sync_comments_call_site.py",
+    "tests/test_type_inventory.py",
 )
 
 

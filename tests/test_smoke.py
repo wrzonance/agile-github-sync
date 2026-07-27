@@ -533,3 +533,41 @@ def test_issue_graph_batch_failure_fails_the_run(tenant_env, capsys, monkeypatch
 
     assert smoke.main(["--yes"]) == 1
     assert "FAIL  issue-graph batched read (issue #98)" in capsys.readouterr().out
+
+
+def test_board_card_type_shape_step_resolves_a_name_keyed_entry(capsys, monkeypatch):
+    """Step 25: the io v2 cardTypes entry shape is unconfirmed (API-VALIDATION.md), so this step is
+    what would catch a live board keyed `name` instead of `title` -- the failure that otherwise
+    makes every board card type invisible and silently skips every typeId write."""
+    monkeypatch.setattr(smoke.board_layout, "board_layout", lambda cfg: smoke.board_layout.BoardLayout(
+        lanes=[], card_types=[{"id": "t1", "name": "Defect", "isCardType": True},
+                              {"id": "t2", "name": "Subtask", "isCardType": False}]))
+    results = []
+
+    smoke._check_board_card_type_shape({}, results)
+
+    assert results == [("board cardTypes[] titles resolve via board_type_title", True,
+                        "2 entry(ies), 1 eligible: Defect")]
+    assert "first entry raw keys: ['id', 'isCardType', 'name']" in capsys.readouterr().out
+
+
+def test_board_card_type_shape_step_fails_when_no_entry_yields_a_title(monkeypatch):
+    """A board that returns entries the reader cannot title is the exact silent-failure mode this
+    step exists to make loud -- it must FAIL, not skip."""
+    monkeypatch.setattr(smoke.board_layout, "board_layout", lambda cfg: smoke.board_layout.BoardLayout(
+        lanes=[], card_types=[{"id": "t1", "isCardType": True}]))
+    results = []
+
+    smoke._check_board_card_type_shape({}, results)
+
+    assert results[0][1] is False
+
+
+def test_board_card_type_shape_step_skips_informationally_on_a_typeless_board(monkeypatch):
+    monkeypatch.setattr(smoke.board_layout, "board_layout",
+                        lambda cfg: smoke.board_layout.BoardLayout(lanes=[], card_types=[]))
+    results = []
+
+    smoke._check_board_card_type_shape({}, results)
+
+    assert results[0][1] is None

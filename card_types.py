@@ -35,6 +35,12 @@ class CardTypeRule(NamedTuple):
 # issue's own derivation table. Within the label rules, order is immaterial in practice (each label
 # asserts a different target) but is pinned here anyway for determinism if an issue ever carries
 # more than one of these labels at once.
+#
+# These are only the DEFAULTS, used when .env sets no CARD_TYPE_MAP (see parse_card_type_map): they
+# name the card types of the board this tool was first written against, and no board is obliged to
+# use that vocabulary. A board whose types are e.g. Defect/Story/Task resolves none of them and
+# skips every typeId write -- exactly what CARD_TYPE_MAP exists to fix. Run `python type_inventory.py`
+# to list what each side actually offers.
 CARD_TYPE_RULES: tuple[CardTypeRule, ...] = (
     CardTypeRule(kind="issue_type", key="Bug", target="Bug"),
     CardTypeRule(kind="issue_type", key="Feature", target="New Feature"),
@@ -44,11 +50,76 @@ CARD_TYPE_RULES: tuple[CardTypeRule, ...] = (
 )
 
 
-def derive_card_type_name(issue: dict) -> str | None:
+# .env prefix -> CardTypeRule.kind. `type:` reads GitHub's NATIVE issue type (org-configured, listed
+# by ghkit.org_issue_types); `label:` reads an ordinary issue label. Nothing else is accepted -- an
+# unprefixed entry would have to be guessed as one or the other, and guessing which side of GitHub a
+# name refers to is exactly the ambiguity this map exists to remove.
+CARD_TYPE_MAP_KINDS: Mapping[str, str] = MappingProxyType({"type": "issue_type", "label": "label"})
+
+
+def parse_card_type_map(raw: str) -> tuple[CardTypeRule, ...]:
+    """Parse CARD_TYPE_MAP: ';'-separated `<kind>:<key>=<AgilePlace card type>` entries, e.g.
+    ``type:Bug=Defect; label:enhancement=Improvement``.
+
+    `<kind>` is `type` (a native GitHub issue type) or `label`; `<key>` is that type's/label's name
+    on the GitHub side; the value is the card type TITLE as your AgilePlace board spells it. Entries
+    are evaluated in the order written -- FIRST match wins for an issue matching several of them --
+    so put the rule that should outrank the others first (the built-in defaults put native types
+    ahead of labels for exactly that reason).
+
+    Blank/unset returns () meaning "use CARD_TYPE_RULES", so an untouched .env keeps today's
+    behavior. Split on the FIRST '=' and the FIRST ':' (so a label containing ':' -- `label:area:api
+    =Improvement` -- parses as key `area:api`). A malformed or unknown-kind entry is skipped with one
+    WARN naming it rather than silently ignored: a typo'd mapping that quietly does nothing is the
+    failure mode this whole feature exists to make visible."""
+    rules: list[CardTypeRule] = []
+    for entry in raw.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        left, sep, target = entry.partition("=")
+        kind_raw, _, key = left.strip().partition(":")
+        kind = CARD_TYPE_MAP_KINDS.get(kind_raw.strip().lower())
+        if not sep or not kind or not key.strip() or not target.strip():
+            print(f"WARN  CARD_TYPE_MAP entry {entry!r} is malformed -- expected "
+                  f"'type:<issue type>=<card type>' or 'label:<label>=<card type>' -- skipping it")
+            continue
+        rules.append(CardTypeRule(kind=kind, key=key.strip(), target=target.strip()))
+    return tuple(rules)
+
+
+def active_rules(rules: tuple[CardTypeRule, ...] | None) -> tuple[CardTypeRule, ...]:
+    """The derivation table actually in force: a configured CARD_TYPE_MAP when it has any entry,
+    else the built-in CARD_TYPE_RULES. One helper so every consumer resolves "configured or default"
+    identically -- a caller that forgot the fallback would silently derive no card type at all."""
+    return tuple(rules) if rules else CARD_TYPE_RULES
+
+
+def board_type_title(card_type: dict) -> str:
+    """The display TITLE of one BOARD card-type entry, stripped; "" when it has none usable.
+
+    Reads `title` and falls back to `name`, the same hedge board_layout.lane_title has always
+    applied to lanes: AgilePlace's io v2 board schema is documented for `lanes[].title`, but the
+    `cardTypes[]` entry shape is NOT pinned down by the public docs (see API-VALIDATION.md), and a
+    payload keyed `name` would otherwise make every board card type unresolvable and silently skip
+    every typeId write. Non-string/absent values on both keys degrade to "" -- never raises.
+
+    Distinct from card_type_title() below, which reads a CARD's nested `type` object."""
+    for key in ("title", "name"):
+        value = card_type.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def derive_card_type_name(issue: dict, rules: tuple[CardTypeRule, ...] | None = None) -> str | None:
     """The derived card type NAME for one issue, or None when no rule matches (native `Task` alone,
     `type:epic` issues -- the board has no Epic card type, or any other unmapped combination). Pure
     and total: never raises regardless of `issue`'s `issue_type`/`labels` shape, and unmatched always
     means "no write, board default/manual choice stands" -- never a guess.
+
+    `rules` is the configured CARD_TYPE_MAP (cfg["card_type_map"]); None/empty falls back to the
+    built-in CARD_TYPE_RULES via active_rules.
 
     Reads issue.get("issue_type") (ghkit.list_issues's normalized name-or-None) and
     issue.get("labels", []) (read-only, never mutated)."""
@@ -57,7 +128,7 @@ def derive_card_type_name(issue: dict) -> str | None:
     if not isinstance(labels, (list, tuple, set, frozenset)):
         labels = []
     label_set = {label for label in labels if isinstance(label, str)}
-    for rule in CARD_TYPE_RULES:
+    for rule in active_rules(rules):
         if rule.kind == "issue_type" and issue_type == rule.key:
             return rule.target
         if rule.kind == "label" and rule.key in label_set:
@@ -68,33 +139,37 @@ def derive_card_type_name(issue: dict) -> str | None:
 class ResolvedCardTypes(NamedTuple):
     """resolve_card_type_ids's return shape: `by_name` maps a derivation-table target NAME to its
     board typeId (only for names that resolved cleanly), `warnings` is one printable WARN line per
-    unresolved/ineligible/ambiguous target name, in a stable (sorted-by-name) order."""
+    unresolved/ineligible/ambiguous target name, in a stable (sorted-by-name) order, followed (only
+    when there is at least one such line) by a single trailing hint line."""
     by_name: Mapping[str, str]
     warnings: tuple[str, ...]
 
 
-def resolve_card_type_ids(card_types: list) -> ResolvedCardTypes:
-    """Resolve every CARD_TYPE_RULES target name against the board's configured card types.
+def resolve_card_type_ids(card_types: list,
+                          rules: tuple[CardTypeRule, ...] | None = None) -> ResolvedCardTypes:
+    """Resolve every target name of the active derivation table (`rules`, else CARD_TYPE_RULES)
+    against the board's configured card types.
 
     `card_types` is board_layout.board_layout(cfg).card_types -- already structurally validated by
     board_layout._card_types_with_ids (every entry a dict with a usable id). Eligibility here is
     semantic, not structural: an entry counts only when its `isCardType` flag is truthy (excludes
-    task-only types like `Subtask`) and its (stripped) `title` is non-empty. A name with zero
-    eligible matches, or more than one (ambiguous -- two board types sharing a title), is left out
-    of `by_name` and gets one WARN in `warnings` instead; a name is never silently dropped without
-    an explanation.
+    task-only types like `Subtask`) and board_type_title reads a non-empty title from it. A name
+    with zero eligible matches, or more than one (ambiguous -- two board types sharing a title), is
+    left out of `by_name` and gets one WARN in `warnings` instead; a name is never silently dropped
+    without an explanation. Any unresolved name also appends one trailing hint line naming the
+    titles the board DOES offer (see _unresolved_hint).
 
     Pure and total over any list input (never raises); idempotent -- calling it twice on the same
     `card_types` list yields an equal result both times, since it depends on nothing but that
     input. Intended to be called once per run."""
-    needed_names = sorted({rule.target for rule in CARD_TYPE_RULES})
+    needed_names = sorted({rule.target for rule in active_rules(rules)})
     ids_by_title: dict[str, list] = {}
     for card_type in card_types:
         if not isinstance(card_type, dict):
             continue
         if not card_type.get("isCardType"):
             continue
-        title = (card_type.get("title") or "").strip()
+        title = board_type_title(card_type)
         if not title:
             continue
         ids_by_title.setdefault(title, []).append(card_type.get("id"))
@@ -106,7 +181,7 @@ def resolve_card_type_ids(card_types: list) -> ResolvedCardTypes:
         if not matches:
             warnings.append(
                 f"WARN  no eligible board card type named {name!r} -- typeId writes for it are "
-                f"skipped until the board defines one"
+                f"skipped until the board defines one, or CARD_TYPE_MAP maps it to one it has"
             )
         elif len(matches) > 1:
             warnings.append(
@@ -115,7 +190,19 @@ def resolve_card_type_ids(card_types: list) -> ResolvedCardTypes:
             )
         else:
             by_name[name] = matches[0]
+    if warnings:
+        warnings.append(_unresolved_hint(sorted(ids_by_title)))
     return ResolvedCardTypes(by_name=MappingProxyType(by_name), warnings=tuple(warnings))
+
+
+def _unresolved_hint(board_titles: list[str]) -> str:
+    """One trailing line appended whenever ANY name failed to resolve, naming the titles the board
+    actually offers and how to fix the mismatch. Without it the WARNs above tell a reader what is
+    missing but never what is available -- the exact information needed to write a CARD_TYPE_MAP,
+    and the reason four identical-looking WARNs a run were easy to dismiss as noise."""
+    offered = ", ".join(repr(title) for title in board_titles) if board_titles else "<none>"
+    return (f"WARN  board's eligible card types are: {offered} -- map GitHub issue types/labels "
+            f"onto them with CARD_TYPE_MAP in .env (run `python type_inventory.py` for both sides)")
 
 
 class CardTypeDecision(NamedTuple):
@@ -199,9 +286,9 @@ def sync_card_type(cfg: dict, apply: bool, issue: dict, card: dict, by_name: Map
     queue/patch_card path (409/428 conflict-retry and dry-run gating come free from there), prints
     `decision.warn` (if any), and -- ONLY when `apply` is True and `decision.update_base` says the
     match is confirmed -- persists `issues_state[issue["url"]]["type"] = decision.new_base`. Never
-    mutates `issue`, `card`, or `by_name`; `cfg` is accepted for call-shape parity but unused here."""
+    mutates `issue`, `card`, or `by_name`; `cfg` is read only for the configured CARD_TYPE_MAP."""
     prev = issues_state[issue["url"]]
-    derived = derive_card_type_name(issue)
+    derived = derive_card_type_name(issue, cfg.get("card_type_map"))
     current = card_type_title(card)
     decision = _decide(prev.get("type"), derived, current, by_name)
     if decision.op:
@@ -237,12 +324,24 @@ REVERSE_SEED_BY_CARD_TYPE: Mapping[str, ReverseSeed] = MappingProxyType({
 })
 
 
-def reverse_seed_for_card_type(name: str | None) -> ReverseSeed:
+def reverse_seed_for_card_type(name: str | None,
+                               rules: tuple[CardTypeRule, ...] | None = None) -> ReverseSeed:
     """The reverse-intake seed for one card type NAME (e.g. from card_type_title on the promoted
     card). Pure and total: an unmapped name or a bare None input both return _NO_SEED -- never
-    raises."""
+    raises.
+
+    A configured CARD_TYPE_MAP is INVERTED to build the seed, so the two directions can never drift
+    apart: whatever GitHub type/label maps a card type IN is what a promoted card of that type gets
+    seeded with going OUT. The FIRST rule naming a target wins, matching derive_card_type_name's own
+    first-match-wins precedence. Card types the map does not mention fall back to
+    REVERSE_SEED_BY_CARD_TYPE, which is also the whole answer when no map is configured -- that
+    table additionally covers types no forward rule produces (`Other Work` -> a native `Task`)."""
     if name is None:
         return _NO_SEED
+    for rule in rules or ():
+        if rule.target == name:
+            return ReverseSeed(issue_type=rule.key if rule.kind == "issue_type" else None,
+                               label=rule.key if rule.kind == "label" else None)
     return REVERSE_SEED_BY_CARD_TYPE.get(name, _NO_SEED)
 
 

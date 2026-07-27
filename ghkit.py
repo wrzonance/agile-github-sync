@@ -205,6 +205,27 @@ def open_pr_issue_numbers(cfg: dict) -> set[int] | None:
         return None
 
 
+def list_label_names(cfg: dict) -> list[str] | None:
+    """Every label defined on the target repo, sorted, for the card-type mapping inventory
+    (type_inventory.py). Tri-state, mirroring open_pr_issue_numbers exactly: a list on success
+    (possibly empty -- a real, distinguishable result) and **None on ANY failure** (gh error,
+    timeout, malformed/non-list response), so the caller prints "unavailable" rather than an empty
+    inventory that reads as "this repo has no labels".
+
+    Read-only and used by no write path: nothing derives behavior from it, so a failure here can
+    never affect a sync run."""
+    try:
+        out = run(cfg, ["label", "list", "--limit", "200", "--json", "name"])
+        data = json.loads(out.stdout or "[]")
+        if not isinstance(data, list):
+            raise TypeError("gh label list must return a JSON array")
+        return sorted(item["name"] for item in data
+                      if isinstance(item, dict) and isinstance(item.get("name"), str))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
+            TypeError, KeyError):
+        return None
+
+
 def sub_issue_numbers(cfg: dict, epic_number: int) -> list[int] | None:
     """Native sub-issue numbers of an epic (GraphQL). Tri-state: a list on success (possibly empty when
     the epic genuinely has no native children); **None on query failure** (GHES/permission/schema), so
