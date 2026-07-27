@@ -10,7 +10,7 @@ Pins:
     API and returns the documented shape (a normalized ApComment dict, or True/False).
   - _normalize_ap_comment: raises ValueError on a missing/non-numeric id; author (name -> email ->
     id) and created/edited timestamps degrade to None instead of raising, for any malformed shape.
-  - _normalize_ap_comment's created/edited fields funnel through comment_sync._parse_timestamp
+  - _normalize_ap_comment's created/edited fields funnel through comment_sync.parse_timestamp
     (never raise, garbage/absent -> None) -- the exact invariant this task's RED step pins.
 
 Run: pytest -q tests/test_agileplace_comments.py
@@ -138,7 +138,7 @@ def test_normalize_ap_comment_author_blank_name_falls_back_to_email():
     assert result["author_email"] == "ada@example.com"
 
 
-# --- _normalize_ap_comment: created/edited funnel through _parse_timestamp, never raise --------
+# --- _normalize_ap_comment: created/edited funnel through parse_timestamp, never raise --------
 
 def test_normalize_ap_comment_keeps_parseable_created_on_verbatim():
     raw = {"id": 1, "createdOn": "2024-01-15T10:30:00Z"}

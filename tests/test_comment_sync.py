@@ -52,42 +52,42 @@ from comment_sync import (  # noqa: E402
         {},
     ],
 )
-def test_parse_timestamp_never_raises_and_degrades_to_none(raw):
-    assert comment_sync._parse_timestamp(raw) is None
+def testparse_timestamp_never_raises_and_degrades_to_none(raw):
+    assert comment_sync.parse_timestamp(raw) is None
 
 
 # --- successful parses: GH's ISO-8601 (Z suffix) and offset/naive variants ---------------------
 
-def test_parse_timestamp_parses_gh_style_z_suffix():
-    result = comment_sync._parse_timestamp("2024-01-15T10:30:00Z")
+def testparse_timestamp_parses_gh_style_z_suffix():
+    result = comment_sync.parse_timestamp("2024-01-15T10:30:00Z")
 
     assert result == datetime(2024, 1, 15, 10, 30, 0, tzinfo=timezone.utc)
 
 
-def test_parse_timestamp_result_is_tz_aware():
-    result = comment_sync._parse_timestamp("2024-01-15T10:30:00Z")
+def testparse_timestamp_result_is_tz_aware():
+    result = comment_sync.parse_timestamp("2024-01-15T10:30:00Z")
 
     assert result.tzinfo is not None
 
 
-def test_parse_timestamp_normalizes_explicit_offset_to_utc():
-    result = comment_sync._parse_timestamp("2024-01-15T05:30:00-05:00")
+def testparse_timestamp_normalizes_explicit_offset_to_utc():
+    result = comment_sync.parse_timestamp("2024-01-15T05:30:00-05:00")
 
     assert result == datetime(2024, 1, 15, 10, 30, 0, tzinfo=timezone.utc)
 
 
-def test_parse_timestamp_assumes_utc_for_naive_input():
-    result = comment_sync._parse_timestamp("2024-01-15T10:30:00")
+def testparse_timestamp_assumes_utc_for_naive_input():
+    result = comment_sync.parse_timestamp("2024-01-15T10:30:00")
 
     assert result == datetime(2024, 1, 15, 10, 30, 0, tzinfo=timezone.utc)
 
 
-def test_parse_timestamp_two_equivalent_instants_compare_equal_after_parsing():
+def testparse_timestamp_two_equivalent_instants_compare_equal_after_parsing():
     """The whole point of the helper: two representations of the same instant from two different
     sides (GH's Z-suffixed UTC vs. AP's hypothetical offset form) must compare equal once both have
-    gone through _parse_timestamp -- raw lexical string comparison can't guarantee that."""
-    gh_side = comment_sync._parse_timestamp("2024-01-15T10:30:00Z")
-    ap_side = comment_sync._parse_timestamp("2024-01-15T05:30:00-05:00")
+    gone through parse_timestamp -- raw lexical string comparison can't guarantee that."""
+    gh_side = comment_sync.parse_timestamp("2024-01-15T10:30:00Z")
+    ap_side = comment_sync.parse_timestamp("2024-01-15T05:30:00-05:00")
 
     assert gh_side == ap_side
 

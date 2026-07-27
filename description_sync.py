@@ -8,12 +8,32 @@ is the 3-way merge itself: `base`/`ap_written_base` are the last-synced canonica
 in .sync-state.json (see sync.py's issues_state); `gh_canonical`/`ap_canonical` are this run's
 freshly canonicalized GitHub issue body and AgilePlace card description.
 
-Conflict policy is warn-and-skip (issue #65's brainstormed decision, deliberately breaking the
-AgilePlace-wins-dates precedent set by sync_dates): when BOTH sides changed since their own
-reference point AND landed on genuinely different values, neither side is overwritten -- prose
-edits are too costly to silently destroy. When both sides changed but converged on the identical
-value (e.g. two people independently typing the same fix), that is not a conflict: there is
-nothing to warn about and nothing left to write.
+Conflict policy is **most-recent-wins, anchored on GitHub**, replacing issue #65's original
+warn-and-skip. Warn-and-skip proved to be a dead end in practice: AgilePlace rewrites a card's
+stored description HTML when a human merely opens and clicks into the rich-text editor, so a card
+routinely reads as "changed" without anyone editing anything. Paired with any real GitHub-side
+edit that produced a permanent conflict -- the same two issues warned on every single run, forever,
+with no mechanical way out short of hand-editing .sync-state.json.
+
+Recency is decided from the only real modification timestamp the two systems expose: the GitHub
+issue's own ``updated_at``, compared against ``desc_synced_at`` -- the UTC stamp this module writes
+into .sync-state.json every time it advances the merge base. AgilePlace cards expose no comparable
+edit timestamp (the same limitation comment_sync documents for AP comments), so the tiebreak is
+deliberately asymmetric and fail-safe toward GitHub:
+
+  - both sides changed AND GitHub shows activity after the last description sync -> GitHub wins.
+  - both sides changed AND GitHub demonstrably has NO activity since that stamp -> AgilePlace wins
+    (its description provably moved; GitHub's differing body cannot be a post-sync human edit).
+  - both sides changed and either timestamp is missing/unparseable (legacy state, an issue snapshot
+    without updatedAt) -> GitHub wins, as the anchor and documented fallback.
+
+``updated_at`` is issue-level, not body-level: a comment or a label bump moves it too. That only
+ever makes the tiebreak *more* GitHub-favouring, never less, and it is consulted solely when the
+GitHub body hash already differs from the base -- i.e. when GitHub's body genuinely did change.
+
+One conflict shape survives and still warns rather than picking a winner: an AgilePlace edit made
+on top of a TRUNCATED stand-in (see resolve_description). No timestamp makes promoting a truncated
+stub to GitHub safe, so the truncation guard outranks recency.
 """
 from __future__ import annotations
 
@@ -24,6 +44,7 @@ import agileplace_description
 import ghkit
 import richtext
 from stages import issue_custom_id
+from timestamps import parse_timestamp, utc_now_iso
 
 # Appended to a truncated AgilePlace description so a reader knows the full text lives on GitHub.
 # Exact text pinned by the issue #65 design doc -- config.py's DEFAULT_AP_DESCRIPTION_MAX_LENGTH
@@ -39,16 +60,50 @@ class DescriptionResolution(NamedTuple):
     reports the OLD agreed value, never a partial or guessed merge. (Steady state also has both
     write flags False and `merged == (base or "")` -- `warning is None` is what tells the two
     apart.)
+
+    `note` is set ONLY when the both-sides-changed recency tiebreak actually decided the outcome,
+    and carries the printable explanation of which side won and why. It is never set for an
+    ordinary one-sided propagation, steady state, or convergence -- so a caller can print it
+    unconditionally and stay silent on every uncontested run.
     """
     merged: str
     write_gh: bool
     write_ap: bool
     conflict: bool
     warning: str | None
+    note: str | None = None
+
+
+def _github_touched_since(gh_updated_at: str | None, synced_at: str | None) -> bool:
+    """Whether the GitHub issue shows activity strictly AFTER the last description sync.
+
+    Returns True unless the opposite can be PROVEN -- both timestamps parse (see
+    timestamps.parse_timestamp's totality contract) and GitHub's is not newer. Every unusable input
+    lands on True, keeping GitHub the fallback anchor: an unprovable tiebreak must not hand the win
+    to the side with no timestamp at all.
+
+    Strictly-after, not at-or-after: this module's own confirmed GitHub write stamps `synced_at` a
+    moment after it bumps the issue's `updated_at`, so an equal (second-precision) pair is the
+    sync's own write, not a human edit."""
+    stamped = parse_timestamp(synced_at)
+    updated = parse_timestamp(gh_updated_at)
+    if stamped is None or updated is None:
+        return True
+    return updated > stamped
+
+
+def _recency_note(winner: str, loser: str, gh_updated_at: str | None,
+                  synced_at: str | None) -> str:
+    """The printable one-liner for a recency-decided outcome, naming both timestamps so the decision
+    is auditable from the run log alone."""
+    return (f"description: both sides changed since the last sync -- {winner} wins on recency and "
+            f"overwrites {loser} (issue updated_at={gh_updated_at or '<unknown>'}, last description "
+            f"sync={synced_at or '<never recorded>'})")
 
 
 def resolve_description(base: str | None, ap_written_base: str | None, gh_canonical: str,
-                        ap_canonical: str) -> DescriptionResolution:
+                        ap_canonical: str, *, gh_updated_at: str | None = None,
+                        synced_at: str | None = None) -> DescriptionResolution:
     """3-way merge of a GitHub issue body against an AgilePlace card description, both already
     canonicalized (see _canonicalize_gh_body / _canonicalize_ap_description below). Pure, total,
     no I/O.
@@ -76,8 +131,12 @@ def resolve_description(base: str | None, ap_written_base: str | None, gh_canoni
         base, and `warning` names the issue for a human to reconcile by hand.
       - both changed but landed on the SAME value -> no conflict, no write (independently
         converged); `merged` becomes that shared value so the base can advance to it.
-      - both changed to DIFFERENT values -> conflict: neither side is written, `merged` stays the
-        old base, and `warning` names the conflict for a human to reconcile by hand.
+      - both changed to DIFFERENT values -> the recency tiebreak decides a winner and writes it to
+        the other side (see the module docstring for the full policy). `gh_updated_at` is the
+        GitHub issue's own `updated_at`; `synced_at` is the `desc_synced_at` stamp persisted by the
+        run that last advanced the base. Both default to None, which resolves to "GitHub wins" --
+        the same fail-safe direction any unusable timestamp takes, so an older caller that does not
+        pass them yet still gets a decision rather than a permanent stalemate.
     """
     base_norm = base or ""
     ap_written_norm = ap_written_base or ""
@@ -105,10 +164,13 @@ def resolve_description(base: str | None, ap_written_base: str | None, gh_canoni
         return DescriptionResolution(ap_canonical, True, False, False, None)
     if gh_canonical == ap_canonical:
         return DescriptionResolution(gh_canonical, False, False, False, None)
-    warning = ("description conflict: both the GitHub issue body and the AgilePlace card "
-               "description changed since the last sync and now disagree -- leaving both sides "
-               "untouched until a human reconciles them by hand")
-    return DescriptionResolution(base_norm, False, False, True, warning)
+    if _github_touched_since(gh_updated_at, synced_at):
+        return DescriptionResolution(gh_canonical, False, True, False, None,
+                                     _recency_note("GitHub", "the AgilePlace card",
+                                                   gh_updated_at, synced_at))
+    return DescriptionResolution(ap_canonical, True, False, False, None,
+                                 _recency_note("the AgilePlace card", "GitHub",
+                                               gh_updated_at, synced_at))
 
 
 def _canonicalize_gh_body(body: str | None) -> str:
@@ -187,9 +249,12 @@ def _truncate_for_agileplace(markdown: str, max_length: int) -> tuple[str, bool]
 def sync_description(cfg: dict, apply: bool, issue: dict, card: dict, issues_state: dict,
                      queue: Callable) -> None:
     """Wire resolve_description's pure merge into GitHub/AgilePlace writes, with a coupled
-    base-advance gate mirroring sync_dates' (issue #6) merge-base contract exactly: `desc_base` and
-    `desc_ap_written` only ever advance TOGETHER, and only when `apply` is True AND the GitHub-side
-    write is confirmed (`gh_write_ok`). `gh_write_ok` defaults to True whenever no GitHub write was
+    base-advance gate mirroring sync_dates' (issue #6) merge-base contract exactly: `desc_base`,
+    `desc_ap_written` and `desc_synced_at` only ever advance TOGETHER, and only when `apply` is True
+    AND the GitHub-side write is confirmed (`gh_write_ok`). `desc_synced_at` is the recency anchor
+    the next run's tiebreak reads (see the module docstring); it must never be stamped by a run that
+    did not also advance the base, or that run would move the anchor forward past edits it never
+    reconciled. `gh_write_ok` defaults to True whenever no GitHub write was
     needed at all (write_gh is False) -- there is nothing to have failed, same as sync_dates.
 
     The AgilePlace-side queue write is unconditional, also like sync_dates: it fires whenever
@@ -216,11 +281,15 @@ def sync_description(cfg: dict, apply: bool, issue: dict, card: dict, issues_sta
                       else agileplace_description.card_description(cfg, card))
     ap_canonical = _canonicalize_ap_description(ap_description)
     result = resolve_description(prev.get("desc_base"), prev.get("desc_ap_written"),
-                                 gh_canonical, ap_canonical)
+                                 gh_canonical, ap_canonical,
+                                 gh_updated_at=issue.get("updated_at"),
+                                 synced_at=prev.get("desc_synced_at"))
 
     if result.conflict:
         print(f"WARN  [{key}] {result.warning}")
         return
+    if result.note:
+        print(f"note  [{key}] {result.note}")
 
     gh_write_ok = True
     if result.write_gh:
@@ -238,3 +307,4 @@ def sync_description(cfg: dict, apply: bool, issue: dict, card: dict, issues_sta
     if apply and gh_write_ok:
         prev["desc_base"] = result.merged
         prev["desc_ap_written"] = new_ap_written
+        prev["desc_synced_at"] = utc_now_iso()

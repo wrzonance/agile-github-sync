@@ -129,7 +129,8 @@ def list_issues(cfg: dict) -> list[dict]:
     the card-creation path.
     """
     out = run(cfg, ["issue", "list", "--state", "all", "--limit", "1000", "--json",
-                    "number,title,state,stateReason,labels,milestone,assignees,url,body,issueType"])
+                    "number,title,state,stateReason,labels,milestone,assignees,url,body,issueType,"
+                    "updatedAt"])
     issues = json.loads(out.stdout or "[]")
     normalized = []
     for i in issues:
@@ -149,6 +150,11 @@ def list_issues(cfg: dict) -> list[dict]:
             # never a bare string -- (i.get("issueType") or {}).get("name") is exactly that shape,
             # confirmed live (issue #82 spike). None means "native Task or no type set".
             "issue_type": (i.get("issueType") or {}).get("name"),
+            # Issue-level last-activity timestamp (ISO-8601 UTC), NOT a body-edit timestamp: a
+            # comment or label change moves it too. description_sync's recency tiebreak is the only
+            # consumer and only ever asks "was this issue touched at all since our last description
+            # sync", for which the coarser signal is exactly right. "" when gh omits it.
+            "updated_at": i.get("updatedAt") or "",
         })
     return normalized
 

@@ -75,13 +75,16 @@ def test_seeding_gh_body_empty_pulls_card_description_to_github():
     _assert_invariant(None, result)
 
 
-def test_seeding_both_nonempty_and_different_is_a_conflict_that_writes_nothing():
+def test_seeding_both_nonempty_and_different_resolves_to_github_as_the_anchor():
+    # A never-synced issue has no sync timestamp to compare against, so recency is unknowable and
+    # GitHub -- the only side with a real modification timestamp -- is the documented fallback
+    # anchor. Previously this stalled as a permanent warn-and-skip conflict on every run.
     result = resolve_description(None, None, "GH text", "AP text")
     assert result.write_gh is False
-    assert result.write_ap is False
-    assert result.conflict is True
-    assert result.merged == ""
-    assert result.warning is not None
+    assert result.write_ap is True
+    assert result.conflict is False
+    assert result.merged == "GH text"
+    assert result.note is not None
     _assert_invariant(None, result)
 
 
@@ -137,14 +140,82 @@ def test_ap_only_changed_propagates_to_github():
     _assert_invariant("Old text", result)
 
 
-def test_both_changed_to_different_values_is_a_conflict_that_writes_nothing():
-    result = resolve_description("Old text", "Old text", "GH new", "AP new")
+def test_both_changed_and_github_was_touched_after_the_last_sync_gives_github_the_win():
+    result = resolve_description("Old text", "Old text", "GH new", "AP new",
+                                 gh_updated_at="2026-07-26T10:00:00Z",
+                                 synced_at="2026-07-25T09:00:00+00:00")
+    assert result.write_gh is False
+    assert result.write_ap is True
+    assert result.conflict is False
+    assert result.merged == "GH new"
+    assert result.warning is None
+    assert result.note is not None
+    _assert_invariant("Old text", result)
+
+
+def test_both_changed_but_github_untouched_since_the_last_sync_gives_agileplace_the_win():
+    # The user-visible case this policy exists for: the GitHub side shows NO activity at all since
+    # the last description sync, so its differing body cannot be a post-sync human edit (a stale or
+    # mis-recorded base) while the card's description demonstrably did change. AgilePlace wins.
+    result = resolve_description("Old text", "Old text", "GH new", "AP new",
+                                 gh_updated_at="2026-07-24T08:00:00Z",
+                                 synced_at="2026-07-25T09:00:00+00:00")
+    assert result.write_gh is True
+    assert result.write_ap is False
+    assert result.conflict is False
+    assert result.merged == "AP new"
+    assert result.note is not None
+    _assert_invariant("Old text", result)
+
+
+@pytest.mark.parametrize("gh_updated_at,synced_at", [
+    (None, None),                              # legacy state written before this field existed
+    ("2026-07-26T10:00:00Z", None),            # state from before the timestamp was recorded
+    (None, "2026-07-25T09:00:00+00:00"),       # issue snapshot without an updatedAt
+    ("not-a-timestamp", "2026-07-25T09:00:00+00:00"),
+    ("2026-07-26T10:00:00Z", "not-a-timestamp"),
+])
+def test_both_changed_with_an_unusable_timestamp_pair_falls_back_to_github(gh_updated_at, synced_at):
+    """Fail-safe direction: AgilePlace only wins a tiebreak that can be PROVEN (both timestamps
+    parse and GitHub's is not newer). Anything else -- missing, blank, garbage, or a state file
+    predating the recorded timestamp -- falls back to GitHub, the anchor side."""
+    result = resolve_description("Old text", "Old text", "GH new", "AP new",
+                                 gh_updated_at=gh_updated_at, synced_at=synced_at)
+    assert result.write_ap is True
+    assert result.write_gh is False
+    assert result.merged == "GH new"
+    assert result.conflict is False
+
+
+def test_github_updated_exactly_at_the_last_sync_timestamp_is_not_post_sync_activity():
+    """Strictly-after, not at-or-after: the sync's own GitHub write bumps updatedAt to (about) the
+    moment the base was stamped, so an equal timestamp must not be read as a human edit."""
+    result = resolve_description("Old text", "Old text", "GH new", "AP new",
+                                 gh_updated_at="2026-07-25T09:00:00Z",
+                                 synced_at="2026-07-25T09:00:00+00:00")
+    assert result.write_gh is True
+    assert result.merged == "AP new"
+
+
+def test_truncated_stub_edit_stays_a_conflict_even_when_recency_favors_agileplace():
+    """The truncation guard outranks the recency tiebreak: promoting an edited truncated stub to
+    GitHub destroys the untruncated tail that lives only in `base`, and no timestamp makes that
+    safe."""
+    full = "A very long description " * 50
+    truncated = full[:100] + "...[truncated by sync]"
+    result = resolve_description(full, truncated, full, truncated + " edited on the card",
+                                 gh_updated_at="2026-07-24T08:00:00Z",
+                                 synced_at="2026-07-25T09:00:00+00:00")
+    assert result.conflict is True
     assert result.write_gh is False
     assert result.write_ap is False
-    assert result.conflict is True
-    assert result.merged == "Old text"
-    assert result.warning is not None
-    _assert_invariant("Old text", result)
+    assert result.merged == full
+
+
+def test_no_recency_note_is_attached_to_an_ordinary_one_sided_propagation():
+    assert resolve_description("Old", "Old", "GH new", "Old").note is None
+    assert resolve_description("Old", "Old", "Old", "AP new").note is None
+    assert resolve_description("Same", "Same", "Same", "Same").note is None
 
 
 def test_both_changed_but_independently_converged_on_the_same_value_is_not_a_conflict():
@@ -348,19 +419,24 @@ def test_sync_description_failed_gh_write_blocks_base_advance():
 
 
 def test_sync_description_conflict_makes_no_writes_and_no_advance():
-    issue = _issue(body="GH text")
+    # The one surviving conflict shape (the recency tiebreak resolves the rest): an edit made on
+    # top of a truncated stand-in, which cannot be merged back without risking the untruncated tail.
+    full = "A very long description " * 50
+    truncated = full[:100] + "...[truncated by sync]"
+    issue = _issue(body=full)
     card = _card()
-    state = {ISSUE_URL: {}}
+    state = {ISSUE_URL: {"desc_base": _canonicalize_gh_body(full), "desc_ap_written": truncated}}
     queue = _Queue()
-    with patch("description_sync.agileplace_description.card_description", return_value="AP text"), \
+    with patch("description_sync.agileplace_description.card_description",
+               return_value=truncated + " edited on the card"), \
          patch("description_sync.agileplace_description.op_description") as op_mock, \
          patch("description_sync.ghkit.edit_issue_body") as edit_mock:
         sync_description(_cfg(), True, issue, card, state, queue)
     edit_mock.assert_not_called()
     op_mock.assert_not_called()
     assert queue.calls == []
-    assert "desc_base" not in state[ISSUE_URL]
-    assert "desc_ap_written" not in state[ISSUE_URL]
+    assert state[ISSUE_URL]["desc_base"] == _canonicalize_gh_body(full)
+    assert "desc_synced_at" not in state[ISSUE_URL]
 
 
 def test_sync_description_confirmed_gh_write_advances_both_fields_together():
@@ -399,6 +475,62 @@ def test_sync_description_confirmed_ap_write_advances_both_fields_together():
     assert queue.calls == [(card, ["OP"], "description")]
     assert state[ISSUE_URL]["desc_base"] == "Hello from GitHub"
     assert state[ISSUE_URL]["desc_ap_written"] == expected_ap_written
+
+
+# =====================================================================================
+# sync_description -- recency wiring (desc_synced_at)
+# =====================================================================================
+
+def test_sync_description_stamps_the_sync_timestamp_alongside_the_advancing_base():
+    issue = _issue(body="Hello from GitHub")
+    state = {ISSUE_URL: {}}
+    with patch("description_sync.agileplace_description.card_description", return_value=""), \
+         patch("description_sync.agileplace_description.op_description", return_value="OP"), \
+         patch("description_sync.ghkit.edit_issue_body"), \
+         patch("description_sync.utc_now_iso", return_value="2026-07-27T12:00:00+00:00"):
+        sync_description(_cfg(), True, issue, _card(), state, _Queue())
+    assert state[ISSUE_URL]["desc_synced_at"] == "2026-07-27T12:00:00+00:00"
+
+
+def test_sync_description_does_not_stamp_the_sync_timestamp_on_a_dry_run():
+    issue = _issue(body="Hello from GitHub")
+    state = {ISSUE_URL: {}}
+    with patch("description_sync.agileplace_description.card_description", return_value=""), \
+         patch("description_sync.agileplace_description.op_description", return_value="OP"), \
+         patch("description_sync.ghkit.edit_issue_body"):
+        sync_description(_cfg(), False, issue, _card(), state, _Queue())
+    assert "desc_synced_at" not in state[ISSUE_URL]
+
+
+def test_sync_description_feeds_the_issue_updated_at_and_stored_stamp_into_the_tiebreak():
+    """Both sides drifted and the GitHub issue shows NO activity since the recorded sync stamp, so
+    the card's description must win and be pushed to GitHub -- the end-to-end shape of the policy
+    this wiring exists for."""
+    issue = {**_issue(body="GH new"), "updated_at": "2026-07-24T08:00:00Z"}
+    state = {ISSUE_URL: {"desc_base": "Old text", "desc_ap_written": "Old text",
+                         "desc_synced_at": "2026-07-25T09:00:00+00:00"}}
+    queue = _Queue()
+    with patch("description_sync.agileplace_description.card_description", return_value="AP new"), \
+         patch("description_sync.agileplace_description.op_description") as op_mock, \
+         patch("description_sync.ghkit.edit_issue_body", return_value=True) as edit_mock:
+        sync_description(_cfg(), True, issue, _card(), state, queue)
+    edit_mock.assert_called_once_with(_cfg(), True, issue["number"], "AP new")
+    op_mock.assert_not_called()
+    assert queue.calls == []
+    assert state[ISSUE_URL]["desc_base"] == "AP new"
+
+
+def test_sync_description_prints_the_recency_decision(capsys):
+    issue = {**_issue(body="GH new"), "updated_at": "2026-07-26T10:00:00Z"}
+    state = {ISSUE_URL: {"desc_base": "Old text", "desc_ap_written": "Old text",
+                         "desc_synced_at": "2026-07-25T09:00:00+00:00"}}
+    with patch("description_sync.agileplace_description.card_description", return_value="AP new"), \
+         patch("description_sync.agileplace_description.op_description", return_value="OP"), \
+         patch("description_sync.ghkit.edit_issue_body", return_value=True):
+        sync_description(_cfg(), True, issue, _card(), state, _Queue())
+    out = capsys.readouterr().out
+    assert "[T1]" in out
+    assert "GitHub" in out
 
 
 def test_sync_description_never_reads_a_plan_only_dry_run_card():
