@@ -68,8 +68,9 @@ def parse_card_type_map(raw: str) -> tuple[CardTypeRule, ...]:
     ahead of labels for exactly that reason).
 
     Blank/unset returns () meaning "use CARD_TYPE_RULES", so an untouched .env keeps today's
-    behavior. Split on the FIRST '=' and the FIRST ':' (so a label containing ':' -- `label:area:api
-    =Improvement` -- parses as key `area:api`). A malformed or unknown-kind entry is skipped with one
+    behavior. Split on the FIRST '=' and the FIRST ':', so a namespaced label keeps its own colon
+    (`label:area:api=Improvement` parses as key `area:api`). A malformed or unknown-kind entry is
+    skipped with one
     WARN naming it rather than silently ignored: a typo'd mapping that quietly does nothing is the
     failure mode this whole feature exists to make visible."""
     rules: list[CardTypeRule] = []

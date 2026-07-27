@@ -12,7 +12,7 @@ Conflict policy is **most-recent-wins, anchored on GitHub**, replacing issue #65
 warn-and-skip. Warn-and-skip proved to be a dead end in practice: AgilePlace rewrites a card's
 stored description HTML when a human merely opens and clicks into the rich-text editor, so a card
 routinely reads as "changed" without anyone editing anything. Paired with any real GitHub-side
-edit that produced a permanent conflict -- the same two issues warned on every single run, forever,
+edit, that produced a permanent stalemate: the same issues warned on every single run, forever,
 with no mechanical way out short of hand-editing .sync-state.json.
 
 Recency is decided from the only real modification timestamp the two systems expose: the GitHub
