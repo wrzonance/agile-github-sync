@@ -35,10 +35,3 @@ def parse_timestamp(raw: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
-
-
-def utc_now_iso() -> str:
-    """Now, as a UTC ISO-8601 string round-trippable through parse_timestamp. Second precision --
-    the only consumers compare it against GitHub's own second-precision `updatedAt`, so sub-second
-    digits would be noise in a persisted state file a human may need to read."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")

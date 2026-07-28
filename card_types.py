@@ -20,6 +20,12 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import NamedTuple
 
+# The one non-stdlib import here, and deliberately a leaf: ghkit imports nothing from this repo, so
+# there is no cycle, and is_gh_label_safe is a pure predicate -- no I/O enters this module. A
+# `label:` rule that fails it would abort reverse intake mid-write (issue created, label rejected),
+# so the check has to happen at parse time, not at the write boundary.
+from ghkit import is_gh_label_safe
+
 
 class CardTypeRule(NamedTuple):
     """One derivation-table row: match `kind` ("issue_type" or "label") against `key`, and when it
@@ -57,7 +63,7 @@ CARD_TYPE_RULES: tuple[CardTypeRule, ...] = (
 CARD_TYPE_MAP_KINDS: Mapping[str, str] = MappingProxyType({"type": "issue_type", "label": "label"})
 
 
-def parse_card_type_map(raw: str) -> tuple[CardTypeRule, ...]:
+def parse_card_type_map(raw: str) -> tuple[CardTypeRule, ...] | None:
     """Parse CARD_TYPE_MAP: ';'-separated `<kind>:<key>=<AgilePlace card type>` entries, e.g.
     ``type:Bug=Defect; label:enhancement=Improvement``.
 
@@ -67,12 +73,22 @@ def parse_card_type_map(raw: str) -> tuple[CardTypeRule, ...]:
     so put the rule that should outrank the others first (the built-in defaults put native types
     ahead of labels for exactly that reason).
 
-    Blank/unset returns () meaning "use CARD_TYPE_RULES", so an untouched .env keeps today's
-    behavior. Split on the FIRST '=' and the FIRST ':', so a namespaced label keeps its own colon
-    (`label:area:api=Improvement` parses as key `area:api`). A malformed or unknown-kind entry is
-    skipped with one
-    WARN naming it rather than silently ignored: a typo'd mapping that quietly does nothing is the
-    failure mode this whole feature exists to make visible."""
+    Split on the FIRST '=' and the FIRST ':', so a namespaced label keeps its own colon
+    (`label:area:api=Improvement` parses as key `area:api`). A malformed entry -- bad syntax,
+    unknown kind, or a `label:` key gh could not write (see is_gh_label_safe: a comma or quote is
+    CSV-split by `--add-label`, and reverse intake DOES write these labels) -- is skipped with one
+    WARN naming it rather than silently ignored.
+
+    Tri-state return, which is what keeps a typo'd mapping from failing OPEN:
+      - **None** -- nothing configured (blank/whitespace-only). Callers use CARD_TYPE_RULES, so an
+        untouched .env keeps today's behavior.
+      - **a non-empty tuple** -- the configured rules, in written order.
+      - **()** -- the operator configured something and NONE of it survived parsing. This is NOT
+        the same as unset: falling back to the built-in defaults there would quietly write card
+        types the operator explicitly tried to override (adversarial-review finding). An empty
+        table derives nothing, so the run writes no typeId at all and every WARN above stands."""
+    if not raw.strip():
+        return None
     rules: list[CardTypeRule] = []
     for entry in raw.split(";"):
         entry = entry.strip()
@@ -85,15 +101,21 @@ def parse_card_type_map(raw: str) -> tuple[CardTypeRule, ...]:
             print(f"WARN  CARD_TYPE_MAP entry {entry!r} is malformed -- expected "
                   f"'type:<issue type>=<card type>' or 'label:<label>=<card type>' -- skipping it")
             continue
+        if kind == "label" and not is_gh_label_safe(key.strip()):
+            print(f"WARN  CARD_TYPE_MAP entry {entry!r} names a label gh cannot write "
+                  f"(a ',' or '\"' is CSV-split by --add-label) -- skipping it")
+            continue
         rules.append(CardTypeRule(kind=kind, key=key.strip(), target=target.strip()))
     return tuple(rules)
 
 
 def active_rules(rules: tuple[CardTypeRule, ...] | None) -> tuple[CardTypeRule, ...]:
-    """The derivation table actually in force: a configured CARD_TYPE_MAP when it has any entry,
-    else the built-in CARD_TYPE_RULES. One helper so every consumer resolves "configured or default"
-    identically -- a caller that forgot the fallback would silently derive no card type at all."""
-    return tuple(rules) if rules else CARD_TYPE_RULES
+    """The derivation table actually in force: the built-in CARD_TYPE_RULES only when nothing is
+    configured (`rules is None`), otherwise the configured table verbatim -- INCLUDING an empty one,
+    which means "the operator configured a map and none of it parsed" and must derive nothing
+    rather than silently reverting to the defaults. One helper so every consumer resolves that the
+    same way."""
+    return CARD_TYPE_RULES if rules is None else tuple(rules)
 
 
 def board_type_title(card_type: dict) -> str:
@@ -254,7 +276,14 @@ def card_type_title(card: dict) -> str | None:
     Defensive against malformed shapes the same way agileplace.custom_id_value is: a missing/None
     `type` is just "no type" (returns None, no WARN -- that's the ordinary untyped-card case); a
     present-but-non-dict `type`, or a non-string `.title`, WARNs once and returns None rather than
-    raising. An empty/whitespace-only title also normalizes to None."""
+    raising. An empty/whitespace-only title also normalizes to None.
+
+    Falls back to `.name` when `.title` is absent, for the same reason board_type_title does: the
+    nested type object's key is no better pinned down by the io v2 docs than the board entry's, and
+    reading it wrong here is silent too -- a correctly-typed card would look untyped, get patched
+    redundantly, then WARN as manual board-side drift on every later run. A non-string `.title`
+    still WARNs even when `.name` would have served, because that is a malformed payload worth
+    knowing about, not a shape variant."""
     card_type = card.get("type")
     if card_type is None:
         return None
@@ -264,7 +293,7 @@ def card_type_title(card: dict) -> str | None:
         return None
     title = card_type.get("title")
     if title is None:
-        return None
+        return board_type_title(card_type) or None
     if not isinstance(title, str):
         print(f"WARN  card {card.get('id', '<unknown>')!r} has non-string type.title "
               f"({type(title).__name__}) -- ignoring")
@@ -331,19 +360,28 @@ def reverse_seed_for_card_type(name: str | None,
     card). Pure and total: an unmapped name or a bare None input both return _NO_SEED -- never
     raises.
 
-    A configured CARD_TYPE_MAP is INVERTED to build the seed, so the two directions can never drift
-    apart: whatever GitHub type/label maps a card type IN is what a promoted card of that type gets
-    seeded with going OUT. The FIRST rule naming a target wins, matching derive_card_type_name's own
-    first-match-wins precedence. Card types the map does not mention fall back to
-    REVERSE_SEED_BY_CARD_TYPE, which is also the whole answer when no map is configured -- that
-    table additionally covers types no forward rule produces (`Other Work` -> a native `Task`)."""
+    A configured CARD_TYPE_MAP (`rules` not None) is INVERTED to build the seed and is then the
+    WHOLE answer: whatever GitHub type/label maps a card type IN is what a promoted card of that
+    type gets seeded with going OUT, and a card type the map does not mention seeds NOTHING. The
+    FIRST rule naming a target wins, matching derive_card_type_name's own first-match-wins
+    precedence.
+
+    Falling through to REVERSE_SEED_BY_CARD_TYPE when a map IS configured was the original design
+    and is exactly how the two directions drift apart (adversarial-review finding): with
+    `type:Bug=Defect`, a card still typed `Bug` fell back to the built-in `Bug -> native Bug` seed,
+    whose new issue then derives FORWARD to `Defect` -- so the next run retypes the very card the
+    promotion came from. The built-in table therefore applies only when nothing is configured; it
+    additionally covers types no forward rule produces (`Other Work` -> a native `Task`), which a
+    configured map must spell out itself if it wants them."""
     if name is None:
         return _NO_SEED
-    for rule in rules or ():
+    if rules is None:
+        return REVERSE_SEED_BY_CARD_TYPE.get(name, _NO_SEED)
+    for rule in rules:
         if rule.target == name:
             return ReverseSeed(issue_type=rule.key if rule.kind == "issue_type" else None,
                                label=rule.key if rule.kind == "label" else None)
-    return REVERSE_SEED_BY_CARD_TYPE.get(name, _NO_SEED)
+    return _NO_SEED
 
 
 def validate_reverse_issue_type(issue_type: str | None, org_types: frozenset[str] | None) -> str | None:

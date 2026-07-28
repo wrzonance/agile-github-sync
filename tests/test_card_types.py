@@ -415,9 +415,9 @@ def test_parse_card_type_map_reads_both_kinds_in_written_order():
     )
 
 
-def test_parse_card_type_map_blank_means_use_the_defaults():
-    assert parse_card_type_map("") == ()
-    assert parse_card_type_map("   ;  ; ") == ()
+def test_parse_card_type_map_blank_means_unset_which_selects_the_defaults():
+    assert parse_card_type_map("") is None
+    assert parse_card_type_map("   ") is None
     assert active_rules(parse_card_type_map("")) == CARD_TYPE_RULES
 
 
@@ -425,6 +425,28 @@ def test_active_rules_prefers_a_configured_map_over_the_defaults():
     configured = (CardTypeRule(kind="label", key="bug", target="Defect"),)
     assert active_rules(configured) == configured
     assert active_rules(None) == CARD_TYPE_RULES
+
+
+def test_a_map_that_is_entirely_malformed_fails_closed_instead_of_reverting_to_defaults(capsys):
+    """Adversarial-review finding: a wholly invalid CARD_TYPE_MAP used to parse to the same empty
+    result as "unset", silently re-enabling the built-in defaults -- so an operator who typo'd
+    their mapping got card types written from a table they had explicitly tried to replace. A
+    configured-but-unusable map must derive NOTHING."""
+    rules = parse_card_type_map("typo:Bug=Defect; also nonsense")
+    assert rules == ()
+    assert rules is not None
+    assert active_rules(rules) == ()
+    assert derive_card_type_name({"issue_type": "Bug", "labels": ["bug"]}, rules) is None
+    assert "CARD_TYPE_MAP" in capsys.readouterr().out
+
+
+def test_parse_card_type_map_rejects_a_label_gh_could_not_write(capsys):
+    """Adversarial-review finding: reverse intake APPLIES these labels, and ghkit.edit_label raises
+    on a CSV-unsafe name -- after the issue has already been created. The next run then resumes the
+    marked issue and never re-seeds it, so the label is lost forever. Reject it at parse time."""
+    assert parse_card_type_map('label:customer,bug=Defect; label:say"what=Story') == ()
+    out = capsys.readouterr().out
+    assert out.count("gh cannot write") == 2
 
 
 def test_parse_card_type_map_keeps_a_colon_inside_a_label_name():
@@ -482,12 +504,33 @@ def test_reverse_seed_inverts_the_configured_map_so_the_two_directions_cannot_dr
                                                                                label="enhancement")
 
 
-def test_reverse_seed_falls_back_to_the_builtin_table_for_unmapped_card_types():
-    """A configured map need not mention every board type; `Other Work` is reverse-only (no forward
-    rule produces it) and must keep seeding a native Task."""
+def test_a_configured_map_seeds_nothing_for_a_card_type_it_does_not_mention():
+    """Adversarial-review finding (drift): falling back to the built-in table here let
+    `type:Bug=Defect` still seed a native `Bug` from a card typed `Bug` -- whose new issue then
+    derives FORWARD to `Defect`, retyping the very card the promotion came from. When a map is
+    configured it is the whole answer; unmentioned types seed nothing."""
     configured = parse_card_type_map("type:Bug=Defect")
-    assert reverse_seed_for_card_type("Other Work", configured).issue_type == "Task"
+    assert reverse_seed_for_card_type("Bug", configured) == ReverseSeed(None, None)
+    assert reverse_seed_for_card_type("Other Work", configured) == ReverseSeed(None, None)
     assert reverse_seed_for_card_type("Nothing At All", configured) == ReverseSeed(None, None)
+
+
+def test_the_builtin_reverse_table_still_applies_when_nothing_is_configured():
+    """`Other Work` is reverse-only (no forward rule produces it) and keeps seeding a native Task
+    for every board that has not configured a map."""
+    assert reverse_seed_for_card_type("Other Work", None).issue_type == "Task"
+    assert reverse_seed_for_card_type("Other Work").issue_type == "Task"
+
+
+def test_a_configured_map_round_trips_without_retyping_the_source_card():
+    """The invariant the drift finding violated: seed a promoted card's type out to GitHub, derive
+    it back, and land on the SAME card type -- no oscillation, no retyping."""
+    configured = parse_card_type_map("type:Bug=Defect; label:enhancement=Improvement")
+    for card_type in ("Defect", "Improvement"):
+        seed = reverse_seed_for_card_type(card_type, configured)
+        issue = {"issue_type": seed.issue_type,
+                 "labels": [seed.label] if seed.label else []}
+        assert derive_card_type_name(issue, configured) == card_type
 
 
 def test_reverse_seed_for_a_card_type_none_is_still_total_with_a_configured_map():

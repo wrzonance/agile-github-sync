@@ -293,12 +293,13 @@ def test_deleted_comment_sync_identity_is_repopulated_by_dotenv_but_blank_is_not
 
 # --- CARD_TYPE_MAP wiring -----------------------------------------------------------------------
 
-def test_env_config_card_type_map_is_empty_when_unset(tmp_path, monkeypatch):
-    """Empty means "use card_types.CARD_TYPE_RULES" -- an untouched .env keeps today's behavior."""
+def test_env_config_card_type_map_is_none_when_unset(tmp_path, monkeypatch):
+    """None means "use card_types.CARD_TYPE_RULES" -- an untouched .env keeps today's behavior.
+    Distinct from () (configured but entirely unparseable), which fails closed instead."""
     monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
     monkeypatch.setenv("CARD_TYPE_MAP", "")
 
-    assert config.env_config()["card_type_map"] == ()
+    assert config.env_config()["card_type_map"] is None
 
 
 def test_env_config_card_type_map_parses_a_configured_mapping(tmp_path, monkeypatch):
