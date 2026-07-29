@@ -571,3 +571,27 @@ def test_board_card_type_shape_step_skips_informationally_on_a_typeless_board(mo
     smoke._check_board_card_type_shape({}, results)
 
     assert results[0][1] is None
+
+
+def test_pick_card_type_resolves_a_name_keyed_board_entry():
+    """The live board returns `cardTypes[]` keyed `name`, not `title` (confirmed by step 25's raw
+    key dump). Reading `title` alone made _pick_card_type return None on a board with six eligible
+    types, so steps 19-20 reported "no eligible card type configured" and never exercised the
+    typeId write at all -- the silent skip this whole feature exists to end."""
+    entries = [{"id": "t1", "isCardType": True, "name": "New Feature"}]
+
+    assert smoke._pick_card_type(entries) == entries[0]
+
+
+def test_pick_card_type_still_prefers_a_title_keyed_entry():
+    entries = [{"id": "t1", "isCardType": True, "title": "Improvement"}]
+
+    assert smoke._pick_card_type(entries) == entries[0]
+
+
+def test_pick_card_type_skips_task_only_and_untitled_entries():
+    """Eligibility is unchanged by the name fallback: a task-only type is still ineligible, and an
+    entry with neither key still yields nothing rather than a typeId the board would reject."""
+    assert smoke._pick_card_type([{"id": "t1", "isCardType": False, "name": "Subtask"}]) is None
+    assert smoke._pick_card_type([{"id": "t2", "isCardType": True}]) is None
+    assert smoke._pick_card_type([{"id": "t3", "isCardType": True, "name": "   "}]) is None

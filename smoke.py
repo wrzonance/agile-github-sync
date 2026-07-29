@@ -101,11 +101,17 @@ def _pick_lane(lanes: list[dict]) -> dict | None:
 
 
 def _pick_card_type(board_card_types: list[dict]) -> dict | None:
-    """First eligible (isCardType, non-empty title) board card type. Smoke only needs ANY
-    real board-configured type to exercise the typeId write path -- unlike the sync's own
-    card_types.resolve_card_type_ids, it does not need one matching a specific derived name."""
+    """First eligible (isCardType, titled) board card type. Smoke only needs ANY real
+    board-configured type to exercise the typeId write path -- unlike the sync's own
+    card_types.resolve_card_type_ids, it does not need one matching a specific derived name.
+
+    Titles resolve through card_types.board_type_title, the same `title`-then-`name` hedge the sync
+    itself uses. Reading `title` alone silently returned None on a live board that keys its entries
+    `name` (see step 25), so steps 19-20 skipped as "no eligible card type configured" on a board
+    offering six of them -- the typeId write went unexercised on exactly the boards that needed the
+    coverage most."""
     return next((card_type for card_type in board_card_types
-                if card_type.get("isCardType") and (card_type.get("title") or "").strip()), None)
+                if card_type.get("isCardType") and card_types.board_type_title(card_type)), None)
 
 
 def _print_http_failure(exc: SystemExit) -> None:
