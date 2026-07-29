@@ -64,6 +64,15 @@ from timestamps import parse_timestamp
 # docstring references this same constant by name.
 TRUNCATION_MARKER = "…[truncated by sync — full text on GitHub]"
 
+# Emitted by BOTH truncated-stand-in conflict paths in resolve_description -- the one-sided edit and
+# the both-changed recency tiebreak that would otherwise hand the win to AgilePlace. The hazard and
+# the human remedy are identical, so the wording is defined once rather than kept in sync by hand.
+_TRUNCATED_STUB_CONFLICT_WARNING = (
+    "description conflict: the AgilePlace card description changed, but the card holds only a "
+    "truncated stand-in for the full GitHub issue body -- the edit cannot be safely merged back "
+    "without risking loss of the untruncated tail -- leaving both sides untouched until a human "
+    "reconciles them by hand")
+
 
 class DescriptionResolution(NamedTuple):
     """Result of one resolve_description() call.
@@ -154,6 +163,11 @@ def resolve_description(base: str | None, ap_written_base: str | None, gh_canoni
         wins" --
         the same fail-safe direction any unusable timestamp takes, so an older caller that does not
         pass them yet still gets a decision rather than a permanent stalemate.
+      - both changed AND the tiebreak favours AgilePlace, but the card has only ever carried a
+        truncated stand-in -> the same conflict as the one-sided truncated case. The guard outranks
+        recency: writing the stub to GitHub would destroy the untruncated tail regardless of which
+        side is newer. A tiebreak favouring GitHub is unaffected -- that write goes to AgilePlace,
+        which truncates safely.
     """
     base_norm = base or ""
     ap_written_norm = ap_written_base or ""
@@ -173,11 +187,8 @@ def resolve_description(base: str | None, ap_written_base: str | None, gh_canoni
             # promoting ap_canonical to `merged` here would push that short stub to GitHub and
             # permanently destroy the lost tail with no warning. Degrade to the same warn-and-skip
             # conflict policy as a genuine both-sides conflict instead.
-            warning = ("description conflict: the AgilePlace card description changed, but the "
-                       "card holds only a truncated stand-in for the full GitHub issue body -- the "
-                       "edit cannot be safely merged back without risking loss of the untruncated "
-                       "tail -- leaving both sides untouched until a human reconciles them by hand")
-            return DescriptionResolution(base_norm, False, False, True, warning)
+            return DescriptionResolution(base_norm, False, False, True,
+                                         _TRUNCATED_STUB_CONFLICT_WARNING)
         return DescriptionResolution(ap_canonical, True, False, False, None)
     if gh_canonical == ap_canonical:
         return DescriptionResolution(gh_canonical, False, False, False, None)
@@ -185,6 +196,15 @@ def resolve_description(base: str | None, ap_written_base: str | None, gh_canoni
         return DescriptionResolution(gh_canonical, False, True, False, None,
                                      _recency_note("GitHub", "the AgilePlace card",
                                                    gh_updated_at, observed_at))
+    if ap_written_norm != base_norm:
+        # Same truncated-stand-in hazard as the one-sided branch above, reached instead through the
+        # recency tiebreak: "AgilePlace wins" here would push the card's truncated stub to GitHub
+        # and destroy the untruncated tail that lives solely in `base`. No timestamp makes that
+        # safe, so the guard outranks recency (see the module docstring). Only this branch needs it
+        # -- the GitHub-wins branch above writes to AgilePlace, where _truncate_for_agileplace
+        # applies truncation safely on the way out.
+        return DescriptionResolution(base_norm, False, False, True,
+                                     _TRUNCATED_STUB_CONFLICT_WARNING)
     return DescriptionResolution(ap_canonical, True, False, False, None,
                                  _recency_note("the AgilePlace card", "GitHub",
                                                gh_updated_at, observed_at))

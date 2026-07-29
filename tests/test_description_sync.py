@@ -210,9 +210,8 @@ def test_the_same_instant_in_a_different_offset_still_reads_as_untouched():
 
 
 def test_truncated_stub_edit_stays_a_conflict_even_when_recency_favors_agileplace():
-    """The truncation guard outranks the recency tiebreak: promoting an edited truncated stub to
-    GitHub destroys the untruncated tail that lives only in `base`, and no timestamp makes that
-    safe."""
+    """The one-sided truncated-stub conflict still holds when recency arguments are supplied: the
+    GitHub body is unchanged here, so the tiebreak is never consulted and the guard decides alone."""
     full = "A very long description " * 50
     truncated = full[:100] + "...[truncated by sync]"
     result = resolve_description(full, truncated, full, truncated + " edited on the card",
@@ -222,6 +221,45 @@ def test_truncated_stub_edit_stays_a_conflict_even_when_recency_favors_agileplac
     assert result.write_gh is False
     assert result.write_ap is False
     assert result.merged == full
+
+
+def test_truncated_stub_edit_stays_a_conflict_when_both_sides_changed_and_agileplace_wins():
+    """The truncation guard outranks the recency tiebreak on the BOTH-CHANGED path too.
+
+    The sibling test above never reaches the tiebreak (its GitHub body equals `base`, so only the
+    AgilePlace side changed). Here BOTH sides differ from their own reference points and GitHub
+    reports no activity since the base advanced, so recency hands the win to AgilePlace -- which
+    would push the card's truncated stand-in to GitHub and destroy the untruncated tail that lives
+    solely in `base`. No timestamp makes that safe, so it must degrade to the same warn-and-skip
+    conflict instead of a write."""
+    full = "A very long description " * 50
+    truncated = full[:100] + "...[truncated by sync]"
+    result = resolve_description(full, truncated, full + " edited on GitHub",
+                                 truncated + " edited on the card",
+                                 gh_updated_at="2026-07-20T09:00:00Z",
+                                 observed_at="2026-07-20T09:00:00+00:00")
+    assert result.conflict is True
+    assert result.write_gh is False
+    assert result.write_ap is False
+    assert result.merged == full
+    assert result.warning is not None
+    assert "truncated stand-in" in result.warning
+
+
+def test_both_changed_recency_still_lets_github_win_over_a_truncated_card():
+    """The guard narrows only the AgilePlace-wins branch. When GitHub wins on recency the write
+    goes to AgilePlace, where truncation is applied safely on the way out -- so a truncated card
+    must NOT suppress that propagation into a spurious conflict."""
+    full = "A very long description " * 50
+    truncated = full[:100] + "...[truncated by sync]"
+    result = resolve_description(full, truncated, full + " edited on GitHub",
+                                 truncated + " edited on the card",
+                                 gh_updated_at="2026-07-20T11:00:00Z",
+                                 observed_at="2026-07-20T09:00:00Z")
+    assert result.conflict is False
+    assert result.write_ap is True
+    assert result.write_gh is False
+    assert result.merged == full + " edited on GitHub"
 
 
 def test_no_recency_note_is_attached_to_an_ordinary_one_sided_propagation():

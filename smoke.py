@@ -676,7 +676,7 @@ def _check_board_card_type_shape(cfg: dict, results: list) -> None:
         return
     print(f"      first entry raw keys: {sorted(entries[0])}")
     titled = [card_types.board_type_title(entry) for entry in entries]
-    eligible = [title for entry, title in zip(entries, titled)
+    eligible = [title for entry, title in zip(entries, titled, strict=True)
                 if title and entry.get("isCardType")]
     results.append(("board cardTypes[] titles resolve via board_type_title", any(titled),
                     f"{len(entries)} entry(ies), {len(eligible)} eligible: "
