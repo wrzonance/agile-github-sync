@@ -4,17 +4,17 @@
   on weekdays, only while you are logged on (no stored password).
 
 .DESCRIPTION
-  Idempotent (re-registers on re-run). The task runs `python sync.py --apply` from this folder and
-  appends output to sync.log. Prereqs for the run-as user: `python` and `gh` on PATH, `gh auth login`
+  Idempotent (re-registers on re-run). The task runs `python sync.py --apply` from the repo root
+  (this script's parent folder) and appends output to sync.log there. Prereqs for the run-as user: `python` and `gh` on PATH, `gh auth login`
   done, and .env filled (TARGET_REPO_PATH + AGILEPLACE_*).
 
-  First run may require unblocking:  Unblock-File .\Register-BacklogSync.ps1
-  (or invoke as:  powershell -ExecutionPolicy Bypass -File .\Register-BacklogSync.ps1)
+  First run may require unblocking:  Unblock-File .\scripts\Register-BacklogSync.ps1
+  (or invoke as:  powershell -ExecutionPolicy Bypass -File .\scripts\Register-BacklogSync.ps1)
 
 .EXAMPLE
-  .\Register-BacklogSync.ps1
-  .\Register-BacklogSync.ps1 -IntervalMinutes 15 -StartTime 08:00 -ActiveHours 10
-  .\Register-BacklogSync.ps1 -Unregister
+  .\scripts\Register-BacklogSync.ps1
+  .\scripts\Register-BacklogSync.ps1 -IntervalMinutes 15 -StartTime 08:00 -ActiveHours 10
+  .\scripts\Register-BacklogSync.ps1 -Unregister
 #>
 [CmdletBinding()]
 param(
@@ -26,7 +26,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+# The task must run from the repo root (where sync.py, .env, and sync.log live), which is this
+# script's PARENT -- scripts/ only holds the registration script itself.
+$here = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
 if ($Unregister) {
   if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
@@ -76,4 +78,4 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
 
 Write-Host "Registered '$TaskName': every $IntervalMinutes min, weekdays from $StartTime for $ActiveHours h, only while logged on."
 Write-Host "Logs: $log"
-Write-Host "Remove with: .\Register-BacklogSync.ps1 -Unregister"
+Write-Host "Remove with: .\scripts\Register-BacklogSync.ps1 -Unregister"

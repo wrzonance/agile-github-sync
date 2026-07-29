@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-import agileplace
-from card_types import board_type_title  # imported by name: `card_types` is a local param below
-from stages import STAGES, STAGE_CARD_STATUS, lane_matches_stage, title_contains_phrase
+from agilesync.board import agileplace
+from agilesync.card_types import board_type_title  # imported by name: `card_types` is a local param below
+from agilesync.stages import STAGES, STAGE_CARD_STATUS, lane_matches_stage, title_contains_phrase
 
 
 def lane_title(lane: dict) -> str:

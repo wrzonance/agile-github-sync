@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import subprocess
 
-import agileplace
-import ghkit
-import ghproject
-from reconcile import reconcile, reconcile_value
-from stages import issue_custom_id
+from agilesync.board import agileplace
+from agilesync.gh import ghkit
+from agilesync.gh import ghproject
+from agilesync.reconcile import reconcile, reconcile_value
+from agilesync.stages import issue_custom_id
 
 MS_PREFIX = "milestone:"
 

@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import agileplace  # noqa: E402
+from agilesync.board import agileplace  # noqa: E402
 
 CFG = {"token": "t", "host": "tenant.test", "board_id": "42"}
 
@@ -28,7 +28,7 @@ def test_api_system_exit_carries_full_http_error_body_and_status():
     body = json.dumps({"error": "detail " * 100}).encode()  # far beyond the 300-char message cap
     assert len(body) > 300
 
-    with patch("agileplace.urllib.request.urlopen", side_effect=_http_error(422, body)), \
+    with patch("agilesync.board.agileplace.urllib.request.urlopen", side_effect=_http_error(422, body)), \
          pytest.raises(SystemExit) as raised:
         agileplace.api(CFG, "POST", "card", body={"title": "x"})
 
@@ -42,7 +42,7 @@ def test_api_system_exit_carries_full_http_error_body_and_status():
 def test_api_system_exit_on_unreachable_has_no_http_attributes():
     err = urllib.error.URLError("connection refused")
 
-    with patch("agileplace.urllib.request.urlopen", side_effect=err), \
+    with patch("agilesync.board.agileplace.urllib.request.urlopen", side_effect=err), \
          pytest.raises(SystemExit) as raised:
         agileplace.api(CFG, "GET", "board/42")
 
@@ -57,7 +57,7 @@ def test_delete_card_sends_delete_for_quoted_card_path():
         captured["url"] = req.full_url
         return io.BytesIO(b"")
 
-    with patch("agileplace.urllib.request.urlopen", fake_urlopen):
+    with patch("agilesync.board.agileplace.urllib.request.urlopen", fake_urlopen):
         agileplace.delete_card(CFG, True, "A/B")
 
     assert captured["method"] == "DELETE"
@@ -65,7 +65,7 @@ def test_delete_card_sends_delete_for_quoted_card_path():
 
 
 def test_delete_card_dry_run_makes_no_network_call(capsys):
-    with patch("agileplace.urllib.request.urlopen",
+    with patch("agilesync.board.agileplace.urllib.request.urlopen",
                side_effect=AssertionError("network call in dry run")):
         agileplace.delete_card(CFG, False, "123")
 

@@ -18,8 +18,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import NamedTuple
 
-import agileplace
-import agileplace_comments
+from agilesync.board import agileplace
+from agilesync.board import agileplace_comments
 
 
 class BoardReads(NamedTuple):

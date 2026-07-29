@@ -53,11 +53,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import NamedTuple
 
-import agileplace_description
-import ghkit
-import richtext
-from stages import issue_custom_id
-from timestamps import parse_timestamp
+from agilesync.board import agileplace_description
+from agilesync.gh import ghkit
+from agilesync.markup import richtext
+from agilesync.stages import issue_custom_id
+from agilesync.timestamps import parse_timestamp
 
 # Appended to a truncated AgilePlace description so a reader knows the full text lives on GitHub.
 # Exact text pinned by the issue #65 design doc -- config.py's DEFAULT_AP_DESCRIPTION_MAX_LENGTH

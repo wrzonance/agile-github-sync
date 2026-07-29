@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stages import header_match_key, issue_card_header, issue_custom_id  # noqa: E402
+from agilesync.stages import header_match_key, issue_card_header, issue_custom_id  # noqa: E402
 
 
 def test_keyed_task_header_carries_key_and_issue_number():

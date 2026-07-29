@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agileplace import card_child_ids  # noqa: E402
+from agilesync.board.agileplace import card_child_ids  # noqa: E402
 
 CFG = {"token": "t", "host": "h", "board_id": "b1"}
 
@@ -24,7 +24,7 @@ def test_card_child_ids_paginates_documented_response_to_complete_snapshot():
         },
     ]
 
-    with patch("agileplace.api", side_effect=pages) as api_mock:
+    with patch("agilesync.board.agileplace.api", side_effect=pages) as api_mock:
         child_ids = card_child_ids(CFG, "parent")
 
     assert child_ids == frozenset({"c1", "2", "c3"})
@@ -42,7 +42,7 @@ def test_card_child_ids_successful_empty_is_distinct_from_failure_and_quotes_par
         "pageMeta": {"offset": 0, "limit": 25, "totalRecords": 0},
     }
 
-    with patch("agileplace.api", return_value=response) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value=response) as api_mock:
         child_ids = card_child_ids(CFG, "parent/../../?")
 
     assert child_ids == frozenset()
@@ -69,7 +69,7 @@ def test_card_child_ids_successful_empty_is_distinct_from_failure_and_quotes_par
     ],
 )
 def test_card_child_ids_malformed_response_is_non_authoritative(response, warning, capsys):
-    with patch("agileplace.api", return_value=response):
+    with patch("agilesync.board.agileplace.api", return_value=response):
         child_ids = card_child_ids(CFG, "parent")
 
     assert child_ids is None
@@ -79,7 +79,7 @@ def test_card_child_ids_malformed_response_is_non_authoritative(response, warnin
 
 
 def test_card_child_ids_transport_failure_is_non_authoritative(capsys):
-    with patch("agileplace.api", side_effect=SystemExit("AgilePlace unavailable")):
+    with patch("agilesync.board.agileplace.api", side_effect=SystemExit("AgilePlace unavailable")):
         child_ids = card_child_ids(CFG, "parent")
 
     assert child_ids is None
@@ -98,7 +98,7 @@ def test_card_child_ids_incomplete_pagination_is_non_authoritative(capsys):
         },
     ]
 
-    with patch("agileplace.api", side_effect=pages):
+    with patch("agilesync.board.agileplace.api", side_effect=pages):
         child_ids = card_child_ids(CFG, "parent")
 
     assert child_ids is None

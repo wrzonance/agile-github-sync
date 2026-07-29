@@ -21,11 +21,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import agileplace  # noqa: E402
-import board_layout  # noqa: E402
-import ghkit  # noqa: E402
-import intake  # noqa: E402
-import sync  # noqa: E402
+from agilesync.board import agileplace  # noqa: E402
+from agilesync.board import board_layout  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync.syncers import intake  # noqa: E402
+from agilesync import sync  # noqa: E402
 
 # _mock_io is test_sync_main.py's richer I/O-boundary-mocking helper (lane/existing-card control,
 # a real patch_card mock to inspect) -- reused here rather than duplicated, for the one test below
@@ -68,23 +68,23 @@ def _run_main(tmp_path, promote_return, lanes=(), cards=None):
     state_file = tmp_path / ".sync-state.json"
     cfg = _cfg(tmp_path)
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
-    stack.enter_context(patch("ghkit.list_issues", return_value=[_issue()]))
-    stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
-    stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
-    stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
-    stack.enter_context(patch("ghproject.configured", return_value=False))
+    stack.enter_context(patch("agilesync.gh.ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
+    stack.enter_context(patch("agilesync.gh.ghkit.list_issues", return_value=[_issue()]))
+    stack.enter_context(patch("agilesync.gh.ghkit.open_pr_issue_numbers", return_value=set()))
+    stack.enter_context(patch("agilesync.gh.ghkit.blocked_by_map", return_value={}))
+    stack.enter_context(patch("agilesync.gh.ghkit.run", return_value=Mock(stdout="")))
+    stack.enter_context(patch("agilesync.gh.ghproject.configured", return_value=False))
     stack.enter_context(patch(
-        "board_layout.board_layout",
+        "agilesync.board.board_layout.board_layout",
         return_value=board_layout.BoardLayout(lanes=list(lanes), card_types=[]),
     ))
-    stack.enter_context(patch("agileplace.list_cards", return_value=cards if cards is not None else [_card()]))
-    stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
-    stack.enter_context(patch("agileplace.patch_card"))
-    stack.enter_context(patch("agileplace.create_card", return_value={}))
-    promote_mock = stack.enter_context(patch("intake.promote", return_value=promote_return))
+    stack.enter_context(patch("agilesync.board.agileplace.list_cards", return_value=cards if cards is not None else [_card()]))
+    stack.enter_context(patch("agilesync.board.agileplace.card_dependencies", return_value=[]))
+    stack.enter_context(patch("agilesync.board.agileplace.patch_card"))
+    stack.enter_context(patch("agilesync.board.agileplace.create_card", return_value={}))
+    promote_mock = stack.enter_context(patch("agilesync.syncers.intake.promote", return_value=promote_return))
 
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
     return promote_mock
@@ -132,8 +132,8 @@ def test_main_does_not_create_a_duplicate_card_for_a_resumed_active_issue(tmp_pa
         intake_card, ({}, []), field_meta_return=None,
         existing_cards=[intake_card], lanes_return=[intake_lane], issue_return=active_issue)
 
-    with stack, patch("sync.env_config", return_value=cfg), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py"]):
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), \
+         patch("agilesync.sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py"]):
         sync.main()
 
     create_card_mock.assert_not_called()
@@ -151,23 +151,23 @@ def test_main_runs_intake_only_after_the_fail_closed_identity_check(tmp_path):
     cid_card = {"id": "C-cid", "customId": "1", "laneId": "LANE1"}  # issue #1's fallback customId
 
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
-    stack.enter_context(patch("ghkit.list_issues", return_value=[_issue()]))
-    stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
-    stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
-    stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
-    stack.enter_context(patch("ghproject.configured", return_value=False))
+    stack.enter_context(patch("agilesync.gh.ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
+    stack.enter_context(patch("agilesync.gh.ghkit.list_issues", return_value=[_issue()]))
+    stack.enter_context(patch("agilesync.gh.ghkit.open_pr_issue_numbers", return_value=set()))
+    stack.enter_context(patch("agilesync.gh.ghkit.blocked_by_map", return_value={}))
+    stack.enter_context(patch("agilesync.gh.ghkit.run", return_value=Mock(stdout="")))
+    stack.enter_context(patch("agilesync.gh.ghproject.configured", return_value=False))
     stack.enter_context(patch(
-        "board_layout.board_layout",
+        "agilesync.board.board_layout.board_layout",
         return_value=board_layout.BoardLayout(lanes=[], card_types=[]),
     ))
-    stack.enter_context(patch("agileplace.list_cards", return_value=[url_card, cid_card]))
-    stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
-    stack.enter_context(patch("agileplace.patch_card"))
-    stack.enter_context(patch("agileplace.create_card", return_value={}))
-    promote_mock = stack.enter_context(patch("intake.promote"))
+    stack.enter_context(patch("agilesync.board.agileplace.list_cards", return_value=[url_card, cid_card]))
+    stack.enter_context(patch("agilesync.board.agileplace.card_dependencies", return_value=[]))
+    stack.enter_context(patch("agilesync.board.agileplace.patch_card"))
+    stack.enter_context(patch("agilesync.board.agileplace.create_card", return_value={}))
+    promote_mock = stack.enter_context(patch("agilesync.syncers.intake.promote"))
 
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]), pytest.raises(SystemExit):
         sync.main()
 
@@ -233,10 +233,10 @@ def test_main_wires_intake_promote_and_never_moves_the_promoted_cards_lane(tmp_p
     # intake._card_for_link_write's real explicit refetch (issue #62 critical-bug fix) calls
     # agileplace.get_card directly, bypassing the patch_card mock above -- stub it with a fresh,
     # usable-version snapshot so the writeback's second PATCH proceeds normally.
-    with stack, patch("sync.env_config", return_value=cfg), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
-         patch("ghkit.create_issue", return_value=created_issue) as create_issue_mock, \
-         patch("agileplace.get_card",
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), \
+         patch("agilesync.sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+         patch("agilesync.gh.ghkit.create_issue", return_value=created_issue) as create_issue_mock, \
+         patch("agilesync.board.agileplace.get_card",
                return_value={"id": intake_card["id"], "version": 2}):
         sync.main()
 

@@ -15,13 +15,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from richtext import (  # noqa: E402
+from agilesync.markup.richtext import (  # noqa: E402
     _escape_html_text,
     _escape_markdown_text,
     _sanitize_href,
     _unescape_markdown_text,
 )
-from _richtext_shared import (  # noqa: E402
+from agilesync.markup._richtext_shared import (  # noqa: E402
     _INLINE_AMBIGUOUS_CHARS,
     _UNESCAPABLE_CHARS,
 )

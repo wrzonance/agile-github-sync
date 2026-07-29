@@ -171,6 +171,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# The two files these budgets pin, at their package locations (the root `sync.py` is only a thin
+# entry-point shim -- the orchestration this budget is about lives in agilesync/sync.py).
+SYNC_PY = REPO_ROOT / "agilesync" / "sync.py"
+AGILEPLACE_PY = REPO_ROOT / "agilesync" / "board" / "agileplace.py"
+
 # Re-anchored for issue #66 (comment sync) from #79's 726 to 750 -- sync.py's own size at
 # origin/main (e62a5b8, the tip of #84) immediately before issue #66's first commit, measured via
 # `git show origin/main:sync.py | wc -l`. Three merges (#78, #81, #83/#79's fix-up, #88/#84) landed
@@ -299,7 +304,7 @@ NEW_TEST_FILES = (
 
 
 def test_sync_py_stays_within_wiring_only_line_budget():
-    line_count = len(Path(REPO_ROOT / "sync.py").read_text().splitlines())
+    line_count = len(SYNC_PY.read_text().splitlines())
 
     assert line_count <= PRE_CHANGE_SYNC_LINES + WIRING_BUDGET_LINES, (
         f"sync.py grew to {line_count} lines, past the wiring-only budget of "
@@ -315,7 +320,7 @@ def test_sync_py_never_exceeds_repo_hard_cap():
     wiring-budget arithmetic says. Catches sync.py crossing that convention even in the (unlikely)
     case a future re-anchor of PRE_CHANGE_SYNC_LINES + WIRING_BUDGET_LINES were miscalculated past
     800 itself."""
-    line_count = len(Path(REPO_ROOT / "sync.py").read_text().splitlines())
+    line_count = len(SYNC_PY.read_text().splitlines())
 
     assert line_count <= SYNC_PY_HARD_CAP_LINES, (
         f"sync.py has grown to {line_count} lines, past the repo's own {SYNC_PY_HARD_CAP_LINES}-line "
@@ -330,7 +335,7 @@ def test_agileplace_py_stays_within_wiring_only_line_budget():
     docstring). PRE_CHANGE_AGILEPLACE_LINES is now re-anchored to the post-extraction, under-cap
     figure; this test pins future changes' own wiring-only delta on top of that leaner baseline, so
     a change can't silently pile bulk back onto the file issue #84 just de-bloated."""
-    line_count = len(Path(REPO_ROOT / "agileplace.py").read_text().splitlines())
+    line_count = len(AGILEPLACE_PY.read_text().splitlines())
 
     assert line_count <= PRE_CHANGE_AGILEPLACE_LINES + AGILEPLACE_WIRING_BUDGET_LINES, (
         f"agileplace.py grew to {line_count} lines, past the wiring-only budget of "
@@ -349,7 +354,7 @@ def test_agileplace_py_never_exceeds_repo_hard_cap():
     lines) that predated #82's own commits; issue #84's board_layout.py extraction paid that debt
     down to 672 lines, so the assertion is only added now that it is honest -- it no longer fails
     against anything but genuinely new growth past the cap."""
-    line_count = len(Path(REPO_ROOT / "agileplace.py").read_text().splitlines())
+    line_count = len(AGILEPLACE_PY.read_text().splitlines())
 
     assert line_count <= AGILEPLACE_HARD_CAP_LINES, (
         f"agileplace.py has grown to {line_count} lines, past the repo's own "
@@ -367,7 +372,7 @@ def test_agileplace_py_is_byte_for_byte_unchanged_by_comment_sync():
     Windows, which would flip the raw-bytes hash even though git holds the file unchanged, so CRLF
     is folded to LF before hashing and AGILEPLACE_SHA256 is the LF-form hash."""
     actual = hashlib.sha256(
-        Path(REPO_ROOT / "agileplace.py").read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        AGILEPLACE_PY.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
     assert actual == AGILEPLACE_SHA256, (
         "agileplace.py's contents changed, but issue #66's design commits to adding comment I/O "
@@ -420,7 +425,7 @@ def test_no_test_file_imports_metadata_sync_names_from_sync():
     for path in sorted((REPO_ROOT / "tests").glob("test_*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "sync":
+            if isinstance(node, ast.ImportFrom) and node.module == "agilesync.sync":
                 hit = {alias.name for alias in node.names} & set(MOVED_TO_METADATA_SYNC)
                 if hit:
                     offenders.append(f"{path.relative_to(REPO_ROOT)}: {sorted(hit)}")

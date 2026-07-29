@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import ghkit  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
 
 
 def _context() -> ghkit.RepoContext:

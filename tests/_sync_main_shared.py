@@ -7,8 +7,9 @@ minimal issue/card/config builders are identical across both, so they live here 
 main()'s I/O boundaries updates this single harness rather than two byte-for-byte copies.
 `_card_with_url` stays local to test_sync_cid_collision.py, its only user.
 
-Mirrors the repo's existing shared-test-helper convention (_richtext_shared.py): a root-level
-`_*_shared.py` module the test files import after adding the repo root to sys.path.
+Mirrors the repo's existing shared-helper convention (agilesync/markup/_richtext_shared.py): a
+`_*_shared.py` module its siblings import directly -- here from tests/, which pytest puts on
+sys.path itself, while the insert below adds the repo root so `agilesync` imports resolve.
 
 Run: pytest -q
 """
@@ -21,12 +22,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import agileplace  # noqa: E402
-import board_layout  # noqa: E402
-import ghkit  # noqa: E402
-import sync  # noqa: E402
+from agilesync.board import agileplace  # noqa: E402
+from agilesync.board import board_layout  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync import sync  # noqa: E402
 
 
 def _issue(number: int, title: str) -> dict:
@@ -76,26 +77,26 @@ def _run_main(tmp_path, monkeypatch, raw_issues, cards, lanes=()):
         ghkit, "run", lambda *_a, **_k: SimpleNamespace(stdout=json.dumps(raw_issues)))
     stack = ExitStack()
     stack.enter_context(patch(
-        "ghkit.resolve_repo_context",
+        "agilesync.gh.ghkit.resolve_repo_context",
         return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
-    stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
-    stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
-    stack.enter_context(patch("ghkit.edit_label"))
-    stack.enter_context(patch("ghkit.set_milestone"))
-    stack.enter_context(patch("ghproject.configured", return_value=False))
-    stack.enter_context(patch("ghproject.items", return_value={}))
-    stack.enter_context(patch("ghproject.field_meta", return_value=None))
-    stack.enter_context(patch("ghproject.hydrate_item_dates", return_value={}))
+    stack.enter_context(patch("agilesync.gh.ghkit.open_pr_issue_numbers", return_value=set()))
+    stack.enter_context(patch("agilesync.gh.ghkit.blocked_by_map", return_value={}))
+    stack.enter_context(patch("agilesync.gh.ghkit.edit_label"))
+    stack.enter_context(patch("agilesync.gh.ghkit.set_milestone"))
+    stack.enter_context(patch("agilesync.gh.ghproject.configured", return_value=False))
+    stack.enter_context(patch("agilesync.gh.ghproject.items", return_value={}))
+    stack.enter_context(patch("agilesync.gh.ghproject.field_meta", return_value=None))
+    stack.enter_context(patch("agilesync.gh.ghproject.hydrate_item_dates", return_value={}))
     stack.enter_context(patch(
-        "board_layout.board_layout",
+        "agilesync.board.board_layout.board_layout",
         return_value=board_layout.BoardLayout(lanes=list(lanes), card_types=[]),
     ))
-    stack.enter_context(patch("agileplace.list_cards", return_value=cards))
-    stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
-    create_card = stack.enter_context(patch("agileplace.create_card", return_value={}))
-    patch_card = stack.enter_context(patch("agileplace.patch_card"))
-    with stack, patch("sync.env_config", return_value=_config(tmp_path)), \
-         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+    stack.enter_context(patch("agilesync.board.agileplace.list_cards", return_value=cards))
+    stack.enter_context(patch("agilesync.board.agileplace.card_dependencies", return_value=[]))
+    create_card = stack.enter_context(patch("agilesync.board.agileplace.create_card", return_value={}))
+    patch_card = stack.enter_context(patch("agilesync.board.agileplace.patch_card"))
+    with stack, patch("agilesync.sync.env_config", return_value=_config(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py"]):
         sync.main()
     return create_card, patch_card

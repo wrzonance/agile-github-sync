@@ -21,13 +21,13 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import agileplace  # noqa: E402
-import board_layout  # noqa: E402
-import ghkit  # noqa: E402
-import intake  # noqa: E402
-import smoke  # noqa: E402
-import sync  # noqa: E402
-import vetting_latch  # noqa: E402
+from agilesync.board import agileplace  # noqa: E402
+from agilesync.board import board_layout  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync.syncers import intake  # noqa: E402
+from agilesync.tools import smoke  # noqa: E402
+from agilesync import sync  # noqa: E402
+from agilesync.syncers import vetting_latch  # noqa: E402
 
 # The 24 names agileplace.py's own design keeps -- api/mutate/reads/op-builders/patch-writes/
 # dependency helpers. Board topology (BoardLayout, board_layout, lane_title,
@@ -55,7 +55,7 @@ def test_agileplace_no_longer_exposes_the_moved_board_layout_names():
 
 
 def test_protect_open_pr_stage_delegates_to_board_layout_resolve_lane_for_stage():
-    with patch("board_layout.resolve_lane_for_stage",
+    with patch("agilesync.board.board_layout.resolve_lane_for_stage",
                return_value=(None, {"L1"})) as resolve_mock:
         result = sync._protect_open_pr_stage(
             "Ready", "L1", lanes=[{"id": "L1"}], milestone="1.0", stage_map=None,
@@ -69,9 +69,9 @@ def test_apply_lane_move_delegates_to_board_layout_resolve_lane_for_stage_and_la
     target_lane = {"id": "L2", "title": "Ready"}
     queued = []
 
-    with patch("board_layout.resolve_lane_for_stage",
+    with patch("agilesync.board.board_layout.resolve_lane_for_stage",
                return_value=(target_lane, {"L1"})) as resolve_mock, \
-         patch("board_layout.lane_title", return_value="Ready") as lane_title_mock:
+         patch("agilesync.board.board_layout.lane_title", return_value="Ready") as lane_title_mock:
         sync._apply_lane_move(
             cfg={}, apply=True,
             issue={"milestone": None, "state": "OPEN", "url": "https://example.test/1"},
@@ -90,9 +90,9 @@ def test_retire_card_delegates_to_board_layout_resolve_lane_for_stage_and_lane_t
     target_lane = {"id": "L3", "title": "Done"}
     queued = []
 
-    with patch("board_layout.resolve_lane_for_stage",
+    with patch("agilesync.board.board_layout.resolve_lane_for_stage",
                return_value=(target_lane, set())) as resolve_mock, \
-         patch("board_layout.lane_title", return_value="Done") as lane_title_mock:
+         patch("agilesync.board.board_layout.lane_title", return_value="Done") as lane_title_mock:
         sync._retire_card(
             issue={"state_reason": "COMPLETED", "milestone": None, "title": "widget", "number": 1},
             card={"id": "C1", "laneId": "L1"},
@@ -106,7 +106,7 @@ def test_retire_card_delegates_to_board_layout_resolve_lane_for_stage_and_lane_t
 
 def test_intake_lane_ids_delegates_to_board_layout_resolve_lane_for_stage():
     stage_map = {"Intake": ["Intake Lane"]}
-    with patch("board_layout.resolve_lane_for_stage",
+    with patch("agilesync.board.board_layout.resolve_lane_for_stage",
                return_value=(None, {"L9"})) as resolve_mock:
         result = intake._intake_lane_ids(lanes=[{"id": "L9"}], stage_map=stage_map)
 
@@ -115,7 +115,7 @@ def test_intake_lane_ids_delegates_to_board_layout_resolve_lane_for_stage():
 
 
 def test_apply_latch_delegates_to_board_layout_stage_for_lane():
-    with patch("board_layout.stage_for_lane", return_value=None) as stage_for_lane_mock:
+    with patch("agilesync.board.board_layout.stage_for_lane", return_value=None) as stage_for_lane_mock:
         result = vetting_latch.apply_latch(
             cfg={}, apply=True, issue={"url": "https://example.test/1"}, key="K1",
             current_lane_id="L1", lanes=[{"id": "L1"}], stage_map={})
@@ -125,7 +125,7 @@ def test_apply_latch_delegates_to_board_layout_stage_for_lane():
 
 
 def test_repair_statusless_member_delegates_to_board_layout_stage_for_lane():
-    with patch("board_layout.stage_for_lane", return_value=None) as stage_for_lane_mock:
+    with patch("agilesync.board.board_layout.stage_for_lane", return_value=None) as stage_for_lane_mock:
         result = vetting_latch.repair_statusless_member(
             cfg={}, apply=True, issue={"url": "https://example.test/1"}, key="K1",
             current_lane_id="L1", lanes=[{"id": "L1"}], stage_map={}, item=None)
@@ -136,7 +136,7 @@ def test_repair_statusless_member_delegates_to_board_layout_stage_for_lane():
 
 def test_smoke_check_type_id_writes_delegates_to_board_layout_board_layout():
     empty_layout = board_layout.BoardLayout(lanes=[], card_types=[])
-    with patch("board_layout.board_layout", return_value=empty_layout) as board_layout_mock:
+    with patch("agilesync.board.board_layout.board_layout", return_value=empty_layout) as board_layout_mock:
         results = []
         smoke._check_type_id_writes(
             cfg={"board_id": "1"}, lane_id=None, parent_id="P1", run_id="r1", created=[],
@@ -150,9 +150,9 @@ def test_smoke_check_type_id_writes_delegates_to_board_layout_board_layout():
 def test_smoke_preview_delegates_to_board_layout_lane_title():
     board = {"title": "Board", "lanes": [{"id": "L1", "title": "Ready",
                                           "isDefaultDropLane": False}]}
-    with patch("agileplace.api", return_value=board), \
-         patch("agileplace.list_cards", return_value=[]), \
-         patch("board_layout.lane_title", return_value="Ready") as lane_title_mock:
+    with patch("agilesync.board.agileplace.api", return_value=board), \
+         patch("agilesync.board.agileplace.list_cards", return_value=[]), \
+         patch("agilesync.board.board_layout.lane_title", return_value="Ready") as lane_title_mock:
         lanes = smoke._preview({"board_id": "1", "host": "example.leankit.com"})
 
     lane_title_mock.assert_called_once_with(board["lanes"][0])
@@ -186,28 +186,28 @@ def test_main_calls_board_layout_board_layout_when_online(tmp_path):
              "milestone": None, "assignees": [], "url": "https://github.com/acme/repo/issues/1"}
 
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
-    stack.enter_context(patch("ghkit.list_issues", return_value=[issue]))
-    stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
-    stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
-    stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
-    stack.enter_context(patch("ghproject.configured", return_value=True))
-    stack.enter_context(patch("ghproject.items", return_value=[]))
-    stack.enter_context(patch("ghproject.field_meta", return_value=None))
-    stack.enter_context(patch("ghproject.hydrate_item_dates", return_value=[]))
-    stack.enter_context(patch("ghproject.can_set_status", return_value=True))
-    stack.enter_context(patch("ghproject.add_item", return_value="planned:test"))
-    stack.enter_context(patch("ghproject.set_item_status", return_value=True))
+    stack.enter_context(patch("agilesync.gh.ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
+    stack.enter_context(patch("agilesync.gh.ghkit.list_issues", return_value=[issue]))
+    stack.enter_context(patch("agilesync.gh.ghkit.open_pr_issue_numbers", return_value=set()))
+    stack.enter_context(patch("agilesync.gh.ghkit.blocked_by_map", return_value={}))
+    stack.enter_context(patch("agilesync.gh.ghkit.run", return_value=Mock(stdout="")))
+    stack.enter_context(patch("agilesync.gh.ghproject.configured", return_value=True))
+    stack.enter_context(patch("agilesync.gh.ghproject.items", return_value=[]))
+    stack.enter_context(patch("agilesync.gh.ghproject.field_meta", return_value=None))
+    stack.enter_context(patch("agilesync.gh.ghproject.hydrate_item_dates", return_value=[]))
+    stack.enter_context(patch("agilesync.gh.ghproject.can_set_status", return_value=True))
+    stack.enter_context(patch("agilesync.gh.ghproject.add_item", return_value="planned:test"))
+    stack.enter_context(patch("agilesync.gh.ghproject.set_item_status", return_value=True))
     board_layout_mock = stack.enter_context(patch(
-        "board_layout.board_layout",
+        "agilesync.board.board_layout.board_layout",
         return_value=board_layout.BoardLayout(lanes=[], card_types=[]),
     ))
-    stack.enter_context(patch("agileplace.list_cards", return_value=[card]))
-    stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
-    stack.enter_context(patch("agileplace.patch_card"))
-    stack.enter_context(patch("agileplace.create_card", return_value={}))
+    stack.enter_context(patch("agilesync.board.agileplace.list_cards", return_value=[card]))
+    stack.enter_context(patch("agilesync.board.agileplace.card_dependencies", return_value=[]))
+    stack.enter_context(patch("agilesync.board.agileplace.patch_card"))
+    stack.enter_context(patch("agilesync.board.agileplace.create_card", return_value={}))
 
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 

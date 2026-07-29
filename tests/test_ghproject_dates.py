@@ -7,16 +7,16 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import ghkit  # noqa: E402
-import ghproject  # noqa: E402
-from ghproject import _camel, _field, parse_items  # noqa: E402
-from metadata_sync import sync_dates  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync.gh import ghproject  # noqa: E402
+from agilesync.gh.ghproject import _camel, _field, parse_items  # noqa: E402
+from agilesync.syncers.metadata_sync import sync_dates  # noqa: E402
 
 
 def _patch_ctx(host="github.com"):
     """Patch _repo_context so the project read path resolves a host and reaches the gh project call
     under test (rather than short-circuiting on host resolution)."""
-    return patch("ghproject.ghkit._repo_context",
+    return patch("agilesync.gh.ghproject.ghkit._repo_context",
                  return_value=ghkit.RepoContext(owner="acme", name="widgets", host=host))
 
 
@@ -109,7 +109,7 @@ def _run_success(*_args, **_kwargs):
 
 def test_items_returns_parsed_rows_on_success():
     cfg = _cfg()
-    with patch("ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
+    with patch("agilesync.gh.ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
         result = ghproject.items(cfg)
     assert result["https://github.com/o/r/issues/5"]["start"] == "2026-01-02"
 
@@ -117,28 +117,28 @@ def test_items_returns_parsed_rows_on_success():
 def test_items_returns_none_on_subprocess_failure():
     cfg = _cfg()
     err = subprocess.CalledProcessError(1, ["gh"])
-    with patch("ghproject.ghkit.run", side_effect=err), _patch_ctx():
+    with patch("agilesync.gh.ghproject.ghkit.run", side_effect=err), _patch_ctx():
         assert ghproject.items(cfg) is None
 
 
 def test_items_returns_none_on_json_decode_failure():
     cfg = _cfg()
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout="not json")), _patch_ctx():
+    with patch("agilesync.gh.ghproject.ghkit.run", return_value=Mock(stdout="not json")), _patch_ctx():
         assert ghproject.items(cfg) is None
 
 
 def test_items_returns_none_on_key_error():
     cfg = _cfg()
     del cfg["gh_project"]["status_field"]  # parse_items needs p["status_field"] -> KeyError
-    with patch("ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
+    with patch("agilesync.gh.ghproject.ghkit.run", side_effect=_run_success), _patch_ctx():
         assert ghproject.items(cfg) is None
 
 
 def test_fetch_raw_items_fails_closed_when_host_unresolved():
     # No resolvable target host -> no gh project call is attempted, and the read fails closed.
     cfg = _cfg()
-    with patch("ghproject.ghkit._repo_context", return_value=None), \
-        patch("ghproject.ghkit.run", side_effect=_run_success) as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit._repo_context", return_value=None), \
+        patch("agilesync.gh.ghproject.ghkit.run", side_effect=_run_success) as run_mock:
         assert ghproject.items(cfg) is None
     run_mock.assert_not_called()
 
@@ -146,7 +146,7 @@ def test_fetch_raw_items_fails_closed_when_host_unresolved():
 def test_fetch_raw_items_pins_project_call_to_resolved_host():
     # gh project item-list has no --hostname flag; the resolved host must reach run() as host=.
     cfg = _cfg()
-    with patch("ghproject.ghkit.run", side_effect=_run_success) as run_mock, _patch_ctx(host="ghes.acme.internal"):
+    with patch("agilesync.gh.ghproject.ghkit.run", side_effect=_run_success) as run_mock, _patch_ctx(host="ghes.acme.internal"):
         ghproject.items(cfg)
     assert run_mock.call_args.kwargs.get("host") == "ghes.acme.internal"
 
@@ -161,28 +161,28 @@ def test_items_returns_none_when_not_configured():
 # apply (live PATCH) and DRY (print-only) branches.
 
 def test_set_project_date_false_and_no_write_when_item_id_missing():
-    with patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         result = ghproject.set_project_date(_cfg(), True, "PVT_1", None, "SF_1", "2026-01-02")
     assert result is False
     run_mock.assert_not_called()
 
 
 def test_set_project_date_false_and_no_write_when_field_id_missing():
-    with patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         result = ghproject.set_project_date(_cfg(), True, "PVT_1", "PVTI_1", None, "2026-01-02")
     assert result is False
     run_mock.assert_not_called()
 
 
 def test_set_project_date_true_and_writes_on_apply():
-    with patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         result = ghproject.set_project_date(_cfg(), True, "PVT_1", "PVTI_1", "SF_1", "2026-01-02")
     assert result is True
     run_mock.assert_called_once()
 
 
 def test_set_project_date_true_and_no_write_on_dry_run():
-    with patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         result = ghproject.set_project_date(_cfg(), False, "PVT_1", "PVTI_1", "SF_1", "2026-01-02")
     assert result is True
     run_mock.assert_not_called()
@@ -191,7 +191,7 @@ def test_set_project_date_true_and_no_write_on_dry_run():
 def test_set_project_date_pins_write_to_host():
     # gh project item-edit has no --hostname flag; the write must reach run() as host=, never the
     # default host (writing to a same-number project on the wrong instance).
-    with patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         ghproject.set_project_date(_cfg(), True, "PVT_1", "PVTI_1", "SF_1", "2026-01-02",
                                    "ghes.acme.internal")
     assert run_mock.call_args.kwargs.get("host") == "ghes.acme.internal"
@@ -209,7 +209,7 @@ def _field_meta_run(*args, **_kwargs):
 
 
 def test_field_meta_pins_calls_to_host_and_stores_it():
-    with patch("ghproject.ghkit.run", side_effect=_field_meta_run) as run_mock, \
+    with patch("agilesync.gh.ghproject.ghkit.run", side_effect=_field_meta_run) as run_mock, \
          _patch_ctx(host="ghes.acme.internal"):
         meta = ghproject.field_meta(_cfg())
     assert meta is not None
@@ -218,8 +218,8 @@ def test_field_meta_pins_calls_to_host_and_stores_it():
 
 
 def test_field_meta_fails_closed_when_host_unresolved():
-    with patch("ghproject.ghkit._repo_context", return_value=None), \
-         patch("ghproject.ghkit.run", side_effect=_field_meta_run) as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit._repo_context", return_value=None), \
+         patch("agilesync.gh.ghproject.ghkit.run", side_effect=_field_meta_run) as run_mock:
         assert ghproject.field_meta(_cfg()) is None
     run_mock.assert_not_called()
 
@@ -233,7 +233,7 @@ URL9 = "https://github.com/o/r/issues/9"
 
 
 def test_add_item_returns_none_when_not_configured():
-    with patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         assert ghproject.add_item(_cfg(owner=None), False, URL9) is None
         assert ghproject.add_item(_cfg(owner=None), True, URL9) is None
     run_mock.assert_not_called()
@@ -242,7 +242,7 @@ def test_add_item_returns_none_when_not_configured():
 def test_add_item_dry_run_returns_deterministic_placeholder_and_writes_nothing():
     import hashlib
     expected = ghproject.PLANNED_ITEM_ID_PREFIX + hashlib.sha256(URL9.encode()).hexdigest()[:16]
-    with patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         result = ghproject.add_item(_cfg(), False, URL9)
     assert result == expected
     assert isinstance(result, str)
@@ -260,7 +260,7 @@ def test_add_item_dry_run_placeholder_is_stable_across_calls_and_varies_by_url()
 
 def test_add_item_apply_parses_id_from_json_on_success():
     run_mock = Mock(return_value=Mock(stdout=json.dumps({"id": "PVTI_9"})))
-    with patch("ghproject.ghkit.run", run_mock), _patch_ctx():
+    with patch("agilesync.gh.ghproject.ghkit.run", run_mock), _patch_ctx():
         result = ghproject.add_item(_cfg(), True, URL9)
     assert result == "PVTI_9"
     args = run_mock.call_args.args[1]
@@ -270,31 +270,31 @@ def test_add_item_apply_parses_id_from_json_on_success():
 
 def test_add_item_apply_pins_call_to_resolved_host():
     run_mock = Mock(return_value=Mock(stdout=json.dumps({"id": "PVTI_9"})))
-    with patch("ghproject.ghkit.run", run_mock), _patch_ctx(host="ghes.acme.internal"):
+    with patch("agilesync.gh.ghproject.ghkit.run", run_mock), _patch_ctx(host="ghes.acme.internal"):
         ghproject.add_item(_cfg(), True, URL9)
     assert run_mock.call_args.kwargs.get("host") == "ghes.acme.internal"
 
 
 def test_add_item_apply_fails_closed_when_host_unresolved():
-    with patch("ghproject.ghkit._repo_context", return_value=None), \
-         patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit._repo_context", return_value=None), \
+         patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         assert ghproject.add_item(_cfg(), True, URL9) is None
     run_mock.assert_not_called()
 
 
 def test_add_item_apply_returns_none_on_subprocess_failure():
     err = subprocess.CalledProcessError(1, ["gh"])
-    with patch("ghproject.ghkit.run", side_effect=err), _patch_ctx():
+    with patch("agilesync.gh.ghproject.ghkit.run", side_effect=err), _patch_ctx():
         assert ghproject.add_item(_cfg(), True, URL9) is None
 
 
 def test_add_item_apply_returns_none_on_malformed_json():
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout="not json")), _patch_ctx():
+    with patch("agilesync.gh.ghproject.ghkit.run", return_value=Mock(stdout="not json")), _patch_ctx():
         assert ghproject.add_item(_cfg(), True, URL9) is None
 
 
 def test_add_item_apply_returns_none_when_id_key_missing():
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout=json.dumps({}))), _patch_ctx():
+    with patch("agilesync.gh.ghproject.ghkit.run", return_value=Mock(stdout=json.dumps({}))), _patch_ctx():
         assert ghproject.add_item(_cfg(), True, URL9) is None
 
 
@@ -308,42 +308,42 @@ def _status_meta(**overrides):
 
 
 def test_set_item_status_false_when_field_meta_unavailable():
-    with patch("ghproject.field_meta", return_value=None), patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.field_meta", return_value=None), patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         assert ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake") is False
     run_mock.assert_not_called()
 
 
 def test_set_item_status_false_when_status_field_id_missing():
     meta = _status_meta(status_field_id=None)
-    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.field_meta", return_value=meta), patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         assert ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake") is False
     run_mock.assert_not_called()
 
 
 def test_set_item_status_false_when_stage_not_in_status_options():
     meta = _status_meta()
-    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.field_meta", return_value=meta), patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         assert ghproject.set_item_status(_cfg(), True, "PVTI_1", "Nonexistent Stage") is False
     run_mock.assert_not_called()
 
 
 def test_set_item_status_matches_stage_case_insensitively():
     meta = _status_meta()
-    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.field_meta", return_value=meta), patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         assert ghproject.set_item_status(_cfg(), True, "PVTI_1", "INTAKE") is True
     run_mock.assert_called_once()
 
 
 def test_set_item_status_dry_run_returns_true_and_writes_nothing():
     meta = _status_meta()
-    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.field_meta", return_value=meta), patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         assert ghproject.set_item_status(_cfg(), False, "PVTI_1", "Intake") is True
     run_mock.assert_not_called()
 
 
 def test_set_item_status_apply_writes_and_returns_true():
     meta = _status_meta()
-    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.field_meta", return_value=meta), patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         result = ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake")
     assert result is True
     run_mock.assert_called_once()
@@ -356,7 +356,7 @@ def test_set_item_status_apply_writes_and_returns_true():
 def test_set_item_status_apply_returns_false_on_subprocess_failure():
     meta = _status_meta()
     err = subprocess.CalledProcessError(1, ["gh"])
-    with patch("ghproject.field_meta", return_value=meta), patch("ghproject.ghkit.run", side_effect=err):
+    with patch("agilesync.gh.ghproject.field_meta", return_value=meta), patch("agilesync.gh.ghproject.ghkit.run", side_effect=err):
         assert ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake") is False
 
 
@@ -365,8 +365,8 @@ def test_set_item_status_resolves_field_meta_fresh_every_call():
     # caller's own local (e.g. main()'s, unconditionally nulled on boards with no date fields) must
     # never be substituted in its place.
     meta = _status_meta()
-    with patch("ghproject.field_meta", return_value=meta) as meta_mock, \
-         patch("ghproject.ghkit.run"):
+    with patch("agilesync.gh.ghproject.field_meta", return_value=meta) as meta_mock, \
+         patch("agilesync.gh.ghproject.ghkit.run"):
         ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake")
         ghproject.set_item_status(_cfg(), True, "PVTI_1", "Intake")
     assert meta_mock.call_count == 2
@@ -398,14 +398,14 @@ def test_two_run_merge_base_does_not_advance_until_item_id_resolves():
         calls.append((card, ops, note))
 
     # Run 1: item_id not yet resolved.
-    with patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         pitem = {"item_id": None, "start": "2026-01-01", "target": None}
         sync_dates({}, True, issue, card, pitem, meta, state, queue)
     run_mock.assert_not_called()                              # skipped before reaching the subprocess boundary
     assert state[issue["url"]]["start"] == "2026-01-01"        # NOT advanced -- write was never confirmed
 
     # Run 2: item_id now resolved; GitHub's real value is unchanged (nothing actually wrote last run).
-    with patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         pitem = {"item_id": "PVTI_1", "start": "2026-01-01", "target": None}
         sync_dates({}, True, issue, card, pitem, meta, state, queue)
     run_mock.assert_called_once()                               # the write now actually goes through
@@ -440,7 +440,7 @@ def test_two_run_camelcase_convergence_issues_no_null_patch():
         calls.append((card, ops, note))
 
     for _ in range(2):                                          # two consecutive runs, unchanged inputs
-        with patch("ghproject.ghkit.run") as run_mock:
+        with patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
             sync_dates({}, True, issue, card, pitem, meta, state, queue)
         run_mock.assert_not_called()                            # no PATCH -- let alone a null one -- ever issued
     assert calls == []
@@ -450,7 +450,7 @@ def test_two_run_camelcase_convergence_issues_no_null_patch():
 def test_add_item_returns_none_for_valid_but_non_object_json(monkeypatch):
     """PR #71 review (Major): gh emitting valid-but-non-object JSON (null, an array) must become
     a structured None -- never a TypeError mid-flow (the never-raises contract)."""
-    import ghkit
+    from agilesync.gh import ghkit
     from types import SimpleNamespace
     for stdout in ("null", "[]", '"just-a-string"'):
         monkeypatch.setattr(ghkit, "_repo_context", lambda _cfg: SimpleNamespace(host=None))

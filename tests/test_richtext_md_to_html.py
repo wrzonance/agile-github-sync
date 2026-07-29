@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from richtext import (  # noqa: E402
+from agilesync.markup.richtext import (  # noqa: E402
     _MAX_INLINE_DEPTH,
     _Block,
     _ListFrame,

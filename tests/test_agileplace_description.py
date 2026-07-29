@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agileplace_description import card_description, op_description  # noqa: E402
+from agilesync.board.agileplace_description import card_description, op_description  # noqa: E402
 
 CFG = {"token": "t", "host": "h", "board_id": "b1"}
 
@@ -22,7 +22,7 @@ def test_op_description_returns_single_replace_op():
 
 def test_card_description_returns_present_description_without_network_call():
     card = {"id": "1", "description": "<p>hi</p>"}
-    with patch("agileplace_description.agileplace.get_card") as get_card_mock:
+    with patch("agilesync.board.agileplace_description.agileplace.get_card") as get_card_mock:
         result = card_description(CFG, card)
     get_card_mock.assert_not_called()
     assert result == "<p>hi</p>"
@@ -33,7 +33,7 @@ def test_card_description_present_but_empty_string_takes_zero_io_path():
     'unknown' -- and must not trigger the lazy get_card fallback (see struct #7 in the design:
     every fixture reaching this must either carry the key or explicitly mock get_card)."""
     card = {"id": "1", "description": ""}
-    with patch("agileplace_description.agileplace.get_card") as get_card_mock:
+    with patch("agilesync.board.agileplace_description.agileplace.get_card") as get_card_mock:
         result = card_description(CFG, card)
     get_card_mock.assert_not_called()
     assert result == ""
@@ -41,7 +41,7 @@ def test_card_description_present_but_empty_string_takes_zero_io_path():
 
 def test_card_description_present_but_none_normalizes_to_empty_string():
     card = {"id": "1", "description": None}
-    with patch("agileplace_description.agileplace.get_card") as get_card_mock:
+    with patch("agilesync.board.agileplace_description.agileplace.get_card") as get_card_mock:
         result = card_description(CFG, card)
     get_card_mock.assert_not_called()
     assert result == ""
@@ -51,7 +51,7 @@ def test_card_description_missing_key_falls_back_to_lazy_get_card():
     """list_cards() never returns description (no field-selection params sent) -- a card summary
     missing the key entirely must trigger exactly one get_card refetch."""
     card = {"id": "77"}
-    with patch("agileplace_description.agileplace.get_card",
+    with patch("agilesync.board.agileplace_description.agileplace.get_card",
                return_value={"id": "77", "description": "<p>fresh</p>"}) as get_card_mock:
         result = card_description(CFG, card)
     get_card_mock.assert_called_once_with(CFG, "77")
@@ -60,7 +60,7 @@ def test_card_description_missing_key_falls_back_to_lazy_get_card():
 
 def test_card_description_lazy_fallback_normalizes_missing_description_to_empty_string():
     card = {"id": "78"}
-    with patch("agileplace_description.agileplace.get_card", return_value={"id": "78"}):
+    with patch("agilesync.board.agileplace_description.agileplace.get_card", return_value={"id": "78"}):
         result = card_description(CFG, card)
     assert result == ""
 

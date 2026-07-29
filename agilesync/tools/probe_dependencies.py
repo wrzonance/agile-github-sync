@@ -9,7 +9,7 @@ confirmation prompt and is safe to run against a production board.
 Reads .env exactly like sync.py/smoke.py. Findings belong in API-VALIDATION.md.
 Design: docs/superpowers/specs/2026-07-21-blocked-by-dependencies-design.md.
 
-Run: python probe_dependencies.py [--card-id ID]
+Run: python -m agilesync.tools.probe_dependencies [--card-id ID]
 """
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-import agileplace
-from config import env_config
+from agilesync.board import agileplace
+from agilesync.config import env_config
 
 BODY_EXCERPT = 500
 

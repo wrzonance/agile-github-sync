@@ -57,7 +57,7 @@ def test_no_test_file_imports_board_layout_names_from_agileplace():
     for path in sorted((REPO_ROOT / "tests").glob("test_*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "agileplace":
+            if isinstance(node, ast.ImportFrom) and node.module == "agilesync.board.agileplace":
                 hit = {alias.name for alias in node.names} & set(MOVED_TO_BOARD_LAYOUT)
                 if hit:
                     offenders.append(f"{path.relative_to(REPO_ROOT)}: {sorted(hit)}")

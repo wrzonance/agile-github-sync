@@ -22,10 +22,10 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import agileplace  # noqa: E402
-import board_layout  # noqa: E402
-import ghkit  # noqa: E402
-import sync  # noqa: E402
+from agilesync.board import agileplace  # noqa: E402
+from agilesync.board import board_layout  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync import sync  # noqa: E402
 
 ISSUE_URL = "https://github.com/acme/repo/issues/1"
 
@@ -81,7 +81,7 @@ def _run_main(tmp_path, issue, card_types=(), existing_cards=None, seed_issues_s
 
     `online=False` drives main() down its unconfigured/offline branch (cfg's token/host/board_id all
     None) -- board_layout is never even called there (main() substitutes an empty BoardLayout
-    itself), so the mocked "board_layout.board_layout" return_value below is simply unused in that
+    itself), so the mocked "agilesync.board.board_layout.board_layout" return_value below is simply unused in that
     case."""
     cfg = _cfg(tmp_path, online=online)
     state_file = tmp_path / ".sync-state.json"
@@ -91,28 +91,28 @@ def _run_main(tmp_path, issue, card_types=(), existing_cards=None, seed_issues_s
                                           "issues": {ISSUE_URL: seed_issues_state}}),
                               encoding="utf-8")
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
-    stack.enter_context(patch("ghkit.list_issues", return_value=[issue]))
-    stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
-    stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
-    stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
-    stack.enter_context(patch("ghproject.configured", return_value=False))
+    stack.enter_context(patch("agilesync.gh.ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
+    stack.enter_context(patch("agilesync.gh.ghkit.list_issues", return_value=[issue]))
+    stack.enter_context(patch("agilesync.gh.ghkit.open_pr_issue_numbers", return_value=set()))
+    stack.enter_context(patch("agilesync.gh.ghkit.blocked_by_map", return_value={}))
+    stack.enter_context(patch("agilesync.gh.ghkit.run", return_value=Mock(stdout="")))
+    stack.enter_context(patch("agilesync.gh.ghproject.configured", return_value=False))
     stack.enter_context(patch(
-        "board_layout.board_layout",
+        "agilesync.board.board_layout.board_layout",
         return_value=board_layout.BoardLayout(lanes=[], card_types=list(card_types)),
     ))
     cards = existing_cards if existing_cards is not None else []
-    stack.enter_context(patch("agileplace.list_cards", return_value=cards))
-    stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
-    patch_card_mock = stack.enter_context(patch("agileplace.patch_card"))
+    stack.enter_context(patch("agilesync.board.agileplace.list_cards", return_value=cards))
+    stack.enter_context(patch("agilesync.board.agileplace.card_dependencies", return_value=[]))
+    patch_card_mock = stack.enter_context(patch("agilesync.board.agileplace.patch_card"))
     create_card_mock = stack.enter_context(
-        patch("agileplace.create_card", return_value=create_card_return
+        patch("agilesync.board.agileplace.create_card", return_value=create_card_return
               if create_card_return is not None else {}))
     if get_card_return is not None:
-        stack.enter_context(patch("agileplace.get_card", return_value=get_card_return))
+        stack.enter_context(patch("agilesync.board.agileplace.get_card", return_value=get_card_return))
 
     argv = ["sync.py", "--apply"] if apply else ["sync.py"]
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", argv):
         sync.main()
     return patch_card_mock, create_card_mock, state_file

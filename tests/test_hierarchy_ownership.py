@@ -7,12 +7,12 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import agileplace  # noqa: E402
-import board_layout  # noqa: E402
-import ghkit  # noqa: E402
-import ghproject  # noqa: E402
-import sync  # noqa: E402
-from stages import header_match_key, issue_card_header  # noqa: E402
+from agilesync.board import agileplace  # noqa: E402
+from agilesync.board import board_layout  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync.gh import ghproject  # noqa: E402
+from agilesync import sync  # noqa: E402
+from agilesync.stages import header_match_key, issue_card_header  # noqa: E402
 
 
 def _issue(number: int, title: str, *, epic: bool = False) -> dict:
@@ -99,8 +99,8 @@ def _run_hierarchy(tmp_path: Path, monkeypatch, issues: list[dict], cards: list[
     monkeypatch.setattr(agileplace, "connect_children", connect_children)
     monkeypatch.setattr(agileplace, "disconnect_children", disconnect_children)
 
-    with patch("sync.env_config", return_value=_config(tmp_path)), \
-         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+    with patch("agilesync.sync.env_config", return_value=_config(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py"]):
         sync.main()
 

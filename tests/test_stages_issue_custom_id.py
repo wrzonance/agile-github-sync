@@ -11,8 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import sync  # noqa: E402
-from stages import issue_custom_id  # noqa: E402
+from agilesync import sync  # noqa: E402
+from agilesync.stages import issue_custom_id  # noqa: E402
 
 
 def test_uses_title_key_when_present():

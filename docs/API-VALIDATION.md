@@ -32,7 +32,7 @@ respectively.
 
 ## [live-check]: verify once with real keys, on a disposable card
 
-> `python smoke.py` automates these checks (plus the Connections round-trip below): it previews the
+> `python -m agilesync.tools.smoke` automates these checks (plus the Connections round-trip below): it previews the
 > configured board, asks for confirmation, then exercises every write shape on two throwaway cards
 > and reports PASS/FAIL per item with the server's full response body on any rejection.
 >
@@ -100,7 +100,7 @@ may be collapsed into the other, and each keeps the opposite key as a fallback.
 Getting either key wrong fails silently rather than loudly: the affected types go invisible, every
 derived card type resolves to nothing, and a run only warns that the board "defines no such type".
 That is why `smoke.py` asserts on both paths -- step 25 on the board entry shape, steps 19-20 on the
-`typeId` write round-trip -- and why `python type_inventory.py` prints what each side actually
+`typeId` write round-trip -- and why `python -m agilesync.tools.type_inventory` prints what each side actually
 returns. Steps 19-20 were themselves inert until 2026-07-29: their card-type picker read `title`
 alone, so it skipped on this very board and a passing suite proved nothing about the write path.
 

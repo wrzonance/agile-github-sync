@@ -36,12 +36,12 @@ need ``import richtext``.
 """
 from __future__ import annotations
 
-from _richtext_html_to_md import (
+from agilesync.markup._richtext_html_to_md import (
     _escape_markdown_text,
     _MarkdownWalker,
     leankit_html_to_markdown,
 )
-from _richtext_md_to_html import (
+from agilesync.markup._richtext_md_to_html import (
     _MAX_INLINE_DEPTH,
     _escape_html_text,
     _parse_blocks,
@@ -50,7 +50,7 @@ from _richtext_md_to_html import (
     _unescape_markdown_text,
     markdown_to_leankit_html,
 )
-from _richtext_shared import _Block, _ListFrame, _sanitize_href
+from agilesync.markup._richtext_shared import _Block, _ListFrame, _sanitize_href
 
 __all__ = [
     "leankit_html_to_markdown",

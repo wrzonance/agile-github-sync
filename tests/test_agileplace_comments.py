@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agileplace_comments import (  # noqa: E402
+from agilesync.board.agileplace_comments import (  # noqa: E402
     _normalize_ap_comment,
     create_comment,
     delete_comment,
@@ -190,7 +190,7 @@ def test_normalize_ap_comment_never_mutates_input_dict():
 # --- list_comments: primary success shapes ----------------------------------------------------
 
 def test_list_comments_parses_bare_list_response():
-    with patch("agileplace_comments.agileplace.api",
+    with patch("agilesync.board.agileplace_comments.agileplace.api",
                return_value=[{"id": 1, "text": "hi"}]) as api_mock:
         result = list_comments(CFG, "card-1")
     api_mock.assert_called_once_with(CFG, "GET", "card/card-1/comment")
@@ -198,20 +198,20 @@ def test_list_comments_parses_bare_list_response():
 
 
 def test_list_comments_parses_wrapped_comments_response():
-    with patch("agileplace_comments.agileplace.api",
+    with patch("agilesync.board.agileplace_comments.agileplace.api",
                return_value={"comments": [{"id": 1, "text": "hi"}, {"id": 2, "text": "yo"}]}):
         result = list_comments(CFG, "card-1")
     assert [c["id"] for c in result] == [1, 2]
 
 
 def test_list_comments_empty_list_is_a_real_zero_comment_result():
-    with patch("agileplace_comments.agileplace.api", return_value=[]):
+    with patch("agilesync.board.agileplace_comments.agileplace.api", return_value=[]):
         result = list_comments(CFG, "card-1")
     assert result == []
 
 
 def test_list_comments_quotes_card_id_in_path():
-    with patch("agileplace_comments.agileplace.api", return_value=[]) as api_mock:
+    with patch("agilesync.board.agileplace_comments.agileplace.api", return_value=[]) as api_mock:
         list_comments(CFG, "weird/id")
     api_mock.assert_called_once_with(CFG, "GET", "card/weird%2Fid/comment")
 
@@ -220,8 +220,8 @@ def test_list_comments_quotes_card_id_in_path():
 
 def test_list_comments_falls_back_to_get_card_on_non_list_non_wrapped_primary_shape():
     with (
-        patch("agileplace_comments.agileplace.api", return_value={"unexpected": "shape"}),
-        patch("agileplace_comments.agileplace.get_card",
+        patch("agilesync.board.agileplace_comments.agileplace.api", return_value={"unexpected": "shape"}),
+        patch("agilesync.board.agileplace_comments.agileplace.get_card",
               return_value={"id": "card-1", "comments": [{"id": 9, "text": "fallback"}]}) as gc_mock,
     ):
         result = list_comments(CFG, "card-1")
@@ -231,8 +231,8 @@ def test_list_comments_falls_back_to_get_card_on_non_list_non_wrapped_primary_sh
 
 def test_list_comments_falls_back_to_get_card_on_primary_systemexit():
     with (
-        patch("agileplace_comments.agileplace.api", side_effect=SystemExit("boom")),
-        patch("agileplace_comments.agileplace.get_card",
+        patch("agilesync.board.agileplace_comments.agileplace.api", side_effect=SystemExit("boom")),
+        patch("agilesync.board.agileplace_comments.agileplace.get_card",
               return_value={"id": "card-1", "comments": [{"id": 9, "text": "fallback"}]}),
     ):
         result = list_comments(CFG, "card-1")
@@ -241,8 +241,8 @@ def test_list_comments_falls_back_to_get_card_on_primary_systemexit():
 
 def test_list_comments_falls_back_when_a_primary_item_fails_to_normalize():
     with (
-        patch("agileplace_comments.agileplace.api", return_value=[{"text": "no id"}]),
-        patch("agileplace_comments.agileplace.get_card",
+        patch("agilesync.board.agileplace_comments.agileplace.api", return_value=[{"text": "no id"}]),
+        patch("agilesync.board.agileplace_comments.agileplace.get_card",
               return_value={"id": "card-1", "comments": [{"id": 9, "text": "fallback"}]}),
     ):
         result = list_comments(CFG, "card-1")
@@ -251,8 +251,8 @@ def test_list_comments_falls_back_when_a_primary_item_fails_to_normalize():
 
 def test_list_comments_raises_when_both_shapes_fail():
     with (
-        patch("agileplace_comments.agileplace.api", return_value={"unexpected": "shape"}),
-        patch("agileplace_comments.agileplace.get_card",
+        patch("agilesync.board.agileplace_comments.agileplace.api", return_value={"unexpected": "shape"}),
+        patch("agilesync.board.agileplace_comments.agileplace.get_card",
               return_value={"id": "card-1", "comments": "not-a-list"}),
         pytest.raises(SystemExit),
     ):
@@ -261,8 +261,8 @@ def test_list_comments_raises_when_both_shapes_fail():
 
 def test_list_comments_raises_when_get_card_itself_fails():
     with (
-        patch("agileplace_comments.agileplace.api", side_effect=SystemExit("boom")),
-        patch("agileplace_comments.agileplace.get_card", side_effect=SystemExit("also boom")),
+        patch("agilesync.board.agileplace_comments.agileplace.api", side_effect=SystemExit("boom")),
+        patch("agilesync.board.agileplace_comments.agileplace.get_card", side_effect=SystemExit("also boom")),
         pytest.raises(SystemExit),
     ):
         list_comments(CFG, "card-1")
@@ -271,14 +271,14 @@ def test_list_comments_raises_when_get_card_itself_fails():
 # --- create_comment ----------------------------------------------------------------------------
 
 def test_create_comment_dry_run_makes_zero_network_calls_and_returns_none():
-    with patch("agileplace_comments.agileplace.api") as api_mock:
+    with patch("agilesync.board.agileplace_comments.agileplace.api") as api_mock:
         result = create_comment(CFG, False, "card-1", "<p>hi</p>")
     api_mock.assert_not_called()
     assert result is None
 
 
 def test_create_comment_apply_mode_sends_text_body_and_returns_normalized_comment():
-    with patch("agileplace_comments.agileplace.api",
+    with patch("agilesync.board.agileplace_comments.agileplace.api",
                return_value={"id": 5, "text": "<p>hi</p>"}) as api_mock:
         result = create_comment(CFG, True, "card-1", "<p>hi</p>")
     api_mock.assert_called_once_with(CFG, "POST", "card/card-1/comment",
@@ -288,7 +288,7 @@ def test_create_comment_apply_mode_sends_text_body_and_returns_normalized_commen
 
 
 def test_create_comment_apply_mode_raises_when_response_carries_no_id():
-    with patch("agileplace_comments.agileplace.api", return_value={"text": "<p>hi</p>"}):
+    with patch("agilesync.board.agileplace_comments.agileplace.api", return_value={"text": "<p>hi</p>"}):
         with pytest.raises(ValueError):
             create_comment(CFG, True, "card-1", "<p>hi</p>")
 
@@ -296,14 +296,14 @@ def test_create_comment_apply_mode_raises_when_response_carries_no_id():
 # --- update_comment ------------------------------------------------------------------------
 
 def test_update_comment_dry_run_makes_zero_network_calls_and_returns_false():
-    with patch("agileplace_comments.agileplace.api") as api_mock:
+    with patch("agilesync.board.agileplace_comments.agileplace.api") as api_mock:
         result = update_comment(CFG, False, "card-1", 5, "<p>edited</p>")
     api_mock.assert_not_called()
     assert result is False
 
 
 def test_update_comment_apply_mode_sends_put_and_returns_true():
-    with patch("agileplace_comments.agileplace.api", return_value={}) as api_mock:
+    with patch("agilesync.board.agileplace_comments.agileplace.api", return_value={}) as api_mock:
         result = update_comment(CFG, True, "card-1", 5, "<p>edited</p>")
     api_mock.assert_called_once_with(CFG, "PUT", "card/card-1/comment/5",
                                      body={"text": "<p>edited</p>"}, headers=None)
@@ -313,14 +313,14 @@ def test_update_comment_apply_mode_sends_put_and_returns_true():
 # --- delete_comment ------------------------------------------------------------------------
 
 def test_delete_comment_dry_run_makes_zero_network_calls_and_returns_false():
-    with patch("agileplace_comments.agileplace.api") as api_mock:
+    with patch("agilesync.board.agileplace_comments.agileplace.api") as api_mock:
         result = delete_comment(CFG, False, "card-1", 5)
     api_mock.assert_not_called()
     assert result is False
 
 
 def test_delete_comment_apply_mode_sends_delete_and_returns_true():
-    with patch("agileplace_comments.agileplace.api", return_value={}) as api_mock:
+    with patch("agilesync.board.agileplace_comments.agileplace.api", return_value={}) as api_mock:
         result = delete_comment(CFG, True, "card-1", 5)
     api_mock.assert_called_once_with(CFG, "DELETE", "card/card-1/comment/5",
                                      body=None, headers=None)

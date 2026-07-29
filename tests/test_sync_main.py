@@ -25,12 +25,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import agileplace  # noqa: E402
-import board_layout  # noqa: E402
-import ghkit  # noqa: E402
-import ghkit_snapshot  # noqa: E402
-import ghproject  # noqa: E402
-import sync  # noqa: E402
+from agilesync.board import agileplace  # noqa: E402
+from agilesync.board import board_layout  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync.gh import ghkit_snapshot  # noqa: E402
+from agilesync.gh import ghproject  # noqa: E402
+from agilesync import sync  # noqa: E402
 
 ISSUE_URL = "https://github.com/acme/repo/issues/1"
 
@@ -96,42 +96,42 @@ def _mock_io(card, items_and_raw_return, field_meta_return, open_pr_return=_UNSE
     # Issue #97: the mock is retained (stack.resolve_repo_context_mock) so tests can assert the
     # run resolves the repo context exactly once instead of merely relying on the cached fixture.
     stack.resolve_repo_context_mock = stack.enter_context(patch(
-        "ghkit.resolve_repo_context",
+        "agilesync.gh.ghkit.resolve_repo_context",
         return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
     # Issue #98: default the batched issue graph to None so every pre-existing fixture keeps
     # exercising the per-item reader paths; graph-specific tests re-patch this inside their
     # own `with` block (the later patch wins while active).
-    stack.enter_context(patch("ghkit_snapshot.fetch_issue_graph", return_value=None))
+    stack.enter_context(patch("agilesync.gh.ghkit_snapshot.fetch_issue_graph", return_value=None))
     issue = _issue() if issue_return is _UNSET else issue_return
     issues = issue if isinstance(issue, list) else [issue]
-    stack.enter_context(patch("ghkit.list_issues", return_value=issues))
-    stack.enter_context(patch("ghkit.open_pr_issue_numbers",
+    stack.enter_context(patch("agilesync.gh.ghkit.list_issues", return_value=issues))
+    stack.enter_context(patch("agilesync.gh.ghkit.open_pr_issue_numbers",
                               return_value=set() if open_pr_return is _UNSET else open_pr_return))
-    stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
-    run_mock = stack.enter_context(patch("ghkit.run", return_value=Mock(stdout="")))
-    stack.enter_context(patch("ghproject.configured", return_value=True))
+    stack.enter_context(patch("agilesync.gh.ghkit.blocked_by_map", return_value={}))
+    run_mock = stack.enter_context(patch("agilesync.gh.ghkit.run", return_value=Mock(stdout="")))
+    stack.enter_context(patch("agilesync.gh.ghproject.configured", return_value=True))
     parsed_items = items_and_raw_return[0]
-    stack.enter_context(patch("ghproject.items", return_value=parsed_items))
-    stack.enter_context(patch("ghproject.field_meta", return_value=field_meta_return))
+    stack.enter_context(patch("agilesync.gh.ghproject.items", return_value=parsed_items))
+    stack.enter_context(patch("agilesync.gh.ghproject.field_meta", return_value=field_meta_return))
     hydrated = parsed_items if hydrated_items_return is _UNSET else hydrated_items_return
-    stack.enter_context(patch("ghproject.hydrate_item_dates", return_value=hydrated))
+    stack.enter_context(patch("agilesync.gh.ghproject.hydrate_item_dates", return_value=hydrated))
     add_item_default = (ghproject.PLANNED_ITEM_ID_PREFIX + "test"
                         if add_item_return is _UNSET else add_item_return)
     stack.can_set_status_mock = stack.enter_context(
-        patch("ghproject.can_set_status", return_value=can_set_status_return))
+        patch("agilesync.gh.ghproject.can_set_status", return_value=can_set_status_return))
     stack.add_item_mock = stack.enter_context(
-        patch("ghproject.add_item", return_value=add_item_default))
+        patch("agilesync.gh.ghproject.add_item", return_value=add_item_default))
     stack.set_item_status_mock = stack.enter_context(
-        patch("ghproject.set_item_status", return_value=set_item_status_return))
+        patch("agilesync.gh.ghproject.set_item_status", return_value=set_item_status_return))
     stack.enter_context(patch(
-        "board_layout.board_layout",
+        "agilesync.board.board_layout.board_layout",
         return_value=board_layout.BoardLayout(lanes=list(lanes_return), card_types=[]),
     ))
     cards = [card] if existing_cards is _UNSET else list(existing_cards)
-    stack.enter_context(patch("agileplace.list_cards", return_value=cards))
-    stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
-    patch_card_mock = stack.enter_context(patch("agileplace.patch_card"))
-    create_card_mock = stack.enter_context(patch("agileplace.create_card", return_value={}))
+    stack.enter_context(patch("agilesync.board.agileplace.list_cards", return_value=cards))
+    stack.enter_context(patch("agilesync.board.agileplace.card_dependencies", return_value=[]))
+    patch_card_mock = stack.enter_context(patch("agilesync.board.agileplace.patch_card"))
+    create_card_mock = stack.enter_context(patch("agilesync.board.agileplace.create_card", return_value={}))
     return stack, run_mock, patch_card_mock, create_card_mock
 
 
@@ -153,7 +153,7 @@ def _run_main_once(tmp_path, items_and_raw_return, field_meta_return=None, seed_
         card, items_and_raw_return, field_meta_return, open_pr_return=open_pr_return,
         lanes_return=lanes_return, existing_cards=existing_cards,
         hydrated_items_return=hydrated_items_return)
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
     return json.loads(state_file.read_text(encoding="utf-8")), run_mock, patch_card_mock, create_card_mock
@@ -170,7 +170,7 @@ def test_load_state_refuses_explicit_wrong_schema(tmp_path):
         "issues": {},
     }), encoding="utf-8")
 
-    with patch("sync.STATE_FILE", state_file), pytest.raises(SystemExit) as raised:
+    with patch("agilesync.sync.STATE_FILE", state_file), pytest.raises(SystemExit) as raised:
         sync.load_state("acme/repo", "42")
 
     message = str(raised.value)
@@ -195,7 +195,7 @@ def test_load_state_resets_falsy_card_id_merge_bases(tmp_path, card_id):
         },
     }), encoding="utf-8")
 
-    with patch("sync.STATE_FILE", state_file):
+    with patch("agilesync.sync.STATE_FILE", state_file):
         state = sync.load_state("acme/repo", "42")
 
     assert state["issues"][ISSUE_URL] == {}
@@ -224,8 +224,8 @@ def test_legacy_state_resets_merge_base_before_relearning_live_metadata(tmp_path
     stack, run_mock, patch_card_mock, _ = _mock_io(
         _card(), (parsed, raw_items), field_meta_return=_field_meta(), issue_return=issue)
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
     state = json.loads(state_file.read_text(encoding="utf-8"))
@@ -272,8 +272,8 @@ def test_patch_abort_preserves_persisted_merge_base(tmp_path):
         _card(), (parsed, []), field_meta_return=None, issue_return=issue)
     patch_card_mock.side_effect = SystemExit("AgilePlace card C1 PATCH aborted")
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
          pytest.raises(SystemExit, match="card C1 PATCH aborted"):
         sync.main()
 
@@ -363,9 +363,9 @@ def test_no_resolved_date_fields_skips_hydration_and_reports_dates_disabled(tmp_
     stack, _, _, _ = _mock_io(_card(), (parsed, []), field_meta)
     state_file = tmp_path / ".sync-state.json"
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
-         patch("ghproject.hydrate_item_dates") as hydrate_mock:
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+         patch("agilesync.gh.ghproject.hydrate_item_dates") as hydrate_mock:
         sync.main()
 
     assert "dates enabled" not in capsys.readouterr().out
@@ -422,8 +422,8 @@ def test_title_key_rename_joins_custom_id_repair_into_single_card_patch(tmp_path
         card, (parsed, raw_items), field_meta_return=None, lanes_return=_LANES, issue_return=issue)
     state_file = tmp_path / ".sync-state.json"
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
     create_card_mock.assert_not_called()
@@ -455,8 +455,8 @@ def test_url_and_custom_id_matching_different_cards_fails_before_writes(tmp_path
     )
     state_file = tmp_path / ".sync-state.json"
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
          pytest.raises(SystemExit) as raised:
         sync.main()
 
@@ -503,8 +503,8 @@ def test_same_run_key_reuse_defers_creation_until_rename_repair_is_applied(tmp_p
     )
     state_file = tmp_path / ".sync-state.json"
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
     out = capsys.readouterr().out
@@ -538,8 +538,8 @@ def test_reused_key_is_created_after_rename_repair_is_visible(tmp_path):
     )
     state_file = tmp_path / ".sync-state.json"
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
     create_card_mock.assert_called_once()
@@ -714,7 +714,7 @@ def test_zero_issue_linked_items_does_not_trip_zero_status_warn(tmp_path, capsys
     parsed: dict = {}  # ghproject.items resolved zero issue-linked items -- not a failure
     fake_lane = {"id": "L1", "title": "Planning"}
 
-    with patch("board_layout.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+    with patch("agilesync.board.board_layout.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
         _, _, _, create_card_mock = _run_main_once(
             tmp_path, (parsed, raw_items), field_meta_return=None, existing_cards=[])
 
@@ -733,7 +733,7 @@ def test_new_card_lane_resolution_is_never_called_when_project_read_failed(tmp_p
     lane -- if the gate were ever dropped (or turned into 'call it, then null the result'), this would
     fail even though board_layout is empty, unlike a test that only asserts the final lane_id."""
     fake_lane = {"id": "L1", "title": "Planning"}
-    with patch("board_layout.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+    with patch("agilesync.board.board_layout.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
         _, _, _, create_card_mock = _run_main_once(
             tmp_path, _zero_status_inputs(), field_meta_return=None, existing_cards=[])
 
@@ -748,7 +748,7 @@ def test_existing_card_lane_resolution_is_never_called_when_project_read_failed(
     mocked to return a REAL lane, so a dropped/weakened gate would surface as a call that this test
     catches, unlike asserting patch_card_mock alone (which empty `lanes` already satisfies for free)."""
     fake_lane = {"id": "L1", "title": "Planning"}
-    with patch("board_layout.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
+    with patch("agilesync.board.board_layout.resolve_lane_for_stage", return_value=(fake_lane, {"L1"})) as resolve_mock:
         _, _, patch_card_mock, _ = _run_main_once(
             tmp_path, _zero_status_inputs(), field_meta_return=None)
 
@@ -790,12 +790,12 @@ def test_child_snapshot_authority_gates_epic_removals(
         existing_cards=cards, issue_return=issues)
     state_file = tmp_path / ".sync-state.json"
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
-         patch("ghkit.sub_issue_numbers", return_value=[2]), \
-         patch("agileplace.card_child_ids", return_value=child_snapshot) as child_read_mock, \
-         patch("agileplace.connect_children") as connect_mock, \
-         patch("agileplace.disconnect_children") as disconnect_mock:
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+         patch("agilesync.gh.ghkit.sub_issue_numbers", return_value=[2]), \
+         patch("agilesync.board.agileplace.card_child_ids", return_value=child_snapshot) as child_read_mock, \
+         patch("agilesync.board.agileplace.connect_children") as connect_mock, \
+         patch("agilesync.board.agileplace.disconnect_children") as disconnect_mock:
         sync.main()
 
     child_read_mock.assert_called_once_with(_cfg(tmp_path), "C1")
@@ -817,9 +817,9 @@ def test_non_epic_cards_do_not_trigger_child_reads(tmp_path):
     stack, _, _, _ = _mock_io(_card(), (parsed, []), field_meta_return=None)
     state_file = tmp_path / ".sync-state.json"
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
-         patch("agileplace.card_child_ids") as child_read_mock:
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", state_file), patch("sys.argv", ["sync.py", "--apply"]), \
+         patch("agilesync.board.agileplace.card_child_ids") as child_read_mock:
         sync.main()
 
     child_read_mock.assert_not_called()
@@ -870,8 +870,8 @@ def test_main_resolves_the_repo_context_exactly_once(tmp_path):
     cfg = _cfg(tmp_path)
     stack, _run_mock, _patch_card, _create = _mock_io(card, ({}, []), field_meta_return=None)
 
-    with stack, patch("sync.env_config", return_value=cfg), \
-         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), \
+         patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py"]):
         sync.main()
 
@@ -886,12 +886,12 @@ def test_main_prefers_graph_blocked_by_and_skips_the_per_issue_reader(tmp_path):
     card = _card()
     stack, _run_mock, patch_card_mock, _create = _mock_io(card, ({}, []), field_meta_return=None)
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py"]), \
-         patch("ghkit_snapshot.fetch_issue_graph",
+         patch("agilesync.gh.ghkit_snapshot.fetch_issue_graph",
                return_value=ghkit_snapshot.IssueGraph(comments={}, blocked_by={}, sub_issues={})), \
-         patch("ghkit.blocked_by_map",
+         patch("agilesync.gh.ghkit.blocked_by_map",
                side_effect=AssertionError("graph supersedes the per-issue blocked-by loop")):
         sync.main()
 
@@ -903,14 +903,14 @@ def test_main_graph_blocked_by_none_skips_all_dependency_writes(tmp_path, capsys
     card = _card()
     stack, _run_mock, _patch_card, _create = _mock_io(card, ({}, []), field_meta_return=None)
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py"]), \
-         patch("ghkit_snapshot.fetch_issue_graph",
+         patch("agilesync.gh.ghkit_snapshot.fetch_issue_graph",
                return_value=ghkit_snapshot.IssueGraph(
                    comments={}, blocked_by={}, sub_issues={},
                    blocked_by_failed=frozenset({_issue()["number"]}))), \
-         patch("ghkit.blocked_by_map",
+         patch("agilesync.gh.ghkit.blocked_by_map",
                side_effect=AssertionError("graph failure must not re-run the per-issue loop")):
         sync.main()
 
@@ -921,12 +921,12 @@ def test_main_falls_back_to_per_issue_readers_when_graph_is_none(tmp_path):
     """fetch_issue_graph returning None (whole-query failure) keeps today's per-item behavior."""
     card = _card()
     stack, _run_mock, _patch_card, _create = _mock_io(card, ({}, []), field_meta_return=None)
-    blocked_by_mock = stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
+    blocked_by_mock = stack.enter_context(patch("agilesync.gh.ghkit.blocked_by_map", return_value={}))
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py"]), \
-         patch("ghkit_snapshot.fetch_issue_graph", return_value=None):
+         patch("agilesync.gh.ghkit_snapshot.fetch_issue_graph", return_value=None):
         sync.main()
 
     blocked_by_mock.assert_called_once()
@@ -940,14 +940,14 @@ def test_main_prefers_graph_sub_issues_for_epics(tmp_path):
     stack, _run_mock, _patch_card, _create = _mock_io(
         card, ({}, []), field_meta_return=None, issue_return=epic_issue)
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py"]), \
-         patch("ghkit_snapshot.fetch_issue_graph",
+         patch("agilesync.gh.ghkit_snapshot.fetch_issue_graph",
                return_value=ghkit_snapshot.IssueGraph(
                    comments={}, blocked_by={},
                    sub_issues={epic_issue["number"]: []})), \
-         patch("ghkit.sub_issue_numbers",
+         patch("agilesync.gh.ghkit.sub_issue_numbers",
                side_effect=AssertionError("graph supersedes the per-epic sub-issue read")):
         sync.main()
 
@@ -957,10 +957,10 @@ def test_main_hydrates_board_reads_once_before_reconciliation(tmp_path):
     syncable issues and epics, before any reconciliation loop consumes the snapshots."""
     card = _card()
     stack, _run_mock, _patch_card, _create = _mock_io(card, ({}, []), field_meta_return=None)
-    hydrate = stack.enter_context(patch("board_reads.hydrate_run_reads"))
+    hydrate = stack.enter_context(patch("agilesync.board.board_reads.hydrate_run_reads"))
 
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py"]):
         sync.main()
 

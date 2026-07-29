@@ -21,10 +21,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import board_layout  # noqa: E402
-import ghkit  # noqa: E402
-import type_inventory  # noqa: E402
-from card_types import parse_card_type_map  # noqa: E402
+from agilesync.board import board_layout  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync.tools import type_inventory  # noqa: E402
+from agilesync.card_types import parse_card_type_map  # noqa: E402
 
 
 def _cfg(**overrides):
@@ -49,10 +49,10 @@ BOARD = [
 
 def _run(cfg, *, layout=None, org_types=frozenset({"Bug", "Feature", "Task"}),
          labels=("bug", "documentation", "enhancement")):
-    with patch("type_inventory.board_layout.board_layout",
+    with patch("agilesync.tools.type_inventory.board_layout.board_layout",
                return_value=_layout(BOARD if layout is None else layout)), \
-         patch("type_inventory.ghkit.org_issue_types", return_value=org_types), \
-         patch("type_inventory.ghkit.list_label_names",
+         patch("agilesync.tools.type_inventory.ghkit.org_issue_types", return_value=org_types), \
+         patch("agilesync.tools.type_inventory.ghkit.list_label_names",
                return_value=None if labels is None else list(labels)):
         type_inventory.print_inventory(cfg)
 
@@ -91,9 +91,9 @@ def test_a_configured_map_is_echoed_back_verbatim_in_the_skeleton(capsys):
 
 def test_unconfigured_agileplace_still_reports_the_github_side(capsys):
     cfg = _cfg(token=None)
-    with patch("type_inventory.board_layout.board_layout") as board_mock, \
-         patch("type_inventory.ghkit.org_issue_types", return_value=frozenset({"Bug"})), \
-         patch("type_inventory.ghkit.list_label_names", return_value=["bug"]):
+    with patch("agilesync.tools.type_inventory.board_layout.board_layout") as board_mock, \
+         patch("agilesync.tools.type_inventory.ghkit.org_issue_types", return_value=frozenset({"Bug"})), \
+         patch("agilesync.tools.type_inventory.ghkit.list_label_names", return_value=["bug"]):
         type_inventory.print_inventory(cfg)
     board_mock.assert_not_called()
     out = capsys.readouterr().out
@@ -103,9 +103,9 @@ def test_unconfigured_agileplace_still_reports_the_github_side(capsys):
 
 def test_unset_target_repo_path_still_reports_the_agileplace_side(capsys):
     cfg = _cfg(target_repo_path=None)
-    with patch("type_inventory.board_layout.board_layout", return_value=_layout(BOARD)), \
-         patch("type_inventory.ghkit.org_issue_types") as types_mock, \
-         patch("type_inventory.ghkit.list_label_names") as labels_mock:
+    with patch("agilesync.tools.type_inventory.board_layout.board_layout", return_value=_layout(BOARD)), \
+         patch("agilesync.tools.type_inventory.ghkit.org_issue_types") as types_mock, \
+         patch("agilesync.tools.type_inventory.ghkit.list_label_names") as labels_mock:
         type_inventory.print_inventory(cfg)
     types_mock.assert_not_called()
     labels_mock.assert_not_called()
@@ -131,7 +131,7 @@ def test_board_card_type_names_reads_a_name_keyed_entry():
     """Same io v2 shape hedge card_types.board_type_title documents: a `name`-keyed payload must be
     reported, not silently dropped from the inventory the user is told to map against."""
     cfg = _cfg()
-    with patch("type_inventory.board_layout.board_layout",
+    with patch("agilesync.tools.type_inventory.board_layout.board_layout",
                return_value=_layout([{"id": "t1", "name": "Defect", "isCardType": True}])):
         eligible, task_only = type_inventory.board_card_type_names(cfg)
     assert eligible == ["Defect"]
@@ -141,10 +141,10 @@ def test_board_card_type_names_reads_a_name_keyed_entry():
 def test_the_report_performs_no_writes_at_all():
     """The script's core promise. agileplace.mutate is the single choke point every AgilePlace write
     passes through, and ghkit's write helpers are the GitHub equivalents."""
-    with patch("agileplace.mutate") as mutate_mock, \
-         patch("ghkit.edit_issue_body") as body_mock, \
-         patch("ghkit.edit_label") as label_mock, \
-         patch("ghkit.create_issue") as create_mock:
+    with patch("agilesync.board.agileplace.mutate") as mutate_mock, \
+         patch("agilesync.gh.ghkit.edit_issue_body") as body_mock, \
+         patch("agilesync.gh.ghkit.edit_label") as label_mock, \
+         patch("agilesync.gh.ghkit.create_issue") as create_mock:
         _run(_cfg())
     mutate_mock.assert_not_called()
     body_mock.assert_not_called()
@@ -156,10 +156,10 @@ def test_an_unreachable_board_degrades_instead_of_aborting_the_report(capsys):
     """Adversarial-review finding: `agileplace.api` raises SystemExit for an unreachable tenant or a
     bad token, and nothing caught it -- so the one command an operator runs BECAUSE the config is
     broken died on that exact breakage, printing nothing about the GitHub side either."""
-    with patch("type_inventory.board_layout.board_layout",
+    with patch("agilesync.tools.type_inventory.board_layout.board_layout",
                side_effect=SystemExit("AgilePlace GET board/42 failed: HTTP 401")), \
-         patch("type_inventory.ghkit.org_issue_types", return_value=frozenset({"Bug"})), \
-         patch("type_inventory.ghkit.list_label_names", return_value=["bug"]):
+         patch("agilesync.tools.type_inventory.ghkit.org_issue_types", return_value=frozenset({"Bug"})), \
+         patch("agilesync.tools.type_inventory.ghkit.list_label_names", return_value=["bug"]):
         type_inventory.print_inventory(_cfg())
 
     out = capsys.readouterr().out

@@ -29,7 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import intake  # noqa: E402
+from agilesync.syncers import intake  # noqa: E402
 
 CFG = {"token": "t", "host": "h", "board_id": "b1"}
 

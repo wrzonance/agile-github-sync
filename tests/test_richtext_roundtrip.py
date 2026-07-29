@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from richtext import _sanitize_href, leankit_html_to_markdown, markdown_to_leankit_html  # noqa: E402
+from agilesync.markup.richtext import _sanitize_href, leankit_html_to_markdown, markdown_to_leankit_html  # noqa: E402
 
 # =====================================================================================
 # Round-trip fixed point -- combined document (heading + nested list + link + code +
@@ -492,9 +492,9 @@ _RICHTEXT_MODULE_FILENAMES = (
 
 
 def test_richtext_modules_stay_within_hard_cap_and_soft_target_overage_is_explicitly_flagged():
-    repo_root = Path(__file__).resolve().parent.parent
+    markup_dir = Path(__file__).resolve().parent.parent / "agilesync" / "markup"
     for filename in _RICHTEXT_MODULE_FILENAMES:
-        line_count = len((repo_root / filename).read_text(encoding="utf-8").splitlines())
+        line_count = len((markup_dir / filename).read_text(encoding="utf-8").splitlines())
         assert line_count <= _RICHTEXT_MODULE_HARD_CAP, (
             f"{filename} is {line_count} lines -- exceeds the {_RICHTEXT_MODULE_HARD_CAP}-line hard "
             "cap and must be split."

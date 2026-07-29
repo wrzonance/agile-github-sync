@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import ghproject  # noqa: E402
+from agilesync.gh import ghproject  # noqa: E402
 
 
 def _cfg():
@@ -28,7 +28,7 @@ def _field_meta(start=True, target=True):
 
 
 def test_not_configured_short_circuits_to_empty_success(capsys):
-    with patch("ghproject.configured", return_value=False):
+    with patch("agilesync.gh.ghproject.configured", return_value=False):
         result = ghproject.resolve_project_v2_status(_cfg())
 
     assert result == ghproject.ProjectV2Status(project_items={}, project_status={},
@@ -38,8 +38,8 @@ def test_not_configured_short_circuits_to_empty_success(capsys):
 
 
 def test_failed_items_call_marks_read_failed_and_blocks_lane_moves(capsys):
-    with patch("ghproject.configured", return_value=True), \
-         patch("ghproject.items", return_value=None):
+    with patch("agilesync.gh.ghproject.configured", return_value=True), \
+         patch("agilesync.gh.ghproject.items", return_value=None):
         result = ghproject.resolve_project_v2_status(_cfg())
 
     assert result.project_read_failed is True
@@ -54,8 +54,8 @@ def test_zero_recognized_statuses_despite_items_is_treated_as_failed(capsys):
     the Project having issue-linked items (e.g. misspelled GH_PROJECT_STATUS_FIELD) must not
     silently fall back to a full mass-move -- it is the same failure mode reached a different way."""
     items = {"https://github.com/acme/widgets/issues/1": {"item_id": "I1"}}
-    with patch("ghproject.configured", return_value=True), \
-         patch("ghproject.items", return_value=items):
+    with patch("agilesync.gh.ghproject.configured", return_value=True), \
+         patch("agilesync.gh.ghproject.items", return_value=items):
         result = ghproject.resolve_project_v2_status(_cfg())
 
     assert result.project_read_failed is True
@@ -69,9 +69,9 @@ def test_zero_recognized_statuses_despite_items_is_treated_as_failed(capsys):
 def test_successful_read_without_date_fields_reports_status_only(capsys):
     url = "https://github.com/acme/widgets/issues/1"
     items = {url: {"item_id": "I1", "status": "In Progress"}}
-    with patch("ghproject.configured", return_value=True), \
-         patch("ghproject.items", return_value=items), \
-         patch("ghproject.field_meta", return_value=_field_meta(start=False, target=False)):
+    with patch("agilesync.gh.ghproject.configured", return_value=True), \
+         patch("agilesync.gh.ghproject.items", return_value=items), \
+         patch("agilesync.gh.ghproject.field_meta", return_value=_field_meta(start=False, target=False)):
         result = ghproject.resolve_project_v2_status(_cfg())
 
     assert result.project_read_failed is False
@@ -88,10 +88,10 @@ def test_successful_read_with_date_fields_hydrates_items_and_reports_dates_enabl
     items = {url: {"item_id": "I1", "status": "In Progress"}}
     hydrated = {url: {"item_id": "I1", "status": "In Progress", "start": "2026-01-01", "target": None}}
     meta = _field_meta()
-    with patch("ghproject.configured", return_value=True), \
-         patch("ghproject.items", return_value=items), \
-         patch("ghproject.field_meta", return_value=meta), \
-         patch("ghproject.hydrate_item_dates", return_value=hydrated) as hydrate_mock:
+    with patch("agilesync.gh.ghproject.configured", return_value=True), \
+         patch("agilesync.gh.ghproject.items", return_value=items), \
+         patch("agilesync.gh.ghproject.field_meta", return_value=meta), \
+         patch("agilesync.gh.ghproject.hydrate_item_dates", return_value=hydrated) as hydrate_mock:
         result = ghproject.resolve_project_v2_status(_cfg())
 
     hydrate_mock.assert_called_once_with(_cfg(), items, meta)
@@ -106,10 +106,10 @@ def test_date_hydration_failure_drops_field_meta_but_leaves_status_read_intact(c
     Status read failing, so lane moves stay governed by project_read_failed alone."""
     url = "https://github.com/acme/widgets/issues/1"
     items = {url: {"item_id": "I1", "status": "In Progress"}}
-    with patch("ghproject.configured", return_value=True), \
-         patch("ghproject.items", return_value=items), \
-         patch("ghproject.field_meta", return_value=_field_meta()), \
-         patch("ghproject.hydrate_item_dates", return_value=None):
+    with patch("agilesync.gh.ghproject.configured", return_value=True), \
+         patch("agilesync.gh.ghproject.items", return_value=items), \
+         patch("agilesync.gh.ghproject.field_meta", return_value=_field_meta()), \
+         patch("agilesync.gh.ghproject.hydrate_item_dates", return_value=None):
         result = ghproject.resolve_project_v2_status(_cfg())
 
     assert result.project_read_failed is False
@@ -129,9 +129,9 @@ def test_resolve_keeps_status_meta_without_date_fields(capsys):
     meta = {"project_id": "PVT_1", "host": "github.com", "status_field_id": "F1",
             "status_options": {"backlog": "O1"}, "start_field_id": None, "target_field_id": None}
     items = {"https://github.com/acme/widgets/issues/1": {"item_id": "I1", "status": "Backlog"}}
-    with patch("ghproject.configured", return_value=True), \
-         patch("ghproject.items", return_value=items), \
-         patch("ghproject.field_meta", return_value=meta):
+    with patch("agilesync.gh.ghproject.configured", return_value=True), \
+         patch("agilesync.gh.ghproject.items", return_value=items), \
+         patch("agilesync.gh.ghproject.field_meta", return_value=meta):
         result = ghproject.resolve_project_v2_status(_cfg())
 
     assert result.field_meta is None      # date sync stays gated off
@@ -143,10 +143,10 @@ def test_resolve_keeps_status_meta_when_date_hydration_fails(capsys):
     """A failed date-value read Nones field_meta (skip date sync) but must not throw away the
     status-write metadata fetched by the same call."""
     items = {"https://github.com/acme/widgets/issues/1": {"item_id": "I1", "status": "Backlog"}}
-    with patch("ghproject.configured", return_value=True), \
-         patch("ghproject.items", return_value=items), \
-         patch("ghproject.field_meta", return_value=_field_meta()), \
-         patch("ghproject.hydrate_item_dates", return_value=None):
+    with patch("agilesync.gh.ghproject.configured", return_value=True), \
+         patch("agilesync.gh.ghproject.items", return_value=items), \
+         patch("agilesync.gh.ghproject.field_meta", return_value=_field_meta()), \
+         patch("agilesync.gh.ghproject.hydrate_item_dates", return_value=None):
         result = ghproject.resolve_project_v2_status(_cfg())
 
     assert result.field_meta is None
@@ -158,7 +158,7 @@ def test_field_meta_prefers_run_scoped_value():
     """Issue #97: cfg['project_field_meta'] short-circuits field_meta with zero gh spawns."""
     meta = {"project_id": "PVT_1", "host": "github.com", "status_field_id": "F1",
             "status_options": {}, "start_field_id": None, "target_field_id": None}
-    with patch("ghproject.configured", return_value=True), \
-         patch("ghkit.run", side_effect=AssertionError("gh must not be spawned")), \
-         patch("ghkit._repo_context", side_effect=AssertionError("no context resolve either")):
+    with patch("agilesync.gh.ghproject.configured", return_value=True), \
+         patch("agilesync.gh.ghkit.run", side_effect=AssertionError("gh must not be spawned")), \
+         patch("agilesync.gh.ghkit._repo_context", side_effect=AssertionError("no context resolve either")):
         assert ghproject.field_meta({**_cfg(), "project_field_meta": meta}) is meta

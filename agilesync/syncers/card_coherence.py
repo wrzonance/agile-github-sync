@@ -54,8 +54,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import NamedTuple
 
-import agileplace
-from stages import header_match_key, issue_custom_id
+from agilesync.board import agileplace
+from agilesync.stages import header_match_key, issue_custom_id
 
 
 def _claimed_card_id(issue: dict, all_card_by_url: dict[str, dict],

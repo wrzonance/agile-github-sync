@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import smoke  # noqa: E402
+from agilesync.tools import smoke  # noqa: E402
 
 
 class _Response:
@@ -267,7 +267,7 @@ _SMOKE_ISSUE_BODY = (
 def tenant_env(monkeypatch):
     def install(world: FakeTenant, answer: str | None = "smoke",
                 issue_bodies: object = "__default__"):
-        monkeypatch.setattr("config.ENV_FILE", Path("/nonexistent/.env"))
+        monkeypatch.setattr("agilesync.config.ENV_FILE", Path("/nonexistent/.env"))
         for name, value in (("AGILEPLACE_TOKEN", "test-token"),
                             ("AGILEPLACE_HOST", "tenant.test"),
                             ("AGILEPLACE_BOARD_ID", "42")):
@@ -507,7 +507,7 @@ def test_accepted_stale_write_is_reported_as_failed_concurrency_check(tenant_env
 def test_missing_configuration_fails_loud(monkeypatch, tmp_path):
     for name in ("AGILEPLACE_TOKEN", "AGILEPLACE_HOST", "AGILEPLACE_BOARD_ID"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr("config.ENV_FILE", tmp_path / "no-such.env")
+    monkeypatch.setattr("agilesync.config.ENV_FILE", tmp_path / "no-such.env")
 
     with pytest.raises(SystemExit, match="AGILEPLACE"):
         smoke.main([])

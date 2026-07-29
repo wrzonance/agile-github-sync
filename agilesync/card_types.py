@@ -24,7 +24,7 @@ from typing import NamedTuple
 # there is no cycle, and is_gh_label_safe is a pure predicate -- no I/O enters this module. A
 # `label:` rule that fails it would abort reverse intake mid-write (issue created, label rejected),
 # so the check has to happen at parse time, not at the write boundary.
-from ghkit import is_gh_label_safe
+from agilesync.gh.ghkit import is_gh_label_safe
 
 
 class CardTypeRule(NamedTuple):
@@ -45,7 +45,7 @@ class CardTypeRule(NamedTuple):
 # These are only the DEFAULTS, used when .env sets no CARD_TYPE_MAP (see parse_card_type_map): they
 # name the card types of the board this tool was first written against, and no board is obliged to
 # use that vocabulary. A board whose types are e.g. Defect/Story/Task resolves none of them and
-# skips every typeId write -- exactly what CARD_TYPE_MAP exists to fix. Run `python type_inventory.py`
+# skips every typeId write -- exactly what CARD_TYPE_MAP exists to fix. Run `python -m agilesync.tools.type_inventory`
 # to list what each side actually offers.
 CARD_TYPE_RULES: tuple[CardTypeRule, ...] = (
     CardTypeRule(kind="issue_type", key="Bug", target="Bug"),
@@ -225,7 +225,7 @@ def _unresolved_hint(board_titles: list[str]) -> str:
     and the reason four identical-looking WARNs a run were easy to dismiss as noise."""
     offered = ", ".join(repr(title) for title in board_titles) if board_titles else "<none>"
     return (f"WARN  board's eligible card types are: {offered} -- map GitHub issue types/labels "
-            f"onto them with CARD_TYPE_MAP in .env (run `python type_inventory.py` for both sides)")
+            f"onto them with CARD_TYPE_MAP in .env (run `python -m agilesync.tools.type_inventory` for both sides)")
 
 
 class CardTypeDecision(NamedTuple):

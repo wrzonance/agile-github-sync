@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sync import (  # noqa: E402
+from agilesync.sync import (  # noqa: E402
     _managed_card_ids,
     _removal_authority_card_ids,
     issue_custom_id,
@@ -128,13 +128,13 @@ def test_additions_are_unaffected_by_a_narrowed_removal_authority_set():
         calls["reads"].append(cid)
         return {"C1": [], "C2": []}.get(cid)
 
-    with patch("sync.agileplace.card_dependencies", side_effect=fake_read), \
-         patch("sync.agileplace.incoming_dependency_ids",
+    with patch("agilesync.sync.agileplace.card_dependencies", side_effect=fake_read), \
+         patch("agilesync.sync.agileplace.incoming_dependency_ids",
                side_effect=lambda entries: {e["cardId"] for e in entries
                                             if e.get("direction") == "incoming"}), \
-         patch("sync.agileplace.create_dependencies",
+         patch("agilesync.sync.agileplace.create_dependencies",
                side_effect=lambda cfg, apply, cid, ids: calls["create"].append((cid, sorted(ids)))), \
-         patch("sync.agileplace.delete_dependencies",
+         patch("agilesync.sync.agileplace.delete_dependencies",
                side_effect=lambda cfg, apply, cid, ids: calls["delete"].append((cid, sorted(ids)))):
         # removal_authority_card_ids excludes C2 entirely -- the add must still happen.
         sync_dependencies({}, True, issues, {1: [2]}, cards, lambda i: cards.get(i["number"]),

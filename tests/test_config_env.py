@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import config  # noqa: E402
+from agilesync import config  # noqa: E402
 
 
 def _write_env(tmp_path, contents: str) -> Path:

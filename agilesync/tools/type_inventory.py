@@ -2,7 +2,7 @@
 
 Run it whenever `sync.py` warns that a card type name did not resolve:
 
-    python type_inventory.py
+    python -m agilesync.tools.type_inventory
 
 The sync derives an AgilePlace card type from each GitHub issue (native issue type, else label) and
 writes it as the card's `/typeId`. That derivation is a NAME match against the board's own card
@@ -21,10 +21,10 @@ was invoked to diagnose.
 """
 from __future__ import annotations
 
-import board_layout
-import card_types
-import ghkit
-from config import env_config
+from agilesync.board import board_layout
+from agilesync import card_types
+from agilesync.gh import ghkit
+from agilesync.config import env_config
 
 _UNAVAILABLE = "<unavailable -- see the note above>"
 

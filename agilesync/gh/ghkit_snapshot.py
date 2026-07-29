@@ -24,7 +24,7 @@ import json
 import subprocess
 from typing import NamedTuple
 
-import ghkit
+from agilesync.gh import ghkit
 
 _PAGE_SIZE = 50
 _MAX_PAGES = 40  # 2000 issues -- defensive, mirrors agileplace's own pagination guards

@@ -19,9 +19,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ghkit import create_label, edit_label, is_gh_label_safe, list_label_names  # noqa: E402
-from reconcile import Reconciled  # noqa: E402
-from metadata_sync import _filter_gh_safe_labels, sync_metadata  # noqa: E402
+from agilesync.gh.ghkit import create_label, edit_label, is_gh_label_safe, list_label_names  # noqa: E402
+from agilesync.reconcile import Reconciled  # noqa: E402
+from agilesync.syncers.metadata_sync import _filter_gh_safe_labels, sync_metadata  # noqa: E402
 
 
 # --- is_gh_label_safe: pure, total predicate ------------------------------
@@ -58,7 +58,7 @@ def test_is_gh_label_safe_returns_bool_for_arbitrary_input():
 
 def test_edit_label_raises_on_comma_when_applying(monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr("ghkit.run", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda *a, **k: calls.append((a, k)))
     with pytest.raises(ValueError):
         edit_label({}, True, 5, "bug,feature", add=True)
     assert calls == []                       # never shelled out
@@ -67,7 +67,7 @@ def test_edit_label_raises_on_comma_when_applying(monkeypatch, capsys):
 
 def test_edit_label_raises_on_leading_quote_when_dry_run(monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr("ghkit.run", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda *a, **k: calls.append((a, k)))
     with pytest.raises(ValueError):
         edit_label({}, False, 5, '"bug', add=False)
     assert calls == []
@@ -76,7 +76,7 @@ def test_edit_label_raises_on_leading_quote_when_dry_run(monkeypatch, capsys):
 
 def test_edit_label_still_works_for_safe_labels(monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr("ghkit.run", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda *a, **k: calls.append((a, k)))
     result = edit_label({}, True, 5, "bug", add=True)
     assert result is None
     assert len(calls) == 1
@@ -87,7 +87,7 @@ def test_edit_label_dry_run_still_works_for_safe_labels(monkeypatch, capsys):
     """Regression pin: apply=False + a safe label is unchanged by the guard -- prints the DRY line,
     never shells out."""
     calls = []
-    monkeypatch.setattr("ghkit.run", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda *a, **k: calls.append((a, k)))
     result = edit_label({}, False, 5, "bug", add=False)
     assert result is None
     assert calls == []
@@ -214,8 +214,8 @@ def test_sync_metadata_skips_unsafe_labels_and_fixes_merge_base(monkeypatch, cap
     issues_state = {issue["url"]: {"labels": ["x,y"], "milestone": None}}
 
     calls = []
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: calls.append((a, k)))
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: calls.append(("set_milestone", a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: calls.append(("set_milestone", a, k)))
 
     queued = []
     sync_metadata({}, True, issue, card, frozenset(), issues_state,
@@ -252,8 +252,8 @@ def test_sync_metadata_mixed_safe_and_unsafe_labels_in_same_batch(monkeypatch, c
     issues_state = {issue["url"]: {"labels": ["x,y", "stale-safe"], "milestone": None}}
 
     calls = []
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: calls.append((a, k)))
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: None)
 
     sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
@@ -282,8 +282,8 @@ def test_sync_metadata_dry_run_never_mutates_state(monkeypatch, capsys):
     issues_state = {issue["url"]: {"labels": ["x,y"], "milestone": None}}
     before = dict(issues_state[issue["url"]])
 
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: None)
 
     sync_metadata({}, False, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
@@ -303,8 +303,8 @@ def test_sync_metadata_no_gh_rewrite_on_verified_repro_stale_leftover(monkeypatc
     issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
 
     ms_calls = []
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
 
     queued = []
     sync_metadata({}, True, issue, card, frozenset(), issues_state,
@@ -329,8 +329,8 @@ def test_sync_metadata_no_gh_rewrite_on_coexisting_ambiguous_upgrade_tag(monkeyp
     issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
 
     ms_calls = []
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
 
     queued = []
     sync_metadata({}, True, issue, card, frozenset(), issues_state,
@@ -355,8 +355,8 @@ def test_sync_metadata_calls_set_milestone_on_fully_unanchored_upgrade(monkeypat
     issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
 
     ms_calls = []
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
 
     sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
@@ -379,8 +379,8 @@ def test_sync_metadata_cleared_milestone_not_resurrected_next_pass(monkeypatch, 
     issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
 
     ms_calls = []
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: ms_calls.append((a, k)))
 
     # PASS 1 — capture queued tag ops so we can apply the AgilePlace-side removals to the card.
     queued = []
@@ -408,8 +408,8 @@ def test_sync_metadata_dry_run_never_mutates_state_with_milestone_tags(monkeypat
     issues_state = {issue["url"]: {"labels": [], "milestone": "0.2.0"}}
     before = dict(issues_state[issue["url"]])
 
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: None)
 
     sync_metadata({}, False, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
@@ -431,8 +431,8 @@ def test_sync_metadata_never_mutates_card_input(monkeypatch, capsys):
     before = copy.deepcopy(card)
     issues_state = {issue["url"]: {"labels": ["stale-tag"], "milestone": None}}
 
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: None)
 
     sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
@@ -446,8 +446,8 @@ def test_sync_metadata_tags_to_remove_is_fresh_each_call(monkeypatch, capsys):
     Call 1 (issue A) genuinely removes a stale tag; call 2 (issue B, an unrelated card that needs no
     removes at all) must queue zero remove ops -- proving call 1's accumulator did not survive into
     call 2."""
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: None)
 
     issue_a = _issue(number=1, labels=["new-label"])
     card_a = _card(tags=["stale-tag"])
@@ -479,8 +479,8 @@ def test_sync_metadata_queues_combined_add_and_remove_as_one_patch(monkeypatch, 
     card = _card(tags=["stale-tag"])
     issues_state = {issue["url"]: {"labels": ["stale-tag"], "milestone": None}}
 
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: None)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: None)
 
     queue_calls = []
     sync_metadata({}, True, issue, card, frozenset(), issues_state,
@@ -504,7 +504,7 @@ def _gh_error(label="ADR"):
 
 def test_create_label_applies_via_gh(monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: calls.append(args))
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda cfg, args, **k: calls.append(args))
     create_label({}, True, "ADR")
     assert len(calls) == 1
     assert calls[0][:2] == ["label", "create"]
@@ -516,7 +516,7 @@ def test_create_label_protects_dash_prefixed_names(monkeypatch):
     """A label like '-blocked' must reach gh as a positional argument, not be parsed as a flag:
     options first, then the `--` terminator, then the name."""
     calls = []
-    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: calls.append(args))
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda cfg, args, **k: calls.append(args))
     create_label({}, True, "-blocked")
     assert len(calls) == 1
     assert calls[0][-2:] == ["--", "-blocked"]
@@ -525,7 +525,7 @@ def test_create_label_protects_dash_prefixed_names(monkeypatch):
 
 def test_create_label_dry_run_prints_and_never_shells(monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr("ghkit.run", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda *a, **k: calls.append(a))
     create_label({}, False, "ADR")
     assert calls == []
     assert capsys.readouterr().out.startswith("DRY   gh label create 'ADR'")
@@ -547,9 +547,9 @@ def test_sync_metadata_creates_missing_label_and_retries_add(monkeypatch, capsys
             raise _gh_error()
 
     created = []
-    monkeypatch.setattr("ghkit.edit_label", fake_edit)
-    monkeypatch.setattr("ghkit.create_label", lambda cfg, apply, name: created.append(name))
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", fake_edit)
+    monkeypatch.setattr("agilesync.gh.ghkit.create_label", lambda cfg, apply, name: created.append(name))
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: None)
 
     sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
@@ -576,9 +576,9 @@ def test_sync_metadata_retries_add_even_when_create_fails(monkeypatch, capsys):
     def fake_create(cfg, apply, name):
         raise _gh_error(name)
 
-    monkeypatch.setattr("ghkit.edit_label", fake_edit)
-    monkeypatch.setattr("ghkit.create_label", fake_create)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", fake_edit)
+    monkeypatch.setattr("agilesync.gh.ghkit.create_label", fake_create)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: None)
 
     sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
@@ -599,9 +599,9 @@ def test_sync_metadata_skips_add_and_continues_when_create_and_retry_fail(monkey
         if label == "bad":
             raise _gh_error("bad")
 
-    monkeypatch.setattr("ghkit.edit_label", fake_edit)
-    monkeypatch.setattr("ghkit.create_label", lambda cfg, apply, name: None)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", fake_edit)
+    monkeypatch.setattr("agilesync.gh.ghkit.create_label", lambda cfg, apply, name: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: None)
 
     sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
@@ -623,9 +623,9 @@ def test_sync_metadata_failed_remove_keeps_label_in_base_and_continues(monkeypat
         if not add:
             raise _gh_error("stale")
 
-    monkeypatch.setattr("ghkit.edit_label", fake_edit)
-    monkeypatch.setattr("ghkit.create_label", lambda *a, **k: None)
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", fake_edit)
+    monkeypatch.setattr("agilesync.gh.ghkit.create_label", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: None)
 
     sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
@@ -642,8 +642,8 @@ def test_sync_metadata_backward_compatible_on_safe_labels(monkeypatch, capsys):
     issues_state = {issue["url"]: {"labels": [], "milestone": None}}
 
     calls = []
-    monkeypatch.setattr("ghkit.edit_label", lambda *a, **k: calls.append((a, k)))
-    monkeypatch.setattr("ghkit.set_milestone", lambda *a, **k: None)
+    monkeypatch.setattr("agilesync.gh.ghkit.edit_label", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr("agilesync.gh.ghkit.set_milestone", lambda *a, **k: None)
 
     sync_metadata({}, True, issue, card, frozenset(), issues_state, lambda c, ops, note: None)
 
@@ -661,13 +661,13 @@ class _Out:
 
 
 def test_list_label_names_returns_sorted_names(monkeypatch):
-    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: _Out(
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda cfg, args, **k: _Out(
         '[{"name":"enhancement"},{"name":"bug"},{"name":"documentation"}]'))
     assert list_label_names({}) == ["bug", "documentation", "enhancement"]
 
 
 def test_list_label_names_empty_repo_is_a_real_result_not_a_failure(monkeypatch):
-    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: _Out("[]"))
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda cfg, args, **k: _Out("[]"))
     assert list_label_names({}) == []
 
 
@@ -675,25 +675,25 @@ def test_list_label_names_empty_repo_is_a_real_result_not_a_failure(monkeypatch)
 def test_list_label_names_malformed_response_is_none(monkeypatch, stdout):
     """Tri-state: None means "we don't know", so the inventory prints "unavailable" instead of an
     empty list a reader would take for "this repo has no labels"."""
-    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: _Out(stdout))
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda cfg, args, **k: _Out(stdout))
     assert list_label_names({}) is None
 
 
 def test_list_label_names_blank_stdout_is_an_empty_repo_not_a_failure(monkeypatch):
     """gh emits nothing at all for an empty result set -- that is a real answer, not a read
     failure, and matches list_issues'/org_issue_types' own `or "[]"` convention."""
-    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: _Out(""))
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda cfg, args, **k: _Out(""))
     assert list_label_names({}) == []
 
 
 def test_list_label_names_subprocess_failure_is_none(monkeypatch):
     def _boom(cfg, args, **k):
         raise subprocess.CalledProcessError(1, "gh")
-    monkeypatch.setattr("ghkit.run", _boom)
+    monkeypatch.setattr("agilesync.gh.ghkit.run", _boom)
     assert list_label_names({}) is None
 
 
 def test_list_label_names_skips_malformed_entries_without_raising(monkeypatch):
-    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: _Out(
+    monkeypatch.setattr("agilesync.gh.ghkit.run", lambda cfg, args, **k: _Out(
         '[{"name":"bug"},{"nope":1},"bare string",null,{"name":7}]'))
     assert list_label_names({}) == ["bug"]

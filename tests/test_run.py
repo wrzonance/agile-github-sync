@@ -18,8 +18,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import config  # noqa: E402
-import sync  # noqa: E402
+from agilesync import config  # noqa: E402
+from agilesync import sync  # noqa: E402
 
 
 EPIC_URL = "https://g.test/acme/widgets/issues/1"

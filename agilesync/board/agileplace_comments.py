@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import urllib.parse
 
-import agileplace
+from agilesync.board import agileplace
 
 
 def _comment_collection_path(card_id) -> str:

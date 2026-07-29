@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stages import normalize_status  # noqa: E402
-from sync import resolve_issue_stage  # noqa: E402
+from agilesync.stages import normalize_status  # noqa: E402
+from agilesync.sync import resolve_issue_stage  # noqa: E402
 
 
 def test_status_literally_named_intake_never_resolves_intake():

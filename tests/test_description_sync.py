@@ -13,8 +13,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import richtext  # noqa: E402
-from description_sync import (  # noqa: E402
+from agilesync.markup import richtext  # noqa: E402
+from agilesync.syncers.description_sync import (  # noqa: E402
     TRUNCATION_MARKER,
     DescriptionResolution,
     _canonicalize_ap_description,
@@ -406,7 +406,7 @@ def test_truncate_large_body_uses_a_logarithmic_number_of_renders_not_linear():
         calls.append(md)
         return real_render(md)
 
-    with patch("description_sync.richtext.markdown_to_leankit_html", side_effect=_counting_render):
+    with patch("agilesync.syncers.description_sync.richtext.markdown_to_leankit_html", side_effect=_counting_render):
         html, was_truncated = _truncate_for_agileplace(markdown, max_length=5000)
 
     assert was_truncated is True
@@ -439,9 +439,9 @@ def test_sync_description_dry_run_does_not_advance_base_despite_queued_ap_write(
     card = _card()
     state = {ISSUE_URL: {}}
     queue = _Queue()
-    with patch("description_sync.agileplace_description.card_description", return_value=""), \
-         patch("description_sync.agileplace_description.op_description", return_value="OP") as op_mock, \
-         patch("description_sync.ghkit.edit_issue_body") as edit_mock:
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description", return_value=""), \
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description", return_value="OP") as op_mock, \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body") as edit_mock:
         sync_description(_cfg(), False, issue, card, state, queue)
     op_mock.assert_called_once()
     edit_mock.assert_not_called()
@@ -457,9 +457,9 @@ def test_sync_description_failed_gh_write_blocks_base_advance():
     card = _card()
     state = {ISSUE_URL: {}}
     queue = _Queue()
-    with patch("description_sync.agileplace_description.card_description", return_value="Hello from AgilePlace"), \
-         patch("description_sync.agileplace_description.op_description") as op_mock, \
-         patch("description_sync.ghkit.edit_issue_body", return_value=False) as edit_mock:
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description", return_value="Hello from AgilePlace"), \
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description") as op_mock, \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body", return_value=False) as edit_mock:
         sync_description(_cfg(), True, issue, card, state, queue)
     edit_mock.assert_called_once_with(_cfg(), True, issue["number"], "Hello from AgilePlace")
     op_mock.assert_not_called()
@@ -477,10 +477,10 @@ def test_sync_description_conflict_makes_no_writes_and_no_advance():
     card = _card()
     state = {ISSUE_URL: {"desc_base": _canonicalize_gh_body(full), "desc_ap_written": truncated}}
     queue = _Queue()
-    with patch("description_sync.agileplace_description.card_description",
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description",
                return_value=truncated + " edited on the card"), \
-         patch("description_sync.agileplace_description.op_description") as op_mock, \
-         patch("description_sync.ghkit.edit_issue_body") as edit_mock:
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description") as op_mock, \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body") as edit_mock:
         sync_description(_cfg(), True, issue, card, state, queue)
     edit_mock.assert_not_called()
     op_mock.assert_not_called()
@@ -496,9 +496,9 @@ def test_sync_description_confirmed_gh_write_advances_both_fields_together():
     card = _card()
     state = {ISSUE_URL: {}}
     queue = _Queue()
-    with patch("description_sync.agileplace_description.card_description", return_value="Hello from AgilePlace"), \
-         patch("description_sync.agileplace_description.op_description") as op_mock, \
-         patch("description_sync.ghkit.edit_issue_body", return_value=True) as edit_mock:
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description", return_value="Hello from AgilePlace"), \
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description") as op_mock, \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body", return_value=True) as edit_mock:
         sync_description(_cfg(), True, issue, card, state, queue)
     edit_mock.assert_called_once_with(_cfg(), True, issue["number"], "Hello from AgilePlace")
     op_mock.assert_not_called()
@@ -516,9 +516,9 @@ def test_sync_description_confirmed_ap_write_advances_both_fields_together():
     queue = _Queue()
     written_html = richtext.markdown_to_leankit_html("Hello from GitHub")
     expected_ap_written = _canonicalize_ap_description(written_html)
-    with patch("description_sync.agileplace_description.card_description", return_value=""), \
-         patch("description_sync.agileplace_description.op_description", return_value="OP") as op_mock, \
-         patch("description_sync.ghkit.edit_issue_body") as edit_mock:
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description", return_value=""), \
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description", return_value="OP") as op_mock, \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body") as edit_mock:
         sync_description(_cfg(), True, issue, card, state, queue)
     edit_mock.assert_not_called()
     op_mock.assert_called_once_with(written_html)
@@ -538,9 +538,9 @@ def test_sync_description_records_the_observed_issue_timestamp_not_the_local_clo
     The anchor must be the issue's own `updated_at` exactly as this run observed it."""
     issue = {**_issue(body="Hello from GitHub"), "updated_at": "2026-07-20T09:00:00Z"}
     state = {ISSUE_URL: {}}
-    with patch("description_sync.agileplace_description.card_description", return_value=""), \
-         patch("description_sync.agileplace_description.op_description", return_value="OP"), \
-         patch("description_sync.ghkit.edit_issue_body"):
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description", return_value=""), \
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description", return_value="OP"), \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body"):
         sync_description(_cfg(), True, issue, _card(), state, _Queue())
     assert state[ISSUE_URL]["desc_gh_updated"] == "2026-07-20T09:00:00Z"
 
@@ -553,16 +553,16 @@ def test_an_edit_made_during_the_run_is_not_recorded_as_reconciled():
     recorded a stamp NEWER than that edit and AgilePlace overwrote it."""
     state = {ISSUE_URL: {}}
     run_one_issue = {**_issue(body="Same"), "updated_at": "2026-07-20T09:00:00Z"}
-    with patch("description_sync.agileplace_description.card_description", return_value="Same"), \
-         patch("description_sync.agileplace_description.op_description"), \
-         patch("description_sync.ghkit.edit_issue_body"):
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description", return_value="Same"), \
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description"), \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body"):
         sync_description(_cfg(), True, run_one_issue, _card(), state, _Queue())
 
     # human edits the GitHub body seconds after run 1's read; AgilePlace drifts too
     run_two_issue = {**_issue(body="Human edit"), "updated_at": "2026-07-20T09:00:03Z"}
-    with patch("description_sync.agileplace_description.card_description", return_value="AP drift"), \
-         patch("description_sync.agileplace_description.op_description", return_value="OP"), \
-         patch("description_sync.ghkit.edit_issue_body", return_value=True) as edit_mock:
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description", return_value="AP drift"), \
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description", return_value="OP"), \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body", return_value=True) as edit_mock:
         sync_description(_cfg(), True, run_two_issue, _card(), state, _Queue())
 
     edit_mock.assert_not_called()  # GitHub is not overwritten
@@ -572,9 +572,9 @@ def test_an_edit_made_during_the_run_is_not_recorded_as_reconciled():
 def test_sync_description_does_not_stamp_the_sync_timestamp_on_a_dry_run():
     issue = _issue(body="Hello from GitHub")
     state = {ISSUE_URL: {}}
-    with patch("description_sync.agileplace_description.card_description", return_value=""), \
-         patch("description_sync.agileplace_description.op_description", return_value="OP"), \
-         patch("description_sync.ghkit.edit_issue_body"):
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description", return_value=""), \
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description", return_value="OP"), \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body"):
         sync_description(_cfg(), False, issue, _card(), state, _Queue())
     assert "desc_gh_updated" not in state[ISSUE_URL]
 
@@ -587,9 +587,9 @@ def test_sync_description_feeds_the_issue_updated_at_and_stored_stamp_into_the_t
     state = {ISSUE_URL: {"desc_base": "Old text", "desc_ap_written": "Old text",
                          "desc_gh_updated": "2026-07-20T09:00:00+00:00"}}
     queue = _Queue()
-    with patch("description_sync.agileplace_description.card_description", return_value="AP new"), \
-         patch("description_sync.agileplace_description.op_description") as op_mock, \
-         patch("description_sync.ghkit.edit_issue_body", return_value=True) as edit_mock:
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description", return_value="AP new"), \
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description") as op_mock, \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body", return_value=True) as edit_mock:
         sync_description(_cfg(), True, issue, _card(), state, queue)
     edit_mock.assert_called_once_with(_cfg(), True, issue["number"], "AP new")
     op_mock.assert_not_called()
@@ -601,9 +601,9 @@ def test_sync_description_prints_the_recency_decision(capsys):
     issue = {**_issue(body="GH new"), "updated_at": "2026-07-26T10:00:00Z"}
     state = {ISSUE_URL: {"desc_base": "Old text", "desc_ap_written": "Old text",
                          "desc_gh_updated": "2026-07-20T09:00:00+00:00"}}
-    with patch("description_sync.agileplace_description.card_description", return_value="AP new"), \
-         patch("description_sync.agileplace_description.op_description", return_value="OP"), \
-         patch("description_sync.ghkit.edit_issue_body", return_value=True):
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description", return_value="AP new"), \
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description", return_value="OP"), \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body", return_value=True):
         sync_description(_cfg(), True, issue, _card(), state, _Queue())
     out = capsys.readouterr().out
     assert "[T1]" in out
@@ -624,9 +624,9 @@ def test_sync_description_never_reads_a_plan_only_dry_run_card():
     state = {ISSUE_URL: {}}
     queue = _Queue()
     written_html = richtext.markdown_to_leankit_html("Hello from GitHub")
-    with patch("description_sync.agileplace_description.card_description") as card_description_mock, \
-         patch("description_sync.agileplace_description.op_description", return_value="OP") as op_mock, \
-         patch("description_sync.ghkit.edit_issue_body") as edit_mock:
+    with patch("agilesync.syncers.description_sync.agileplace_description.card_description") as card_description_mock, \
+         patch("agilesync.syncers.description_sync.agileplace_description.op_description", return_value="OP") as op_mock, \
+         patch("agilesync.syncers.description_sync.ghkit.edit_issue_body") as edit_mock:
         sync_description(_cfg(), False, issue, card, state, queue)
     card_description_mock.assert_not_called()
     edit_mock.assert_not_called()

@@ -20,7 +20,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import sync  # noqa: E402
+from agilesync import sync  # noqa: E402
 from test_sync_main import ISSUE_URL, _UNSET, _card, _cfg, _issue, _mock_io  # noqa: E402
 
 _INTAKE_LANES = [
@@ -49,7 +49,7 @@ def _run_intake_case(tmp_path, card, *, add_item_return=_UNSET, set_item_status_
         set_item_status_return=set_item_status_return,
         can_set_status_return=can_set_status_return)
     state_file = tmp_path / ".sync-state.json"
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
     return stack.add_item_mock, stack.set_item_status_mock, patch_card_mock
@@ -139,7 +139,7 @@ def test_intake_card_creation_targets_the_intake_lane(tmp_path, capsys):
         _card(), (parsed, []), field_meta_return=None, lanes_return=_INTAKE_LANES,
         issue_return=_intake_issue(), existing_cards=[])
     state_file = tmp_path / ".sync-state.json"
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
@@ -163,7 +163,7 @@ def test_apply_latch_never_runs_when_project_read_failed(tmp_path, capsys):
         card, (None, None), field_meta_return=None, lanes_return=_INTAKE_LANES,
         issue_return=_intake_issue())
     state_file = tmp_path / ".sync-state.json"
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
@@ -185,7 +185,7 @@ def test_flag_off_sync_main_never_touches_latch_write_surface(tmp_path, capsys):
         card, ({}, []), field_meta_return=None, lanes_return=_INTAKE_LANES,
         issue_return=_intake_issue())
     state_file = tmp_path / ".sync-state.json"
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
@@ -197,7 +197,7 @@ def test_flag_off_sync_main_never_touches_latch_write_surface(tmp_path, capsys):
 
 # --- issue #69: preflight + status-less-member repair -------------------------
 
-import vetting_latch  # noqa: E402
+from agilesync.syncers import vetting_latch  # noqa: E402
 
 
 def test_promote_preflight_blocks_add_when_status_is_unwritable(tmp_path, capsys):
@@ -214,7 +214,7 @@ def test_promote_preflight_blocks_add_when_status_is_unwritable(tmp_path, capsys
 
 
 def test_repair_retries_status_from_a_mapped_lane():
-    with patch("ghproject.set_item_status", return_value=True) as set_mock:
+    with patch("agilesync.gh.ghproject.set_item_status", return_value=True) as set_mock:
         held = vetting_latch.repair_statusless_member(
             {}, True, {"url": ISSUE_URL}, "1", "L_READY", _INTAKE_LANES, _INTAKE_STAGE_MAP,
             {"item_id": "PVTI_1"})
@@ -230,7 +230,7 @@ def test_repair_holds_without_writing_when_unmappable_intake_or_malformed(capsys
         ("L_READY", None),                      # missing item record entirely
     ]
     for lane, item in cases:
-        with patch("ghproject.set_item_status") as set_mock:
+        with patch("agilesync.gh.ghproject.set_item_status") as set_mock:
             held = vetting_latch.repair_statusless_member(
                 {}, True, {"url": ISSUE_URL}, "1", lane, _INTAKE_LANES, _INTAKE_STAGE_MAP, item)
         assert held is True
@@ -255,8 +255,8 @@ def test_statusless_member_is_never_lane_moved_and_gets_status_repaired(tmp_path
     stack, _, patch_card_mock, _ = _mock_io(
         card, (parsed, []), field_meta_return=None, lanes_return=_INTAKE_LANES,
         issue_return=issues)
-    with stack, patch("sync.env_config", return_value=cfg), \
-         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), \
+         patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
     assert not any("/laneId" in str(call) for call in patch_card_mock.call_args_list)
@@ -274,8 +274,8 @@ def test_statusless_member_repair_needs_the_intake_flag(tmp_path):
         card, (parsed, []), field_meta_return=None, lanes_return=_INTAKE_LANES,
         issue_return=_intake_issue())
     cfg = {**_cfg(tmp_path), "stage_lane_map": {"Ready": ["Ready Lane"]}}  # no Intake entry
-    with stack, patch("sync.env_config", return_value=cfg), \
-         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), \
+         patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
     stack.set_item_status_mock.assert_not_called()   # no repair write without the flag

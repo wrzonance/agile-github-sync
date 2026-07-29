@@ -13,7 +13,7 @@ import json
 import subprocess
 from typing import NamedTuple
 
-import ghkit
+from agilesync.gh import ghkit
 
 # Dry-run placeholder prefix for add_item's return value, so a caller can tell a not-yet-real
 # planned item id apart from a genuine GitHub-issued one at a glance (e.g. in logs).

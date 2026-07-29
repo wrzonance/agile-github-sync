@@ -17,11 +17,11 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-import agileplace
-import board_layout
-import card_types
-import ghkit
-from stages import header_match_key, issue_card_header, issue_custom_id, title_key
+from agilesync.board import agileplace
+from agilesync.board import board_layout
+from agilesync import card_types
+from agilesync.gh import ghkit
+from agilesync.stages import header_match_key, issue_card_header, issue_custom_id, title_key
 
 # Embedded verbatim in every promoted issue's body so a create-then-writeback crash can be resumed
 # by search: `str.format` with a single `card_id` placeholder, coerced to str before formatting.

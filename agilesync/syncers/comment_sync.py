@@ -37,15 +37,15 @@ import sys
 from datetime import datetime, timezone
 from typing import Literal, NamedTuple
 
-import agileplace_comments
-import ghkit
-from comment_render import (
+from agilesync.board import agileplace_comments
+from agilesync.gh import ghkit
+from agilesync.markup.comment_render import (
     ProvenanceHeader,
     parse_provenance_prefix,
     render_drift_edit,
     render_mirror_body,
 )
-from timestamps import parse_timestamp
+from agilesync.timestamps import parse_timestamp
 
 
 def is_sync_authored(side: str, author_identifier: str | None, identity: dict | None) -> bool:

@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agileplace import (  # noqa: E402
+from agilesync.board.agileplace import (  # noqa: E402
     card_dependencies,
     create_dependencies,
     delete_dependencies,

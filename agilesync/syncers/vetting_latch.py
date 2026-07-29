@@ -14,8 +14,8 @@ wrong write.
 """
 from __future__ import annotations
 
-import board_layout
-import ghproject
+from agilesync.board import board_layout
+from agilesync.gh import ghproject
 
 
 def apply_latch(cfg: dict, apply: bool, issue: dict, key: str, current_lane_id: str,

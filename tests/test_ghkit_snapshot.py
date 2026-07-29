@@ -19,8 +19,8 @@ from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import ghkit  # noqa: E402
-import ghkit_snapshot  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync.gh import ghkit_snapshot  # noqa: E402
 
 CTX = ghkit.RepoContext(owner="acme", name="repo", host="github.com")
 CFG = {"repo_context": CTX}

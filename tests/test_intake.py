@@ -28,9 +28,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import agileplace  # noqa: E402
-import ghkit  # noqa: E402
-import intake  # noqa: E402
+from agilesync.board import agileplace  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync.syncers import intake  # noqa: E402
 
 
 # --- fixtures -----------------------------------------------------------------

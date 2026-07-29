@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import ghkit  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
 
 
 def test_repo_context_prefers_run_scoped_value(monkeypatch):

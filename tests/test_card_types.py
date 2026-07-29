@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from card_types import (  # noqa: E402
+from agilesync.card_types import (  # noqa: E402
     CARD_TYPE_RULES,
     CardTypeDecision,
     CardTypeRule,

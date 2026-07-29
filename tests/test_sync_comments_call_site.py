@@ -13,8 +13,8 @@ low-level-transport-boundary convention this repo's other main()-level call-site
 the collaborator, not its internals).
 
 sync.py imports the name directly (`from comment_sync import sync_comments`), so the call site
-lives in sync's own namespace -- the patch target is "sync.sync_comments", not
-"comment_sync.sync_comments".
+lives in sync's own namespace -- the patch target is "agilesync.sync.sync_comments", not
+"agilesync.syncers.comment_sync.sync_comments".
 
 The self-disable-WARN-fires-at-most-once-per-run test below is the one exception: it exercises the
 REAL comment_sync.sync_comments (not monkeypatched) across two issues in the same main() run, since
@@ -31,8 +31,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import comment_sync  # noqa: E402
-import sync  # noqa: E402
+from agilesync.syncers import comment_sync  # noqa: E402
+from agilesync import sync  # noqa: E402
 
 # _mock_io/_card/_cfg are test_sync_main.py's richer I/O-boundary-mocking helpers -- reused here
 # rather than duplicated, matching test_sync_description_call_site.py's own precedent.
@@ -52,10 +52,10 @@ def test_main_calls_sync_comments_once_per_issue_with_expected_args(tmp_path):
     card = _card()
     stack, _run_mock, _patch_card_mock, _create_card_mock = _mock_io(
         card, ({}, []), field_meta_return=None)
-    sync_description_mock = stack.enter_context(patch("sync.sync_description"))
-    sync_comments_mock = stack.enter_context(patch("sync.sync_comments"))
+    sync_description_mock = stack.enter_context(patch("agilesync.sync.sync_description"))
+    sync_comments_mock = stack.enter_context(patch("agilesync.sync.sync_comments"))
 
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
@@ -87,12 +87,12 @@ def test_main_defers_comment_sync_and_holds_state_when_a_card_is_poisoned(tmp_pa
     card = {**_card(), "customId": "999"}
     stack, _run_mock, _patch_card_mock, _create_card_mock = _mock_io(
         card, ({}, []), field_meta_return=None)
-    stack.enter_context(patch("sync.sync_description"))
-    sync_comments_mock = stack.enter_context(patch("sync.sync_comments"))
-    save_state_mock = stack.enter_context(patch("sync.save_state"))
+    stack.enter_context(patch("agilesync.sync.sync_description"))
+    sync_comments_mock = stack.enter_context(patch("agilesync.sync.sync_comments"))
+    save_state_mock = stack.enter_context(patch("agilesync.sync.save_state"))
     monkeypatch.setattr(sync, "lane_conflict", lambda ops, lane_id: (None, True))
 
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
@@ -108,13 +108,13 @@ def test_main_never_reaches_real_sync_comments_for_an_unresolved_card(tmp_path):
     cfg = _cfg(tmp_path)
     stack, _run_mock, _patch_card_mock, _create_card_mock = _mock_io(
         _card(), ({}, []), field_meta_return=None, existing_cards=[])
-    stack.enter_context(patch("sync.sync_description"))
-    sync_comments_mock = stack.enter_context(patch("sync.sync_comments"))
+    stack.enter_context(patch("agilesync.sync.sync_description"))
+    sync_comments_mock = stack.enter_context(patch("agilesync.sync.sync_comments"))
     # No card matches this issue and creation is suppressed by patching create_card to return {}
     # (no "id"), so card_for(issue) stays falsy and the per-issue loop's `continue` guard fires
     # before ever reaching sync_comments.
 
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
@@ -143,9 +143,9 @@ def test_self_disable_warn_fires_at_most_once_across_multiple_issues_in_one_run(
     stack, _run_mock, _patch_card_mock, _create_card_mock = _mock_io(
         cards[0], ({}, []), field_meta_return=None, issue_return=issues,
         existing_cards=cards)
-    stack.enter_context(patch("sync.sync_description"))
+    stack.enter_context(patch("agilesync.sync.sync_description"))
 
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 

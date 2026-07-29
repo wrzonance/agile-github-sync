@@ -10,8 +10,8 @@ convention this repo's other main()-level call-site tests use (test_sync_intake_
 patches intake.promote() the same way; patching the collaborator, not its internals).
 
 sync.py imports the name directly (`from description_sync import sync_description`), so the call
-site lives in sync's own namespace -- the patch target is "sync.sync_description", not
-"description_sync.sync_description".
+site lives in sync's own namespace -- the patch target is "agilesync.sync.sync_description", not
+"agilesync.syncers.description_sync.sync_description".
 
 Run: pytest -q tests/test_sync_description_call_site.py
 """
@@ -23,7 +23,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import sync  # noqa: E402
+from agilesync import sync  # noqa: E402
 
 # _mock_io/_card/_cfg are test_sync_main.py's richer I/O-boundary-mocking helpers -- reused here
 # rather than duplicated, matching test_sync_intake_call_site.py's own precedent.
@@ -39,9 +39,9 @@ def test_main_calls_sync_description_once_per_issue_with_expected_args(tmp_path)
     card = _card()
     stack, _run_mock, _patch_card_mock, _create_card_mock = _mock_io(
         card, ({}, []), field_meta_return=None)
-    sync_description_mock = stack.enter_context(patch("sync.sync_description"))
+    sync_description_mock = stack.enter_context(patch("agilesync.sync.sync_description"))
 
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
@@ -73,12 +73,12 @@ def test_main_never_reaches_real_sync_description_for_an_unresolved_card(tmp_pat
     cfg = _cfg(tmp_path)
     stack, _run_mock, _patch_card_mock, _create_card_mock = _mock_io(
         _card(), ({}, []), field_meta_return=None, existing_cards=[])
-    sync_description_mock = stack.enter_context(patch("sync.sync_description"))
+    sync_description_mock = stack.enter_context(patch("agilesync.sync.sync_description"))
     # No card matches this issue and creation is suppressed by patching create_card to return {}
     # (no "id"), so card_for(issue) stays falsy and the per-issue loop's `continue` guard fires
     # before ever reaching sync_description.
 
-    with stack, patch("sync.env_config", return_value=cfg), patch("sync.STATE_FILE", state_file), \
+    with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 

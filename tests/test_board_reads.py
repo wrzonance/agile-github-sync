@@ -16,9 +16,9 @@ from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import agileplace  # noqa: E402
-import agileplace_comments  # noqa: E402
-import board_reads  # noqa: E402
+from agilesync.board import agileplace  # noqa: E402
+from agilesync.board import agileplace_comments  # noqa: E402
+from agilesync.board import board_reads  # noqa: E402
 
 
 def test_gather_collects_all_four_families(monkeypatch):

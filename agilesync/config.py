@@ -6,10 +6,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from card_types import parse_card_type_map
-from stages import STAGES
+from agilesync.card_types import parse_card_type_map
+from agilesync.stages import STAGES
 
-REPO_DIR = Path(__file__).resolve().parent
+# The repo root, not the package dir: `.env` and `.sync-state.json` live next to sync.py, one level
+# above agilesync/ -- keep parents[1] in step with this module's depth inside the package.
+REPO_DIR = Path(__file__).resolve().parents[1]
 ENV_FILE = REPO_DIR / ".env"
 STATE_FILE = REPO_DIR / ".sync-state.json"
 

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import ghproject  # noqa: E402
+from agilesync.gh import ghproject  # noqa: E402
 
 
 URL = "https://github.com/acme/widgets/issues/1"
@@ -59,7 +59,7 @@ def test_hydrate_item_dates_treats_successful_empty_snapshot_as_all_cleared():
     original = _items()
     response = _pages(_item_node())
 
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))) as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))) as run_mock:
         hydrated = ghproject.hydrate_item_dates({}, original, _meta())
 
     assert hydrated[URL]["start"] is None
@@ -78,7 +78,7 @@ def test_hydrate_item_dates_maps_values_by_field_id_not_flattened_name():
         _date_value("SF_1", "2026-01-01"),
     ))
 
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
+    with patch("agilesync.gh.ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
         hydrated = ghproject.hydrate_item_dates({}, _items(None, None), _meta())
 
     assert hydrated[URL]["start"] == "2026-01-01"
@@ -91,7 +91,7 @@ def test_hydrate_item_dates_accepts_nullable_configured_and_unrelated_dates():
         _date_value("SF_1", None),
     ))
 
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
+    with patch("agilesync.gh.ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
         hydrated = ghproject.hydrate_item_dates({}, _items(), _meta())
 
     assert hydrated is not None
@@ -113,7 +113,7 @@ def test_hydrate_item_dates_accepts_complete_outer_pagination():
               has_next_page=False),
     ]
 
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
+    with patch("agilesync.gh.ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
         hydrated = ghproject.hydrate_item_dates({}, paged_items, _meta())
 
     assert hydrated[URL]["start"] == "2026-01-01"
@@ -122,31 +122,31 @@ def test_hydrate_item_dates_accepts_complete_outer_pagination():
 
 def test_hydrate_item_dates_fails_closed_on_graphql_failure():
     failure = subprocess.CalledProcessError(1, ["gh", "api", "graphql"])
-    with patch("ghproject.ghkit.run", side_effect=failure):
+    with patch("agilesync.gh.ghproject.ghkit.run", side_effect=failure):
         assert ghproject.hydrate_item_dates({}, _items(), _meta()) is None
 
 
 def test_hydrate_item_dates_fails_closed_on_partial_graphql_errors():
     response = _pages(_item_node())
     response[0]["errors"] = [{"message": "field values unavailable"}]
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
+    with patch("agilesync.gh.ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
         assert ghproject.hydrate_item_dates({}, _items(), _meta()) is None
 
 
 def test_hydrate_item_dates_fails_closed_on_malformed_field_metadata():
     meta = {**_meta(), "start_field_id": {"not": "an id"}}
-    with patch("ghproject.ghkit.run") as run_mock:
+    with patch("agilesync.gh.ghproject.ghkit.run") as run_mock:
         assert ghproject.hydrate_item_dates({}, _items(), meta) is None
     run_mock.assert_not_called()
 
 
 def test_hydrate_item_dates_fails_closed_when_nested_field_values_are_truncated():
     response = _pages(_item_node(field_values_has_next_page=True))
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
+    with patch("agilesync.gh.ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
         assert ghproject.hydrate_item_dates({}, _items(), _meta()) is None
 
 
 def test_hydrate_item_dates_fails_closed_when_item_list_and_graphql_snapshots_disagree():
     response = _pages(_item_node(item_id="PVTI_OTHER"))
-    with patch("ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
+    with patch("agilesync.gh.ghproject.ghkit.run", return_value=Mock(stdout=json.dumps(response))):
         assert ghproject.hydrate_item_dates({}, _items(), _meta()) is None

@@ -18,15 +18,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import agileplace_comments  # noqa: E402
-import comment_sync  # noqa: E402
-import ghkit  # noqa: E402
-from comment_render import (  # noqa: E402
+from agilesync.board import agileplace_comments  # noqa: E402
+from agilesync.syncers import comment_sync  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync.markup.comment_render import (  # noqa: E402
     ProvenanceHeader,
     build_provenance_prefix,
     parse_provenance_prefix,
 )
-from comment_sync import (  # noqa: E402
+from agilesync.syncers.comment_sync import (  # noqa: E402
     CommentAction,
     CommentSyncPlan,
     is_sync_authored,

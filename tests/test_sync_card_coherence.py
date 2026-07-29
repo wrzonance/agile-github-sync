@@ -43,10 +43,10 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import agileplace  # noqa: E402
-import board_layout  # noqa: E402
-import ghkit  # noqa: E402
-import sync  # noqa: E402
+from agilesync.board import agileplace  # noqa: E402
+from agilesync.board import board_layout  # noqa: E402
+from agilesync.gh import ghkit  # noqa: E402
+from agilesync import sync  # noqa: E402
 
 _DONE_LANE = {"id": "L-DONE", "title": "Done", "cardStatus": "finished"}
 _PROG_LANE = {"id": "L-PROG", "title": "In Progress", "cardStatus": "started"}
@@ -111,28 +111,28 @@ def _mock_io(issues: list[dict], cards: list[dict], *, lanes: tuple = ()):
     ghproject is left unconfigured (False) -- these invariants concern card matching, not Projects
     v2 date/status sync, so that whole subsystem is kept out of the way."""
     stack = ExitStack()
-    stack.enter_context(patch("ghkit.list_issues", return_value=list(issues)))
-    stack.enter_context(patch("ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
-    stack.enter_context(patch("ghkit.open_pr_issue_numbers", return_value=set()))
-    stack.enter_context(patch("ghkit.blocked_by_map", return_value={}))
-    stack.enter_context(patch("ghkit.edit_label"))
-    stack.enter_context(patch("ghkit.set_milestone"))
-    stack.enter_context(patch("ghproject.configured", return_value=False))
+    stack.enter_context(patch("agilesync.gh.ghkit.list_issues", return_value=list(issues)))
+    stack.enter_context(patch("agilesync.gh.ghkit.resolve_repo_context", return_value=ghkit.RepoContext(owner="acme", name="repo", host="github.com")))
+    stack.enter_context(patch("agilesync.gh.ghkit.open_pr_issue_numbers", return_value=set()))
+    stack.enter_context(patch("agilesync.gh.ghkit.blocked_by_map", return_value={}))
+    stack.enter_context(patch("agilesync.gh.ghkit.edit_label"))
+    stack.enter_context(patch("agilesync.gh.ghkit.set_milestone"))
+    stack.enter_context(patch("agilesync.gh.ghproject.configured", return_value=False))
     stack.enter_context(patch(
-        "board_layout.board_layout",
+        "agilesync.board.board_layout.board_layout",
         return_value=board_layout.BoardLayout(lanes=list(lanes), card_types=[]),
     ))
-    stack.enter_context(patch("agileplace.list_cards", return_value=list(cards)))
-    stack.enter_context(patch("agileplace.card_dependencies", return_value=[]))
-    create_card_mock = stack.enter_context(patch("agileplace.create_card", return_value={}))
-    patch_card_mock = stack.enter_context(patch("agileplace.patch_card"))
+    stack.enter_context(patch("agilesync.board.agileplace.list_cards", return_value=list(cards)))
+    stack.enter_context(patch("agilesync.board.agileplace.card_dependencies", return_value=[]))
+    create_card_mock = stack.enter_context(patch("agilesync.board.agileplace.create_card", return_value={}))
+    patch_card_mock = stack.enter_context(patch("agilesync.board.agileplace.patch_card"))
     return stack, create_card_mock, patch_card_mock
 
 
 def _run_main_once(tmp_path, issues: list[dict], cards: list[dict], *, lanes: tuple = ()):
     stack, create_card_mock, patch_card_mock = _mock_io(issues, cards, lanes=lanes)
-    with stack, patch("sync.env_config", return_value=_cfg(tmp_path)), \
-         patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+    with stack, patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+         patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
          patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
     return create_card_mock, patch_card_mock
@@ -327,10 +327,10 @@ def test_poisoned_run_does_not_persist_advanced_merge_bases(tmp_path):
 
     for _ in range(2):  # same collision twice; state from run 1 feeds run 2
         stack, _create, _patch = _mock_io([first, second], [card], lanes=(_PROG_LANE, _REVIEW_LANE))
-        with stack, patch("sync.contested_cards", return_value={}), \
-                patch("ghkit.edit_label", side_effect=_capture_edit_label), \
-                patch("sync.env_config", return_value=_cfg(tmp_path)), \
-                patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+        with stack, patch("agilesync.sync.contested_cards", return_value={}), \
+                patch("agilesync.gh.ghkit.edit_label", side_effect=_capture_edit_label), \
+                patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+                patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
                 patch("sys.argv", ["sync.py", "--apply"]):
             sync.main()
 
@@ -395,13 +395,13 @@ def test_layer2_poisoned_epic_card_gets_no_connect_or_disconnect_calls(tmp_path,
     stack, create_card_mock, patch_card_mock = _mock_io(
         [epic_a, epic_b, task], [epic_card, task_card], lanes=(_PROG_LANE, _REVIEW_LANE))
     with stack, \
-            patch("sync.contested_cards", return_value={}), \
-            patch("ghkit.sub_issue_numbers", return_value=[task["number"]]), \
-            patch("agileplace.card_child_ids", return_value=frozenset()), \
-            patch("agileplace.connect_children", connect_children_mock), \
-            patch("agileplace.disconnect_children", disconnect_children_mock), \
-            patch("sync.env_config", return_value=_cfg(tmp_path)), \
-            patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+            patch("agilesync.sync.contested_cards", return_value={}), \
+            patch("agilesync.gh.ghkit.sub_issue_numbers", return_value=[task["number"]]), \
+            patch("agilesync.board.agileplace.card_child_ids", return_value=frozenset()), \
+            patch("agilesync.board.agileplace.connect_children", connect_children_mock), \
+            patch("agilesync.board.agileplace.disconnect_children", disconnect_children_mock), \
+            patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+            patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
             patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
@@ -495,13 +495,13 @@ def test_layer2_poisoned_child_card_is_dropped_from_connect_children(tmp_path, c
     stack, create_card_mock, patch_card_mock = _mock_io(
         [epic, task1, task2], [epic_card, poisoned_task_card], lanes=(_PROG_LANE, _REVIEW_LANE))
     with stack, \
-            patch("sync.contested_cards", return_value={}), \
-            patch("ghkit.sub_issue_numbers", return_value=[task1["number"], task2["number"]]), \
-            patch("agileplace.card_child_ids", return_value=frozenset()), \
-            patch("agileplace.connect_children", connect_children_mock), \
-            patch("agileplace.disconnect_children", disconnect_children_mock), \
-            patch("sync.env_config", return_value=_cfg(tmp_path)), \
-            patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+            patch("agilesync.sync.contested_cards", return_value={}), \
+            patch("agilesync.gh.ghkit.sub_issue_numbers", return_value=[task1["number"], task2["number"]]), \
+            patch("agilesync.board.agileplace.card_child_ids", return_value=frozenset()), \
+            patch("agilesync.board.agileplace.connect_children", connect_children_mock), \
+            patch("agilesync.board.agileplace.disconnect_children", disconnect_children_mock), \
+            patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+            patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
             patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 
@@ -542,12 +542,12 @@ def test_layer2_poisoned_card_gets_no_dependency_writes(tmp_path, capsys):
     stack, create_card_mock, patch_card_mock = _mock_io(
         [first, second, task], [poisoned_card, task_card], lanes=(_PROG_LANE, _REVIEW_LANE))
     with stack, \
-            patch("sync.contested_cards", return_value={}), \
-            patch("ghkit.blocked_by_map", return_value={1: [3]}), \
-            patch("agileplace.create_dependencies", create_dependencies_mock), \
-            patch("agileplace.delete_dependencies", delete_dependencies_mock), \
-            patch("sync.env_config", return_value=_cfg(tmp_path)), \
-            patch("sync.STATE_FILE", tmp_path / ".sync-state.json"), \
+            patch("agilesync.sync.contested_cards", return_value={}), \
+            patch("agilesync.gh.ghkit.blocked_by_map", return_value={1: [3]}), \
+            patch("agilesync.board.agileplace.create_dependencies", create_dependencies_mock), \
+            patch("agilesync.board.agileplace.delete_dependencies", delete_dependencies_mock), \
+            patch("agilesync.sync.env_config", return_value=_cfg(tmp_path)), \
+            patch("agilesync.sync.STATE_FILE", tmp_path / ".sync-state.json"), \
             patch("sys.argv", ["sync.py", "--apply"]):
         sync.main()
 

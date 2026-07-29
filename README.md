@@ -60,15 +60,15 @@ Card creation, hierarchy connections, and dependencies use separate POST/DELETE 
 GitHub-side writes are issued separately. Dry run is the default: `python sync.py` prints every
 planned action and writes nothing.
 
-> Before the first live run: `API-VALIDATION.md` records which API shapes are confirmed and which
+> Before the first live run: `docs/API-VALIDATION.md` records which API shapes are confirmed and which
 > still need a one-time check against the live APIs (the AgilePlace connection, blocked-state, tag,
 > and date writes, and the `gh project` reads). Known deferred work (pagination beyond about 1,000
-> records, cross-repo sub-issues, run locking) is tracked in `HARDENING.md`. Start with a
+> records, cross-repo sub-issues, run locking) is tracked in `docs/HARDENING.md`. Start with a
 > disposable board and repo.
 
 ## Smoke-test the write path
 
-Dry run already exercises every read live; `python smoke.py` is the matching one-shot check for the
+Dry run already exercises every read live; `python -m agilesync.tools.smoke` is the matching one-shot check for the
 AgilePlace *write* shapes. It previews the configured board first -- title, lanes, and the cards
 currently on it -- and asks for typed confirmation before writing anything. It then creates two
 clearly-marked throwaway cards (custom ids carry a fresh per-run suffix so they can never collide
@@ -80,7 +80,7 @@ stale-version PATCH (which the server must reject), and deletes both cards again
 is gone. Every step is printed,
 and a rejected write shows the server's full, untruncated response body so a wrong shape is
 diagnosable from the console. The final summary maps one-to-one onto the `[live-check]` items in
-`API-VALIDATION.md`. `--yes` skips the prompt. GitHub is never touched and `.sync-state.json` is
+`docs/API-VALIDATION.md`. `--yes` skips the prompt. GitHub is never touched and `.sync-state.json` is
 never read or written.
 
 ## Point it at a repo
@@ -105,7 +105,7 @@ title and card status, and an ambiguous match leaves the card alone.
 The sync also sets each card's **type** from its GitHub issue (native issue type first, then
 labels). Card type names are board-specific, so unless your board happens to use the built-in
 default names the mapping needs pinning with `CARD_TYPE_MAP` in `.env` — otherwise the run warns
-once per unresolved name and writes no type at all. Run `python type_inventory.py` to print what
+once per unresolved name and writes no type at all. Run `python -m agilesync.tools.type_inventory` to print what
 each side actually offers plus a copy-pasteable skeleton. The same map is inverted for reverse
 intake, so a promoted card seeds its new issue's type/label from its own card type.
 
@@ -114,7 +114,7 @@ intake, so a promoted card seeds its new issue's type/label from its own card ty
 ```
 python sync.py            # dry run: prints what it would do, writes nothing
 python sync.py --apply    # create/move/connect cards and sync metadata and dates (needs a full .env and token scopes)
-python type_inventory.py  # read-only: list GitHub issue types/labels and board card types, for CARD_TYPE_MAP
+python -m agilesync.tools.type_inventory   # read-only: list GitHub issue types/labels and board card types, for CARD_TYPE_MAP
 ```
 
 Runs are idempotent, so any schedule frequency is fine. With no AgilePlace token it still reads
@@ -123,7 +123,7 @@ remote, it prints a notice and does nothing.
 
 ## Keep it always in sync
 
-- Windows (Task Scheduler): `powershell -ExecutionPolicy Bypass -File .\Register-BacklogSync.ps1`
+- Windows (Task Scheduler): `powershell -ExecutionPolicy Bypass -File .\scripts\Register-BacklogSync.ps1`
   registers a task that runs `sync.py --apply` every 30 minutes, weekdays 07:00 to 19:00, only
   while you are logged on (no stored password). Output goes to `sync.log`. Remove it with
   `-Unregister`.
@@ -137,24 +137,38 @@ The account running the schedule needs `python` and `gh` on PATH, `gh auth login
 
 ## Layout
 
-- `sync.py`: orchestration. Creates, moves, connects, and blocks cards; reconciles tags and dates;
-  sends at most one field-update PATCH per existing card.
-- `stages.py`: pure stage derivation and lane/title matching (unit-tested).
-- `reconcile.py`: pure three-way set and single-value merges (unit-tested).
-- `card_coherence.py`: pure per-card write-coherence checks -- contested-card detection
-  (multiple GitHub issue URLs claiming one card) and `/laneId` op conflict poisoning
-  (unit-tested).
-- `ghkit.py`: GitHub via the `gh` CLI (issues, sub-issues, open-PR and blocked-by reads,
-  label/milestone writes).
-- `ghproject.py`: GitHub Projects v2 via `gh project` plus GraphQL (Status reads and field-id-keyed
-  date reads/writes).
-- `agileplace.py`: AgilePlace io v2 (board, cards, lanes, tags, dates, connections, blocked
-  state).
-- `card_types.py`: pure card-type derivation, `CARD_TYPE_MAP` parsing, and board-type resolution
-  (unit-tested). `type_inventory.py`: read-only report of both sides' type/label names.
-- `description_sync.py`: pure GitHub body <-> card description merge, with the most-recent-wins
-  conflict policy anchored on the issue's `updated_at` (unit-tested).
-- `config.py`: `.env` config. `tests/`: pytest (`pytest -q`).
+`sync.py` at the root is just the entry point (`python sync.py [--apply]`). Everything it drives
+lives in the `agilesync` package:
+
+```
+sync.py              entry point -- calls agilesync.sync.main()
+agilesync/
+  sync.py            orchestration: creates, moves, connects, and blocks cards; reconciles tags and
+                     dates; sends at most one field-update PATCH per existing card
+  stages.py          pure stage derivation and lane/title matching (unit-tested)
+  reconcile.py       pure three-way set and single-value merges (unit-tested)
+  card_types.py      pure card-type derivation, `CARD_TYPE_MAP` parsing, and board-type resolution
+                     (unit-tested)
+  timestamps.py      pure UTC timestamp normalization shared by the recency comparisons
+  config.py          `.env` config
+  board/             AgilePlace io v2 (board, cards, lanes, tags, dates, connections, blocked
+                     state), its comment/description satellites, and pure board topology
+  gh/                GitHub via the `gh` CLI (issues, sub-issues, open-PR and blocked-by reads,
+                     label/milestone writes) plus Projects v2 status and date fields
+  markup/            Markdown <-> AgilePlace rich-text translation and comment rendering
+  syncers/           the per-concern passes the main loop drives: comments, description (a pure
+                     body <-> card-description merge, most-recent-wins on the issue's `updated_at`),
+                     metadata and dates, GitHub->AgilePlace intake, card write-coherence
+                     (contested-card detection and `/laneId` op conflict poisoning), vetting latch
+  tools/             operator tools, not part of a run: `smoke`, `probe_dependencies`,
+                     `type_inventory` (read-only report of both sides' type/label names)
+docs/                API validation log and hardening notes
+scripts/             Windows Task Scheduler registration
+tests/               pytest (`pytest -q`)
+```
+
+Run the operator tools as modules: `python -m agilesync.tools.smoke`,
+`python -m agilesync.tools.type_inventory`, `python -m agilesync.tools.probe_dependencies`.
 
 The one-time initial stand-up (labels, milestones, first issues, adding issues to the Project) is
 a separate throwaway step that lives outside this repo. This tool only maintains the ongoing

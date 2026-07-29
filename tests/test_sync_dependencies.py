@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sync import (  # noqa: E402
+from agilesync.sync import (  # noqa: E402
     _blocker_cards,
     _dependency_changes,
     _removal_authority_card_ids,
@@ -66,13 +66,13 @@ def _run(issues, blocked_by, cards, managed, reads, blocker_cards=None, poisoned
     if blocker_cards is None:
         blocker_cards = {i["number"]: cards[i["number"]]
                          for i in issues if cards.get(i["number"])}
-    with patch("sync.agileplace.card_dependencies", side_effect=fake_read), \
-         patch("sync.agileplace.incoming_dependency_ids",
+    with patch("agilesync.sync.agileplace.card_dependencies", side_effect=fake_read), \
+         patch("agilesync.sync.agileplace.incoming_dependency_ids",
                side_effect=lambda entries: {e["cardId"] for e in entries
                                             if e.get("direction") == "incoming"}), \
-         patch("sync.agileplace.create_dependencies",
+         patch("agilesync.sync.agileplace.create_dependencies",
                side_effect=lambda cfg, apply, cid, ids: calls["create"].append((cid, sorted(ids)))), \
-         patch("sync.agileplace.delete_dependencies",
+         patch("agilesync.sync.agileplace.delete_dependencies",
                side_effect=lambda cfg, apply, cid, ids: calls["delete"].append((cid, sorted(ids)))):
         sync_dependencies({}, True, issues, blocked_by, blocker_cards, _harness(cards), managed,
                           poisoned)
@@ -228,7 +228,7 @@ def test_regression_issue_60_dependency_onto_non_authority_card_is_preserved():
 
 
 def test_sync_blocker_cards_helper_includes_retired_url_owned_cards():
-    from sync import _blocker_cards
+    from agilesync.sync import _blocker_cards
     by_number = {1: {"number": 1, "url": "u1"}}
     retired = [{"number": 9, "url": "u9"}, {"number": 8, "url": "u8-no-card"}]
     resolved = _blocker_cards(by_number, lambda i: {"id": f"C{i['number']}"},

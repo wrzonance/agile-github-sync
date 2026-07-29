@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import re
 
-from _richtext_code_spans import _extract_code_spans, _reinsert_code_spans
-from _richtext_shared import _UNESCAPABLE_CHARS, _LIST_INDENT_UNIT, _Block, _ListFrame, _sanitize_href
+from agilesync.markup._richtext_code_spans import _extract_code_spans, _reinsert_code_spans
+from agilesync.markup._richtext_shared import _UNESCAPABLE_CHARS, _LIST_INDENT_UNIT, _Block, _ListFrame, _sanitize_href
 
 # The exact four-char entities _escape_html_text ever emits for a backslash-escaped '<'/'>'.
 # _escape_html_text runs BEFORE _unescape_markdown_text in _render_inline_html, so a literal

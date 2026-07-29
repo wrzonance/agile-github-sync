@@ -15,9 +15,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import agileplace  # noqa: E402
-import board_layout  # noqa: E402
-from board_layout import (  # noqa: E402
+from agilesync.board import agileplace  # noqa: E402
+from agilesync.board import board_layout  # noqa: E402
+from agilesync.board.board_layout import (  # noqa: E402
     BoardLayout,
     _ancestor_titles,
     _card_types_with_ids,
@@ -151,7 +151,7 @@ def test_board_layout_returns_lanes_and_card_types_as_a_boardlayout():
         "lanes": [{"id": "L1", "title": "Ready"}],
         "cardTypes": [{"id": "T1", "title": "Bug", "isCardType": True}],
     }
-    with patch("agileplace.api", return_value=response) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value=response) as api_mock:
         layout = fetch_board_layout(CFG)
     api_mock.assert_called_once_with(CFG, "GET", "board/b1")
     assert layout == BoardLayout(
@@ -161,7 +161,7 @@ def test_board_layout_returns_lanes_and_card_types_as_a_boardlayout():
 
 
 def test_board_layout_defaults_missing_cardtypes_to_empty_list():
-    with patch("agileplace.api", return_value={"lanes": []}):
+    with patch("agilesync.board.agileplace.api", return_value={"lanes": []}):
         layout = fetch_board_layout(CFG)
     assert layout == BoardLayout(lanes=[], card_types=[])
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 from re import compile as _re_compile
 from typing import Literal, NamedTuple
 
-import richtext
+from agilesync.markup import richtext
 
 # =================================================================================================
 # Provenance prefixes -- exact wording from the issue/design doc, pure build + tolerant parse

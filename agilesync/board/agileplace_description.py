@@ -7,7 +7,7 @@ card_description(); agileplace.py has no dependency back on this module, so ther
 """
 from __future__ import annotations
 
-import agileplace
+from agilesync.board import agileplace
 
 
 def card_description(cfg: dict, card: dict) -> str:

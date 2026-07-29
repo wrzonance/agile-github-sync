@@ -25,15 +25,15 @@ import re
 import secrets
 import sys
 
-import agileplace
-import agileplace_comments
-import agileplace_description
-import board_layout
-import card_types
-import ghkit
-import ghkit_snapshot
-import richtext
-from config import env_config
+from agilesync.board import agileplace
+from agilesync.board import agileplace_comments
+from agilesync.board import agileplace_description
+from agilesync.board import board_layout
+from agilesync import card_types
+from agilesync.gh import ghkit
+from agilesync.gh import ghkit_snapshot
+from agilesync.markup import richtext
+from agilesync.config import env_config
 
 PARENT_TITLE = "SMOKE parent (safe to delete)"
 CHILD_TITLE = "SMOKE child (safe to delete)"

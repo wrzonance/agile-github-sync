@@ -7,12 +7,12 @@ from __future__ import annotations
 import re
 from html.parser import HTMLParser
 
-from _richtext_code_spans import (
+from agilesync.markup._richtext_code_spans import (
     _ADJACENT_FENCE_SEPARATOR,
     _chunk_ends_in_live_backtick,
     _render_code_span,
 )
-from _richtext_shared import (
+from agilesync.markup._richtext_shared import (
     _INLINE_AMBIGUOUS_CHARS,
     _LIST_INDENT_UNIT,
     _STRUCTURAL_LINE_START_CHARS,

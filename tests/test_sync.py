@@ -11,13 +11,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from board_layout import resolve_lane_for_stage, stage_for_lane  # noqa: E402
-from ghproject import parse_items  # noqa: E402
-from reconcile import reconcile, reconcile_value  # noqa: E402
-from stages import (STAGES, epic_key_for_task, issue_stage,  # noqa: E402
+from agilesync.board.board_layout import resolve_lane_for_stage, stage_for_lane  # noqa: E402
+from agilesync.gh.ghproject import parse_items  # noqa: E402
+from agilesync.reconcile import reconcile, reconcile_value  # noqa: E402
+from agilesync.stages import (STAGES, epic_key_for_task, issue_stage,  # noqa: E402
                     lane_matches_stage, normalize_status, title_key)
-from metadata_sync import MS_PREFIX, _card_milestones, _stale_milestone_tags  # noqa: E402
-from sync import (_child_connection_changes, _epic_task_resolution,  # noqa: E402
+from agilesync.syncers.metadata_sync import MS_PREFIX, _card_milestones, _stale_milestone_tags  # noqa: E402
+from agilesync.sync import (_child_connection_changes, _epic_task_resolution,  # noqa: E402
                   _protect_open_pr_stage, _reconciled_custom_id_index, epic_task_numbers,
                   explicit_stage_status, issue_card_title, resolve_issue_stage)
 
@@ -331,7 +331,7 @@ def test_duplicate_desired_custom_ids_fail_independent_of_issue_order(reverse):
 def test_sub_issue_fallback_never_yields_removals():
     epic = {"number": 1, "title": "[EP-0C] API epic"}
     task = {"number": 2, "title": "[0C2] Add endpoint"}
-    with patch("sync.ghkit.sub_issue_numbers", return_value=None):
+    with patch("agilesync.sync.ghkit.sub_issue_numbers", return_value=None):
         numbers, authoritative = _epic_task_resolution(
             {}, epic, {"EP-0C": epic, "0C2": task})
 
@@ -366,7 +366,7 @@ def test_unkeyed_epic_fallback_matches_nothing_and_warns(capsys):
         "3": {"number": 3, "title": "Another unkeyed issue"},
     }
 
-    with patch("sync.ghkit.sub_issue_numbers", return_value=None):
+    with patch("agilesync.sync.ghkit.sub_issue_numbers", return_value=None):
         numbers = epic_task_numbers({}, epic, by_key)
 
     assert numbers == []
@@ -376,7 +376,7 @@ def test_unkeyed_epic_fallback_matches_nothing_and_warns(capsys):
 def test_native_empty_sub_issue_read_is_authoritative():
     epic = {"number": 1, "title": "[EP-0C] API epic"}
 
-    with patch("sync.ghkit.sub_issue_numbers", return_value=[]):
+    with patch("agilesync.sync.ghkit.sub_issue_numbers", return_value=[]):
         numbers, authoritative = _epic_task_resolution({}, epic, {})
 
     assert numbers == []
@@ -537,15 +537,15 @@ _STAGES_WITH_INTAKE = ("Intake", *_STAGES_WITHOUT_INTAKE)
 def test_intake_membership_is_inert_for_unmapped_stage_resolution():
     veto_lanes = [{"id": "review", "title": "Under Review", "cardStatus": "started"}]
 
-    with patch("board_layout.STAGES", _STAGES_WITHOUT_INTAKE):
+    with patch("agilesync.board.board_layout.STAGES", _STAGES_WITHOUT_INTAKE):
         veto_without_intake = resolve_lane_for_stage(veto_lanes, "In progress", "")
-    with patch("board_layout.STAGES", _STAGES_WITH_INTAKE):
+    with patch("agilesync.board.board_layout.STAGES", _STAGES_WITH_INTAKE):
         veto_with_intake = resolve_lane_for_stage(veto_lanes, "In progress", "")
     assert veto_with_intake == veto_without_intake
 
-    with patch("board_layout.STAGES", _STAGES_WITHOUT_INTAKE):
+    with patch("agilesync.board.board_layout.STAGES", _STAGES_WITHOUT_INTAKE):
         backlog_without_intake = resolve_lane_for_stage(_board_lanes(), "Backlog", "")
-    with patch("board_layout.STAGES", _STAGES_WITH_INTAKE):
+    with patch("agilesync.board.board_layout.STAGES", _STAGES_WITH_INTAKE):
         backlog_with_intake = resolve_lane_for_stage(_board_lanes(), "Backlog", "")
     assert backlog_with_intake == backlog_without_intake
 
@@ -553,9 +553,9 @@ def test_intake_membership_is_inert_for_unmapped_stage_resolution():
 def test_intake_membership_is_inert_for_mapped_stage_resolution():
     smap = {"Ready": ["New Requests", "Approved"]}
 
-    with patch("board_layout.STAGES", _STAGES_WITHOUT_INTAKE):
+    with patch("agilesync.board.board_layout.STAGES", _STAGES_WITHOUT_INTAKE):
         without_intake = resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
-    with patch("board_layout.STAGES", _STAGES_WITH_INTAKE):
+    with patch("agilesync.board.board_layout.STAGES", _STAGES_WITH_INTAKE):
         with_intake = resolve_lane_for_stage(_board_lanes(), "Ready", "", smap)
     assert with_intake == without_intake
 

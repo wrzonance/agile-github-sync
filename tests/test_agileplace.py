@@ -9,8 +9,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import card_types  # noqa: E402
-from agileplace import (  # noqa: E402
+from agilesync import card_types  # noqa: E402
+from agilesync.board.agileplace import (  # noqa: E402
     _card_value_for_patch_path,
     _card_with_version,
     _planned_card_snapshot,
@@ -31,7 +31,7 @@ from agileplace import (  # noqa: E402
     ops_tag_remove,
     patch_card,
 )
-from board_layout import resolve_lane_for_stage  # noqa: E402
+from agilesync.board.board_layout import resolve_lane_for_stage  # noqa: E402
 
 CFG = {"token": "t", "host": "h", "board_id": "b1"}
 
@@ -41,7 +41,7 @@ CFG = {"token": "t", "host": "h", "board_id": "b1"}
 def test_api_converts_non_json_200_to_standard_truncated_system_exit():
     raw = b"<html>captive portal</html>" + (b"x" * 400)
 
-    with patch("agileplace.urllib.request.urlopen") as urlopen_mock:
+    with patch("agilesync.board.agileplace.urllib.request.urlopen") as urlopen_mock:
         urlopen_mock.return_value.__enter__.return_value.read.return_value = raw
         with pytest.raises(SystemExit) as exc_info:
             api(CFG, "GET", "card")
@@ -54,7 +54,7 @@ def test_api_converts_non_json_200_to_standard_truncated_system_exit():
 def test_api_converts_non_utf8_200_to_standard_truncated_system_exit():
     raw = b"\xff<html>invalid encoding</html>" + (b"x" * 400)
 
-    with patch("agileplace.urllib.request.urlopen") as urlopen_mock:
+    with patch("agilesync.board.agileplace.urllib.request.urlopen") as urlopen_mock:
         urlopen_mock.return_value.__enter__.return_value.read.return_value = raw
         with pytest.raises(SystemExit) as exc_info:
             api(CFG, "GET", "card")
@@ -76,7 +76,7 @@ def test_list_cards_honors_server_page_size_clamp_and_uses_contiguous_offsets():
          "pageMeta": {"limit": 25, "totalRecords": 60}},
     ]
 
-    with patch("agileplace.api", side_effect=pages) as api_mock:
+    with patch("agilesync.board.agileplace.api", side_effect=pages) as api_mock:
         cards = list_cards(CFG)
 
     assert [card["id"] for card in cards] == [str(i) for i in range(60)]
@@ -93,7 +93,7 @@ def test_list_cards_retains_clamped_limit_when_later_metadata_omits_it():
         {"cards": [{"id": str(i)} for i in range(50, 60)], "pageMeta": {}},
     ]
 
-    with patch("agileplace.api", side_effect=pages) as api_mock:
+    with patch("agilesync.board.agileplace.api", side_effect=pages) as api_mock:
         cards = list_cards(CFG)
 
     assert [card["id"] for card in cards] == [str(i) for i in range(60)]
@@ -108,7 +108,7 @@ def test_list_cards_stops_at_sane_total_records_even_when_final_page_is_full():
          "pageMeta": {"limit": 25, "totalRecords": 50}},
     ]
 
-    with patch("agileplace.api", side_effect=pages) as api_mock:
+    with patch("agilesync.board.agileplace.api", side_effect=pages) as api_mock:
         cards = list_cards(CFG)
 
     assert len(cards) == 50
@@ -122,7 +122,7 @@ def test_list_cards_ignores_total_records_smaller_than_cards_already_received():
         {"cards": [], "pageMeta": {"limit": 25, "totalRecords": 1}},
     ]
 
-    with patch("agileplace.api", side_effect=pages) as api_mock:
+    with patch("agilesync.board.agileplace.api", side_effect=pages) as api_mock:
         cards = list_cards(CFG)
 
     assert len(cards) == 25
@@ -139,7 +139,7 @@ def test_list_cards_invalidates_conflicting_total_instead_of_stopping_early():
          "pageMeta": {"limit": 25}},
     ]
 
-    with patch("agileplace.api", side_effect=pages) as api_mock:
+    with patch("agilesync.board.agileplace.api", side_effect=pages) as api_mock:
         cards = list_cards(CFG)
 
     assert len(cards) == 60
@@ -156,7 +156,7 @@ def test_list_cards_invalidates_retained_total_once_received_cards_exceed_it():
          "pageMeta": {"limit": 25}},
     ]
 
-    with patch("agileplace.api", side_effect=pages) as api_mock:
+    with patch("agilesync.board.agileplace.api", side_effect=pages) as api_mock:
         cards = list_cards(CFG)
 
     assert len(cards) == 60
@@ -170,7 +170,7 @@ def test_list_cards_fails_loud_on_empty_page_before_retained_total():
         {"cards": [], "pageMeta": {"limit": 25, "totalRecords": 100}},
     ]
 
-    with patch("agileplace.api", side_effect=pages):
+    with patch("agilesync.board.agileplace.api", side_effect=pages):
         with pytest.raises(SystemExit, match=r"ended at 25 before totalRecords 100"):
             list_cards(CFG)
 
@@ -183,7 +183,7 @@ def test_list_cards_fails_loud_on_short_page_before_retained_total():
          "pageMeta": {"limit": 25, "totalRecords": 100}},
     ]
 
-    with patch("agileplace.api", side_effect=pages):
+    with patch("agilesync.board.agileplace.api", side_effect=pages):
         with pytest.raises(SystemExit, match=r"ended at 35 before totalRecords 100"):
             list_cards(CFG)
 
@@ -195,8 +195,8 @@ def test_list_cards_fails_loud_when_hostile_page_meta_never_terminates():
     }
 
     with (
-        patch("agileplace.MAX_CARD_PAGE_REQUESTS", 3),
-        patch("agileplace.api", return_value=hostile_page) as api_mock,
+        patch("agilesync.board.agileplace.MAX_CARD_PAGE_REQUESTS", 3),
+        patch("agilesync.board.agileplace.api", return_value=hostile_page) as api_mock,
         pytest.raises(SystemExit, match=r"pagination exceeded.*3 requests"),
     ):
         list_cards(CFG)
@@ -211,7 +211,7 @@ def test_list_cards_ignores_truthy_non_dict_page_meta():
         {"cards": [], "pageMeta": "still-not-an-object"},
     ]
 
-    with patch("agileplace.api", side_effect=pages) as api_mock:
+    with patch("agilesync.board.agileplace.api", side_effect=pages) as api_mock:
         cards = list_cards(CFG)
 
     assert cards == [{"id": "1"}]
@@ -473,7 +473,7 @@ def test_get_card_unwraps_wrapped_card_response():
     """The live single-card GET may wrap the card in {"card": {...}} (VALIDATE LIVE) -- get_card
     must hand callers the flat card dict either way."""
     wrapped = {"card": {"id": "123", "version": 5, "title": "Do the thing"}}
-    with patch("agileplace.api", return_value=wrapped) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value=wrapped) as api_mock:
         card = get_card({"token": "t", "host": "h"}, "123")
     api_mock.assert_called_once_with({"token": "t", "host": "h"}, "GET", "card/123")
     assert card == {"id": "123", "version": 5, "title": "Do the thing"}
@@ -483,7 +483,7 @@ def test_get_card_returns_already_flat_response_as_is():
     """If the live API instead returns the card fields at the top level (no "card" wrapper),
     get_card must not misinterpret that shape -- it should hand it back unchanged."""
     flat = {"id": "456", "version": 2, "title": "Another thing"}
-    with patch("agileplace.api", return_value=flat):
+    with patch("agilesync.board.agileplace.api", return_value=flat):
         card = get_card({"token": "t", "host": "h"}, "456")
     assert card == flat
 
@@ -496,7 +496,7 @@ def test_get_card_returns_already_flat_response_as_is():
     ],
 )
 def test_get_card_quotes_hostile_id_as_one_path_segment(card_id, encoded_path):
-    with patch("agileplace.api", return_value={"id": card_id}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={"id": card_id}) as api_mock:
         assert get_card(CFG, card_id) == {"id": card_id}
 
     api_mock.assert_called_once_with(CFG, "GET", encoded_path)
@@ -506,7 +506,7 @@ def test_get_card_fails_loud_when_card_is_null():
     """A live 200 response of {"card": null} must not silently become a bare None return -- that
     would crash callers like _card_with_version with an opaque AttributeError. get_card must
     instead fail loud with a message naming the card id (see issue #8 review finding)."""
-    with patch("agileplace.api", return_value={"card": None}):
+    with patch("agilesync.board.agileplace.api", return_value={"card": None}):
         with pytest.raises(SystemExit, match="789"):
             get_card({"token": "t", "host": "h"}, "789")
 
@@ -514,7 +514,7 @@ def test_get_card_fails_loud_when_card_is_null():
 def test_get_card_fails_loud_when_response_is_top_level_null():
     """A bare top-level `null` body decodes to None from api() -- get_card must fail loud rather
     than call .get() on None and raise an opaque AttributeError (see issue #8 review finding)."""
-    with patch("agileplace.api", return_value=None):
+    with patch("agilesync.board.agileplace.api", return_value=None):
         with pytest.raises(SystemExit, match="790"):
             get_card({"token": "t", "host": "h"}, "790")
 
@@ -523,14 +523,14 @@ def test_get_card_fails_loud_when_response_is_a_bare_list():
     """The single-card GET's exact shape is unconfirmed (VALIDATE LIVE) -- a non-dict, non-null
     JSON body (e.g. a bare list) must not reach `.get()` and raise an opaque AttributeError.
     get_card must fail loud with a message naming the card id (issue #3 review finding)."""
-    with patch("agileplace.api", return_value=[]):
+    with patch("agilesync.board.agileplace.api", return_value=[]):
         with pytest.raises(SystemExit, match="791"):
             get_card({"token": "t", "host": "h"}, "791")
 
 
 def test_get_card_fails_loud_when_response_is_a_string():
     """Same as the bare-list case, for a scalar (string) top-level JSON body."""
-    with patch("agileplace.api", return_value="oops"):
+    with patch("agilesync.board.agileplace.api", return_value="oops"):
         with pytest.raises(SystemExit, match="792"):
             get_card({"token": "t", "host": "h"}, "792")
 
@@ -538,7 +538,7 @@ def test_get_card_fails_loud_when_response_is_a_string():
 def test_get_card_fails_loud_when_response_is_a_bool():
     """Same as the bare-list case, for a bool top-level JSON body -- bool is a subclass of int in
     Python but must still be treated as "not a dict" here, never silently accepted."""
-    with patch("agileplace.api", return_value=True):
+    with patch("agilesync.board.agileplace.api", return_value=True):
         with pytest.raises(SystemExit, match="793"):
             get_card({"token": "t", "host": "h"}, "793")
 
@@ -546,7 +546,7 @@ def test_get_card_fails_loud_when_response_is_a_bool():
 def test_get_card_fails_loud_when_wrapped_card_value_is_not_a_dict():
     """A {"card": ...} wrapper whose value is itself a non-dict, non-null JSON type (e.g. a list)
     must also fail loud rather than handing callers a non-dict "card" that crashes downstream."""
-    with patch("agileplace.api", return_value={"card": []}):
+    with patch("agilesync.board.agileplace.api", return_value={"card": []}):
         with pytest.raises(SystemExit, match="794"):
             get_card({"token": "t", "host": "h"}, "794")
 
@@ -556,7 +556,7 @@ def test_get_card_fails_loud_when_wrapped_card_value_is_not_a_dict():
 def test_card_with_version_returns_card_unchanged_when_version_present():
     """Version already present -> zero network calls, same dict handed back."""
     card = {"id": "1", "version": 7}
-    with patch("agileplace.api") as api_mock:
+    with patch("agilesync.board.agileplace.api") as api_mock:
         result = _card_with_version(CFG, True, card)
     api_mock.assert_not_called()
     assert result == card
@@ -565,7 +565,7 @@ def test_card_with_version_returns_card_unchanged_when_version_present():
 def test_card_with_version_skips_refetch_when_apply_is_false():
     """Dry run must never make a refetch network call, even if version is missing."""
     card = {"id": "1"}
-    with patch("agileplace.api") as api_mock:
+    with patch("agilesync.board.agileplace.api") as api_mock:
         result = _card_with_version(CFG, False, card)
     api_mock.assert_not_called()
     assert result == card
@@ -575,7 +575,7 @@ def test_card_with_version_returns_none_when_refetch_also_has_no_version(capsys)
     """apply=True, missing version, refetch also version-less -> None sentinel + one WARN naming the id."""
     card = {"id": "42", "title": "x"}
     refetched = {"card": {"id": "42", "title": "x"}}
-    with patch("agileplace.api", return_value=refetched):
+    with patch("agilesync.board.agileplace.api", return_value=refetched):
         result = _card_with_version(CFG, True, card)
     assert result is None
     out = capsys.readouterr().out
@@ -589,7 +589,7 @@ def test_card_with_version_treats_empty_string_version_as_missing():
     a missing one and trigger the refetch, never be handed straight to patch_card's headers."""
     card = {"id": "1", "version": ""}
     refetched = {"card": {"id": "1", "version": 9}}
-    with patch("agileplace.api", return_value=refetched) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value=refetched) as api_mock:
         result = _card_with_version(CFG, True, card)
     api_mock.assert_called_once_with(CFG, "GET", "card/1")
     assert result == {"id": "1", "version": 9}
@@ -600,7 +600,7 @@ def test_card_with_version_returns_none_when_version_is_empty_string_and_refetch
     None sentinel + one WARN, same as the missing-version case."""
     card = {"id": "1", "version": ""}
     refetched = {"card": {"id": "1", "version": ""}}
-    with patch("agileplace.api", return_value=refetched):
+    with patch("agilesync.board.agileplace.api", return_value=refetched):
         result = _card_with_version(CFG, True, card)
     assert result is None
     out = capsys.readouterr().out
@@ -623,13 +623,13 @@ def test_card_with_version_never_mutates_input_card():
 
     success_card = {"id": "42"}
     before = dict(success_card)
-    with patch("agileplace.api", return_value={"card": {"id": "42", "version": 3}}):
+    with patch("agilesync.board.agileplace.api", return_value={"card": {"id": "42", "version": 3}}):
         _card_with_version(CFG, True, success_card)
     assert success_card == before
 
     miss_card = {"id": "42"}
     before = dict(miss_card)
-    with patch("agileplace.api", return_value={"card": {"id": "42"}}):
+    with patch("agilesync.board.agileplace.api", return_value={"card": {"id": "42"}}):
         _card_with_version(CFG, True, miss_card)
     assert miss_card == before
 
@@ -643,7 +643,7 @@ def test_card_with_version_refetch_allows_index_removes_when_tags_unchanged():
     card = {"id": "7", "tags": ["a", "b", "c"]}
     ops = [{"op": "remove", "path": "/tags/1"}]
     refetched = {"card": {"id": "7", "tags": ["a", "b", "c"], "version": 5}}
-    with patch("agileplace.api", return_value=refetched):
+    with patch("agilesync.board.agileplace.api", return_value=refetched):
         result = _card_with_version(CFG, True, card, ops)
     assert result == {"id": "7", "tags": ["a", "b", "c"], "version": 5}
 
@@ -654,7 +654,7 @@ def test_card_with_version_refetch_refuses_index_removes_when_tags_shifted(capsy
     card = {"id": "7", "tags": ["a", "b", "c"]}
     ops = [{"op": "remove", "path": "/tags/2"}]  # index 2 was "c" in the snapshot
     refetched = {"card": {"id": "7", "tags": ["z", "a", "b", "c"], "version": 5}}  # inserted at front
-    with patch("agileplace.api", return_value=refetched):
+    with patch("agilesync.board.agileplace.api", return_value=refetched):
         result = _card_with_version(CFG, True, card, ops)
     assert result is None
     warn_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
@@ -666,7 +666,7 @@ def test_patch_card_version_present_is_byte_identical_to_pre_fix_behavior():
     """Version already present -> exactly one PATCH call, zero refetch calls."""
     card = {"id": "1", "version": 7}
     ops = [{"op": "replace", "path": "/laneId", "value": "L"}]
-    with patch("agileplace.api", return_value={}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={}) as api_mock:
         patch_card(CFG, True, card, ops)
     api_mock.assert_called_once_with(CFG, "PATCH", "card/1", body=ops, headers={"x-lk-resource-version": "7"})
 
@@ -682,7 +682,7 @@ def test_patch_card_quotes_hostile_id_as_one_path_segment(card_id, encoded_path)
     card = {"id": card_id, "version": 7}
     ops = [{"op": "replace", "path": "/laneId", "value": "L"}]
 
-    with patch("agileplace.api", return_value={}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={}) as api_mock:
         patch_card(CFG, True, card, ops)
 
     api_mock.assert_called_once_with(
@@ -697,7 +697,7 @@ def test_patch_card_quotes_hostile_id_as_one_path_segment(card_id, encoded_path)
 def test_patch_card_dry_run_makes_no_network_call_regardless_of_version():
     """apply=False -> patch_card never calls the network, version present or not."""
     ops = [{"op": "replace", "path": "/laneId", "value": "L"}]
-    with patch("agileplace.api") as api_mock:
+    with patch("agilesync.board.agileplace.api") as api_mock:
         patch_card(CFG, False, {"id": "1", "version": 7}, ops)
         patch_card(CFG, False, {"id": "2"}, ops)
     api_mock.assert_not_called()
@@ -716,7 +716,7 @@ def test_patch_card_refetches_and_never_sends_empty_string_version_header():
         assert headers == {"x-lk-resource-version": "11"}
         return {"ok": True}
 
-    with patch("agileplace.api", side_effect=fake_api) as api_mock:
+    with patch("agilesync.board.agileplace.api", side_effect=fake_api) as api_mock:
         result = patch_card(CFG, True, card, ops)
     assert result == {"ok": True}
     assert api_mock.call_count == 2  # one refetch, one PATCH -- never a PATCH with version=""
@@ -734,7 +734,7 @@ def test_patch_card_sends_one_patch_with_refetched_version_on_successful_refetch
         assert headers == {"x-lk-resource-version": "11"}
         return {"ok": True}
 
-    with patch("agileplace.api", side_effect=fake_api) as api_mock:
+    with patch("agilesync.board.agileplace.api", side_effect=fake_api) as api_mock:
         result = patch_card(CFG, True, card, ops)
     assert result == {"ok": True}
     assert api_mock.call_count == 2  # one refetch, one PATCH
@@ -762,7 +762,7 @@ def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
             assert header is not None and header.strip()  # present and non-whitespace
             assert header == _expected
             return {}
-        with patch("agileplace.api", side_effect=fake_api):
+        with patch("agilesync.board.agileplace.api", side_effect=fake_api):
             patch_card(CFG, apply, card, ops)
 
     # Version-less + apply False sends zero PATCH -> vacuously satisfies the invariant.
@@ -774,7 +774,7 @@ def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
                               _refetch=refetch_response):
             assert method != "PATCH"
             return _refetch or {}
-        with patch("agileplace.api", side_effect=fake_api_no_patch):
+        with patch("agilesync.board.agileplace.api", side_effect=fake_api_no_patch):
             patch_card(CFG, apply, card, ops)
 
     # Apply-mode double misses also send zero PATCH, then fail the run so state cannot advance.
@@ -788,7 +788,7 @@ def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
                                  _refetch=refetch_response):
             assert method != "PATCH"
             return _refetch
-        with patch("agileplace.api", side_effect=fake_api_double_miss), pytest.raises(SystemExit):
+        with patch("agilesync.board.agileplace.api", side_effect=fake_api_double_miss), pytest.raises(SystemExit):
             patch_card(CFG, True, card, ops)
 
 
@@ -799,17 +799,17 @@ def test_patch_card_never_sends_patch_with_missing_or_empty_version_header():
 
 def test_connect_children_disconnect_children_create_card_have_no_version_header_logic():
     """Non-goal preserved: no version header logic is added to any non-card-PATCH endpoint."""
-    with patch("agileplace.api", return_value={}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={}) as api_mock:
         connect_children(CFG, True, "parent", ["c1", "c2"])
     _, kwargs = api_mock.call_args
     assert kwargs.get("headers") is None
 
-    with patch("agileplace.api", return_value={}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={}) as api_mock:
         disconnect_children(CFG, True, "parent", ["c1", "c2"])
     _, kwargs = api_mock.call_args
     assert kwargs.get("headers") is None
 
-    with patch("agileplace.api", return_value={"id": "new"}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={"id": "new"}) as api_mock:
         create_card(CFG, True, "Title", "CID-1", "https://example.com", None)
     _, kwargs = api_mock.call_args
     assert kwargs.get("headers") is None
@@ -859,7 +859,7 @@ def test_create_card_dry_run_snapshot_omits_type_when_type_id_not_supplied():
 
 
 def test_create_card_apply_mode_sends_typeid_in_post_body_when_supplied():
-    with patch("agileplace.api", return_value={"id": "new"}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={"id": "new"}) as api_mock:
         create_card(CFG, True, "Title", "CID-1", "https://example.com", None,
                     type_id="42", type_title="Bug")
     _, kwargs = api_mock.call_args
@@ -869,7 +869,7 @@ def test_create_card_apply_mode_sends_typeid_in_post_body_when_supplied():
 def test_create_card_apply_mode_omits_typeid_when_not_supplied():
     """Existing call sites (no type_id passed) must send a byte-identical POST body -- no `typeId`
     key appears at all."""
-    with patch("agileplace.api", return_value={"id": "new"}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={"id": "new"}) as api_mock:
         create_card(CFG, True, "Title", "CID-1", "https://example.com", None)
     _, kwargs = api_mock.call_args
     assert "typeId" not in kwargs["body"]
@@ -883,7 +883,7 @@ def test_planned_card_snapshot_type_title_never_reaches_the_post_body():
     snapshot = _planned_card_snapshot("Title", "CID-1", "https://example.com", None,
                                       type_id="42", type_title="Bug")
     assert snapshot["type"] == {"id": "42", "title": "Bug"}
-    with patch("agileplace.api", return_value={"id": "new"}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={"id": "new"}) as api_mock:
         create_card(CFG, True, "Title", "CID-1", "https://example.com", None,
                     type_id="42", type_title="Bug")
     _, kwargs = api_mock.call_args
@@ -899,7 +899,7 @@ def test_planned_card_snapshot_type_title_never_reaches_the_post_body():
 def test_create_card_link_label_overrides_the_derived_label():
     """The sync passes the SHORT key label; the header-format custom_id must not leak into it
     (would read 'GitHub 0C1 (GitHub Issue #5)')."""
-    with patch("agileplace.api", return_value={"id": "new"}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={"id": "new"}) as api_mock:
         create_card(CFG, True, "Title", "0C1 (GitHub Issue #5)", "https://example.com", None,
                     link_label="GitHub 0C1")
     _, kwargs = api_mock.call_args
@@ -910,7 +910,7 @@ def test_create_card_link_label_overrides_the_derived_label():
 def test_create_card_without_link_label_keeps_the_derived_label_byte_identical():
     """Every existing caller (smoke.py included) passes no link_label and must send the exact
     body it always sent."""
-    with patch("agileplace.api", return_value={"id": "new"}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={"id": "new"}) as api_mock:
         create_card(CFG, True, "Title", "CID-1", "https://example.com", None)
     _, kwargs = api_mock.call_args
     assert kwargs["body"]["externalLink"] == {"label": "GitHub CID-1",

@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from card_coherence import (  # noqa: E402
+from agilesync.syncers.card_coherence import (  # noqa: E402
     contested_cards,
     fence_cid_index,
     fence_run_indices,
@@ -387,7 +387,7 @@ def test_fence_cid_index_collision_scan_does_not_call_same_card_for_id_bearing_c
     id to dedup by)."""
     cards = [{"id": str(i), "customId": "KEY"} for i in range(4000)]
 
-    with patch("card_coherence.same_card", wraps=same_card) as spy:
+    with patch("agilesync.syncers.card_coherence.same_card", wraps=same_card) as spy:
         index, _collisions, warnings = fence_cid_index(cards)
 
     assert index == {}
@@ -408,7 +408,7 @@ def test_fence_cid_index_idless_dedup_still_uses_same_card_scoped_to_idless_card
     id_bearing = [{"id": str(i), "customId": "KEY"} for i in range(500)]
     cards = [idless, idless, *id_bearing]
 
-    with patch("card_coherence.same_card", wraps=same_card) as spy:
+    with patch("agilesync.syncers.card_coherence.same_card", wraps=same_card) as spy:
         index, _collisions, warnings = fence_cid_index(cards)
 
     assert index == {}

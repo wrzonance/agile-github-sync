@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agileplace import _card_with_version, patch_card  # noqa: E402
+from agilesync.board.agileplace import _card_with_version, patch_card  # noqa: E402
 
 CFG = {"token": "t", "host": "h", "board_id": "b1"}
 
@@ -19,7 +19,7 @@ def test_card_with_version_refetches_and_returns_validated_fresh_snapshot():
     refetched = {"card": fresh_card}
     ops = [{"op": "replace", "path": "/laneId", "value": "L2"}]
 
-    with patch("agileplace.api", return_value=refetched) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value=refetched) as api_mock:
         result = _card_with_version(CFG, True, card, ops)
 
     api_mock.assert_called_once_with(CFG, "GET", "card/42")
@@ -66,7 +66,7 @@ def test_refetch_refuses_ops_when_touched_snapshot_changed(card_fields, fresh_fi
     card = {"id": "7", **card_fields}
     refetched = {"card": {"id": "7", "version": 5, **fresh_fields}}
 
-    with patch("agileplace.api", return_value=refetched):
+    with patch("agilesync.board.agileplace.api", return_value=refetched):
         result = _card_with_version(CFG, True, card, ops)
 
     assert result is None
@@ -93,7 +93,7 @@ def test_refetch_refuses_ops_when_touched_snapshot_changed(card_fields, fresh_fi
 def test_refetch_fails_closed_when_snapshot_cannot_be_validated(fresh_card, ops, warning, capsys):
     card = {"id": "7", "laneId": "L1"}
 
-    with patch("agileplace.api", return_value={"card": fresh_card}):
+    with patch("agilesync.board.agileplace.api", return_value={"card": fresh_card}):
         result = _card_with_version(CFG, True, card, ops)
 
     assert result is None
@@ -105,7 +105,7 @@ def test_patch_card_aborts_after_double_miss_without_sending_patch(capsys):
     card = {"id": "42"}
     ops = [{"op": "replace", "path": "/laneId", "value": "L"}]
 
-    with patch("agileplace.api", return_value={"card": {"id": "42"}}) as api_mock:
+    with patch("agilesync.board.agileplace.api", return_value={"card": {"id": "42"}}) as api_mock:
         with pytest.raises(SystemExit, match="card 42 PATCH"):
             patch_card(CFG, True, card, ops)
 
