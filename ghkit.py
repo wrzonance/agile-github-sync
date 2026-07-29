@@ -129,7 +129,8 @@ def list_issues(cfg: dict) -> list[dict]:
     the card-creation path.
     """
     out = run(cfg, ["issue", "list", "--state", "all", "--limit", "1000", "--json",
-                    "number,title,state,stateReason,labels,milestone,assignees,url,body,issueType"])
+                    "number,title,state,stateReason,labels,milestone,assignees,url,body,issueType,"
+                    "updatedAt"])
     issues = json.loads(out.stdout or "[]")
     normalized = []
     for i in issues:
@@ -149,6 +150,11 @@ def list_issues(cfg: dict) -> list[dict]:
             # never a bare string -- (i.get("issueType") or {}).get("name") is exactly that shape,
             # confirmed live (issue #82 spike). None means "native Task or no type set".
             "issue_type": (i.get("issueType") or {}).get("name"),
+            # Issue-level last-activity timestamp (ISO-8601 UTC), NOT a body-edit timestamp: a
+            # comment or label change moves it too. description_sync's recency tiebreak is the only
+            # consumer and only ever asks "was this issue touched at all since our last description
+            # sync", for which the coarser signal is exactly right. "" when gh omits it.
+            "updated_at": i.get("updatedAt") or "",
         })
     return normalized
 
@@ -196,6 +202,37 @@ def open_pr_issue_numbers(cfg: dict) -> set[int] | None:
         return {n["number"] for pr in prs for n in pr["closingIssuesReferences"]["nodes"]}
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, KeyError, TypeError,
             json.JSONDecodeError):
+        return None
+
+
+# One page, sized so no realistic repo is truncated. list_label_names reports rather than hides a
+# result that lands exactly on it -- a silently-clipped inventory would tell an operator a label
+# does not exist when it does.
+LABEL_LIST_LIMIT = 1000
+
+
+def list_label_names(cfg: dict) -> list[str] | None:
+    """Every label defined on the target repo (up to LABEL_LIST_LIMIT), sorted, for the card-type
+    mapping inventory (type_inventory.py). Tri-state, mirroring open_pr_issue_numbers exactly: a
+    list on success (possibly empty -- a real, distinguishable result) and **None on ANY failure**
+    (gh error, timeout, malformed/non-list response, an unusable TARGET_REPO_PATH, or gh not being
+    installed), so the caller prints "unavailable" rather than an empty inventory that reads as
+    "this repo has no labels". SystemExit and OSError are caught for that reason: run() raises
+    SystemExit for a missing/non-directory target path, which would otherwise abort a report whose
+    whole purpose is to be runnable while the configuration is broken.
+
+    Read-only and used by no write path: nothing derives behavior from it, so a failure here can
+    never affect a sync run. A result whose length equals LABEL_LIST_LIMIT may be truncated; the
+    caller is responsible for saying so (see type_inventory)."""
+    try:
+        out = run(cfg, ["label", "list", "--limit", str(LABEL_LIST_LIMIT), "--json", "name"])
+        data = json.loads(out.stdout or "[]")
+        if not isinstance(data, list):
+            raise TypeError("gh label list must return a JSON array")
+        return sorted(item["name"] for item in data
+                      if isinstance(item, dict) and isinstance(item.get("name"), str))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError,
+            TypeError, KeyError, OSError, SystemExit):
         return None
 
 
@@ -391,14 +428,15 @@ def edit_issue_body(cfg: dict, apply: bool, number: int, body: str) -> bool:
     return True
 
 
-# GitHub's three DEFAULT native issue types -- NOT the full universe of `--type` values: an org can
-# rename or disable these and define custom types of its own. This repo's reverse-seed table
-# (card_types.REVERSE_SEED_BY_CARD_TYPE) only ever emits "Bug" today, so this literal set is a
-# deliberate scope limiter for create_issue's schema/boundary check; it does NOT re-probe org
-# enablement, which is the caller's responsibility (see intake.promote()). Extending the reverse-
-# seed table to a custom org type requires widening this set too, or create_issue will reject a
-# type the org has actually enabled.
-_GH_ISSUE_TYPES = frozenset({"Task", "Bug", "Feature"})
+# GitHub's three DEFAULT native issue types. Once the reverse-seed table became operator-configurable
+# (CARD_TYPE_MAP), this stopped being a usable allowlist: the previous version of this comment
+# predicted exactly that -- "extending the reverse-seed table to a custom org type requires widening
+# this set too, or create_issue will reject a type the org has actually enabled" -- and an org type
+# like `Incident` did precisely that, passing card_types.validate_reverse_issue_type's org probe and
+# then being rejected here. create_issue now applies a SHAPE check only (see its docstring); org
+# enablement remains the caller's job through that probe, which is the check that actually knows.
+# Kept as documentation of the defaults, and used by the tests that pin them.
+_GH_DEFAULT_ISSUE_TYPES = frozenset({"Task", "Bug", "Feature"})
 
 
 def _issue_number_from_url(url: str) -> int:
@@ -433,14 +471,19 @@ def create_issue(cfg: dict, apply: bool, title: str, body: str,
     opaque TypeError ("argv must be str"), and "" produces a gh CalledProcessError -- either way an
     exception nothing upstream catches, crashing the entire sync run for one bad title. Raises
     ValueError with the offending value for context, matching edit_label's own boundary-validation
-    convention (unsafe label names). `issue_type`, when not None, is validated the same way against
-    the _GH_ISSUE_TYPES allowlist (GitHub's default types -- see its comment for the custom-org-
-    type caveat) -- a schema check, not an org-enablement check (that's the caller's job, via
-    validate_reverse_issue_type)."""
+    convention (unsafe label names). `issue_type`, when not None, gets the same kind of boundary
+    check, but on SHAPE only -- a non-empty string that gh will not mistake for a flag. It is
+    deliberately NOT checked against a literal list of type names: an org can rename or disable
+    GitHub's defaults and define its own, so the only authority on which types exist is
+    ghkit.org_issue_types, and card_types.validate_reverse_issue_type has already consulted it (an
+    unconfirmed type arrives here as None). A hardcoded allowlist here could only ever reject types
+    that probe just confirmed -- which is what it did to org-defined types once CARD_TYPE_MAP made
+    the reverse-seed table configurable."""
     if not isinstance(title, str) or not title.strip():
         raise ValueError(f"create_issue: title must be a non-empty string, got {title!r}")
-    if issue_type is not None and issue_type not in _GH_ISSUE_TYPES:
-        raise ValueError(f"create_issue: issue_type must be one of {sorted(_GH_ISSUE_TYPES)}, "
+    if issue_type is not None and (not isinstance(issue_type, str) or not issue_type.strip()
+                                    or issue_type.startswith("-")):
+        raise ValueError(f"create_issue: issue_type must be a non-empty, non-flag-like string, "
                           f"got {issue_type!r}")
     if not apply:
         type_suffix = f" --type '{issue_type}'" if issue_type else ""

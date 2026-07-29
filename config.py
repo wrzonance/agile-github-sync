@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from card_types import parse_card_type_map
 from stages import STAGES
 
 REPO_DIR = Path(__file__).resolve().parent
@@ -119,6 +120,7 @@ def env_config() -> dict:
         "target_repo_path": Path(target).expanduser() if target else None,
         "label_sync_ignore": frozenset(DEFAULT_IGNORE) | frozenset(extra),
         "stage_lane_map": parse_stage_lane_map(os.environ.get("STAGE_LANE_MAP", "")),
+        "card_type_map": parse_card_type_map(os.environ.get("CARD_TYPE_MAP", "")),
         "ap_description_max_length": _parse_ap_description_max_length(
             os.environ.get("AP_DESCRIPTION_MAX_LENGTH")),
         "comment_sync_identity": _parse_comment_sync_identity(

@@ -307,7 +307,8 @@ def _reverse_seed_create(cfg: dict, apply: bool, card: dict,
     after a successful create (`issue` is not None) -- a dry-run "would create" plan applies no
     label. Returns whatever ghkit.create_issue returns (None for a dry-run plan, or the created
     {"number", "url"})."""
-    seed = card_types.reverse_seed_for_card_type(card_types.card_type_title(card))
+    seed = card_types.reverse_seed_for_card_type(card_types.card_type_title(card),
+                                                 cfg.get("card_type_map"))
     validated_type = card_types.validate_reverse_issue_type(seed.issue_type, org_types)
     issue = ghkit.create_issue(cfg, apply, card.get("title", ""), _issue_body(card, cfg),
                                issue_type=validated_type)

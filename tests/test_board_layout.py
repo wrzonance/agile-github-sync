@@ -128,6 +128,22 @@ def test_card_types_with_ids_skips_malformed_card_types(capsys):
     assert any("is not an object" in line for line in warnings)
 
 
+def test_card_types_with_ids_keeps_a_name_keyed_entry_and_names_it_in_its_warning(capsys):
+    """The io v2 cardTypes entry shape is not pinned down by the public docs (API-VALIDATION.md), so
+    a `name`-keyed payload must survive structural validation exactly like a `title`-keyed one --
+    and a malformed `name` must be reported as such, not silently accepted as an untitled entry."""
+    valid = _card_types_with_ids([
+        {"id": "by-name", "name": "Defect"},
+        {"id": "bad-name", "name": 7},
+        {"name": "no-id"},
+    ])
+
+    assert valid == [{"id": "by-name", "name": "Defect"}]
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("WARN")]
+    assert any("bad-name" in line and "non-string" in line for line in warnings)
+    assert any("no-id" in line and "no id" in line for line in warnings)
+
+
 def test_board_layout_returns_lanes_and_card_types_as_a_boardlayout():
     """board_layout composes its one I/O call via agileplace.api -- patching agileplace.api (not a
     board_layout-local name) proves board_layout.py calls through the shared client, unchanged."""

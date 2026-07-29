@@ -79,6 +79,31 @@ Together, items 4 and 5 are what closes the fail-open optimistic-concurrency gap
 (`patch_card` no longer ever sends an unversioned PATCH). Both were confirmed live on 2026-07-20;
 the code still fails closed (refetch, validate, or abort) rather than assuming either shape.
 
+### Board `cardTypes[]` entry shape -- CONFIRMED 2026-07-29, and it is NOT the card's shape
+
+Confirmed live by smoke step 25. A board `cardTypes[]` entry carries:
+
+```
+['colorHex', 'id', 'isCardType', 'isTaskType', 'name', 'source']
+```
+
+The display key is **`name`** -- a board entry has no `title` at all. The hedge in
+`card_types.board_type_title` (`title`, falling back to `name`) is what makes this board readable; a
+`title`-only read resolves every board card type to nothing.
+
+**The card's nested `type` object uses the opposite key.** Steps 19-20 read back
+`{'id': ..., 'title': 'Other Work', 'cardColor': '#FFFFFF'}` -- keyed `title`/`cardColor` where the
+board entry is keyed `name`/`colorHex`. The two shapes genuinely differ, so the two readers stay
+separate: `board_type_title` for board entries, `card_type_title` for a card's nested type. Neither
+may be collapsed into the other, and each keeps the opposite key as a fallback.
+
+Getting either key wrong fails silently rather than loudly: the affected types go invisible, every
+derived card type resolves to nothing, and a run only warns that the board "defines no such type".
+That is why `smoke.py` asserts on both paths -- step 25 on the board entry shape, steps 19-20 on the
+`typeId` write round-trip -- and why `python type_inventory.py` prints what each side actually
+returns. Steps 19-20 were themselves inert until 2026-07-29: their card-type picker read `title`
+alone, so it skipped on this very board and a passing suite proved nothing about the write path.
+
 ## Model 2 additions, also [live-check]
 
 - `gh project` CLI shapes (`ghproject.py`, init `05`): `item-list --format json` (Status comes back

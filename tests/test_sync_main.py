@@ -230,7 +230,11 @@ def test_legacy_state_resets_merge_base_before_relearning_live_metadata(tmp_path
 
     state = json.loads(state_file.read_text(encoding="utf-8"))
     assert state["schema"] == sync.STATE_SCHEMA
-    assert state["issues"][ISSUE_URL] == {
+    persisted = state["issues"][ISSUE_URL]
+    # desc_gh_updated is the recency anchor advanced alongside the merge base: the issue's own
+    # updated_at exactly as this run observed it ("" for a fixture that carries none).
+    assert persisted.pop("desc_gh_updated") == ""
+    assert persisted == {
         "card_id": "C1", "labels": ["bug"], "milestone": "1.0",
         "start": "2026-02-01", "target": None,
         # issue #65: sync_description's own additive merge-base keys, advanced together since

@@ -146,7 +146,7 @@ def _raw_timestamp(value) -> str | None:
     a present-but-unparseable value is kept so the planner's `comment_sync._timestamp_warning` can
     surface an unrecognized AgilePlace timestamp format (issue #66 Codex P2 #8) instead of it
     vanishing to None before the planner ever sees it. Every comparison site parses at use via
-    `comment_sync._parse_timestamp`, so a garbage value is still excluded from drift/adjacency --
+    `comment_sync.parse_timestamp`, so a garbage value is still excluded from drift/adjacency --
     just no longer silently. Mirrors ghkit._normalize_gh_comment's own raw-string pass-through."""
     return value if isinstance(value, str) and value.strip() else None
 

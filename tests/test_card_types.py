@@ -21,6 +21,8 @@ Run: pytest -q
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from card_types import (  # noqa: E402
@@ -30,9 +32,12 @@ from card_types import (  # noqa: E402
     ResolvedCardTypes,
     ReverseSeed,
     _decide,
+    active_rules,
+    board_type_title,
     card_type_title,
     derive_card_type_name,
     op_type,
+    parse_card_type_map,
     resolve_card_type_ids,
     reverse_seed_for_card_type,
     sync_card_type,
@@ -144,7 +149,40 @@ def test_resolve_warns_once_per_unresolved_name_and_skips_it():
     resolved = resolve_card_type_ids([])
     needed = {"Bug", "New Feature", "Documentation", "Improvement"}
     assert resolved.by_name == {}
-    assert len(resolved.warnings) == len(needed)
+    # one WARN per unresolved name, plus the single trailing hint line
+    assert len(resolved.warnings) == len(needed) + 1
+
+
+def test_resolve_appends_one_hint_naming_the_titles_the_board_actually_offers():
+    """The four look-alike WARNs say what is MISSING; without this line nothing in the run output
+    says what the board actually has, which is the information needed to write a CARD_TYPE_MAP."""
+    resolved = resolve_card_type_ids([
+        {"id": "t-def", "title": "Defect", "isCardType": True},
+        {"id": "t-story", "title": "Story", "isCardType": True},
+        {"id": "t-sub", "title": "Subtask", "isCardType": False},
+    ])
+    hint = resolved.warnings[-1]
+    assert "'Defect'" in hint and "'Story'" in hint
+    assert "Subtask" not in hint  # ineligible types are not offerable targets
+    assert "CARD_TYPE_MAP" in hint
+
+
+def test_resolve_appends_no_hint_when_every_name_resolved():
+    resolved = resolve_card_type_ids([
+        {"id": "t-bug", "title": "Bug", "isCardType": True},
+        {"id": "t-doc", "title": "Documentation", "isCardType": True},
+        {"id": "t-imp", "title": "Improvement", "isCardType": True},
+        {"id": "t-feat", "title": "New Feature", "isCardType": True},
+    ])
+    assert resolved.warnings == ()
+
+
+def test_resolve_reads_a_board_card_type_keyed_name_instead_of_title():
+    """AgilePlace's io v2 cardTypes entry shape is not pinned down by the public docs (see
+    API-VALIDATION.md); a payload keyed `name` must resolve exactly like one keyed `title` rather
+    than making every board card type invisible and silently skipping all typeId writes."""
+    resolved = resolve_card_type_ids([{"id": "t-bug", "name": "Bug", "isCardType": True}])
+    assert resolved.by_name["Bug"] == "t-bug"
 
 
 def test_resolve_warns_on_ambiguous_duplicate_titles():
@@ -240,7 +278,7 @@ def test_sync_card_type_leaves_base_untouched_when_unmatched():
     card = {"type": {"id": "t-bug", "title": "Bug"}}
     issues_state = {issue["url"]: {"type": "Bug"}}
 
-    sync_card_type("cfg", True, issue, card, {}, issues_state, _noop_queue)
+    sync_card_type({}, True, issue, card, {}, issues_state, _noop_queue)
 
     assert issues_state[issue["url"]]["type"] == "Bug"
 
@@ -250,7 +288,7 @@ def test_sync_card_type_leaves_base_untouched_when_name_unresolved():
     card = {"type": {"id": "t-doc", "title": "Documentation"}}
     issues_state = {issue["url"]: {"type": "Documentation"}}
 
-    sync_card_type("cfg", True, issue, card, {}, issues_state, _noop_queue)
+    sync_card_type({}, True, issue, card, {}, issues_state, _noop_queue)
 
     assert issues_state[issue["url"]]["type"] == "Documentation"
 
@@ -263,7 +301,7 @@ def test_sync_card_type_never_mutates_issue_card_or_by_name():
     issue_snapshot, card_snapshot, by_name_snapshot = dict(issue), dict(card), dict(by_name)
     queued = []
 
-    sync_card_type("cfg", True, issue, card, by_name, issues_state,
+    sync_card_type({}, True, issue, card, by_name, issues_state,
                     lambda c, ops, note: queued.append((c, ops, note)))
 
     assert issue == issue_snapshot
@@ -280,7 +318,7 @@ def test_sync_card_type_does_not_persist_base_when_apply_is_false():
     card = {"type": {"id": "t-bug", "title": "Bug"}}
     issues_state = {issue["url"]: {"type": None}}
 
-    sync_card_type("cfg", False, issue, card, {"Bug": "t-bug"}, issues_state, _noop_queue)
+    sync_card_type({}, False, issue, card, {"Bug": "t-bug"}, issues_state, _noop_queue)
 
     assert issues_state[issue["url"]]["type"] is None
 
@@ -364,3 +402,154 @@ def test_validate_reverse_issue_type_blocks_when_probe_failed():
 
 def test_validate_reverse_issue_type_none_issue_type_is_a_no_op():
     assert validate_reverse_issue_type(None, frozenset({"Bug"})) is None
+
+
+# --- parse_card_type_map / active_rules: the .env-configurable derivation table -----------------
+
+def test_parse_card_type_map_reads_both_kinds_in_written_order():
+    rules = parse_card_type_map("type:Bug=Defect; label:enhancement=Improvement; type:Feature=Story")
+    assert rules == (
+        CardTypeRule(kind="issue_type", key="Bug", target="Defect"),
+        CardTypeRule(kind="label", key="enhancement", target="Improvement"),
+        CardTypeRule(kind="issue_type", key="Feature", target="Story"),
+    )
+
+
+def test_parse_card_type_map_blank_means_unset_which_selects_the_defaults():
+    assert parse_card_type_map("") is None
+    assert parse_card_type_map("   ") is None
+    assert active_rules(parse_card_type_map("")) == CARD_TYPE_RULES
+
+
+def test_active_rules_prefers_a_configured_map_over_the_defaults():
+    configured = (CardTypeRule(kind="label", key="bug", target="Defect"),)
+    assert active_rules(configured) == configured
+    assert active_rules(None) == CARD_TYPE_RULES
+
+
+def test_a_map_that_is_entirely_malformed_fails_closed_instead_of_reverting_to_defaults(capsys):
+    """Adversarial-review finding: a wholly invalid CARD_TYPE_MAP used to parse to the same empty
+    result as "unset", silently re-enabling the built-in defaults -- so an operator who typo'd
+    their mapping got card types written from a table they had explicitly tried to replace. A
+    configured-but-unusable map must derive NOTHING."""
+    rules = parse_card_type_map("typo:Bug=Defect; also nonsense")
+    assert rules == ()
+    assert rules is not None
+    assert active_rules(rules) == ()
+    assert derive_card_type_name({"issue_type": "Bug", "labels": ["bug"]}, rules) is None
+    assert "CARD_TYPE_MAP" in capsys.readouterr().out
+
+
+def test_parse_card_type_map_rejects_a_label_gh_could_not_write(capsys):
+    """Adversarial-review finding: reverse intake APPLIES these labels, and ghkit.edit_label raises
+    on a CSV-unsafe name -- after the issue has already been created. The next run then resumes the
+    marked issue and never re-seeds it, so the label is lost forever. Reject it at parse time."""
+    assert parse_card_type_map('label:customer,bug=Defect; label:say"what=Story') == ()
+    out = capsys.readouterr().out
+    assert out.count("gh cannot write") == 2
+
+
+def test_parse_card_type_map_keeps_a_colon_inside_a_label_name():
+    """Split on the FIRST ':' only -- namespaced labels (`area:api`) are ordinary GitHub labels."""
+    assert parse_card_type_map("label:area:api=Improvement") == (
+        CardTypeRule(kind="label", key="area:api", target="Improvement"),)
+
+
+def test_parse_card_type_map_is_case_insensitive_on_the_kind_prefix_only():
+    rules = parse_card_type_map("TYPE:Bug=Defect")
+    assert rules == (CardTypeRule(kind="issue_type", key="Bug", target="Defect"),)
+
+
+@pytest.mark.parametrize("raw", [
+    "Bug=Defect",              # no kind prefix -- ambiguous, never guessed
+    "kind:Bug=Defect",         # unknown kind
+    "type:Bug",                # no '='
+    "type:=Defect",            # no key
+    "type:Bug=",               # no target
+])
+def test_parse_card_type_map_skips_a_malformed_entry_with_a_warning(raw, capsys):
+    assert parse_card_type_map(raw) == ()
+    assert "CARD_TYPE_MAP" in capsys.readouterr().out
+
+
+def test_parse_card_type_map_keeps_the_good_entries_around_a_bad_one():
+    rules = parse_card_type_map("type:Bug=Defect; nonsense; label:docs=Documentation")
+    assert [rule.target for rule in rules] == ["Defect", "Documentation"]
+
+
+def test_derive_card_type_name_uses_the_configured_map_instead_of_the_defaults():
+    issue = {"issue_type": "Bug", "labels": ["enhancement"]}
+    configured = parse_card_type_map("type:Bug=Defect")
+    assert derive_card_type_name(issue, configured) == "Defect"
+    assert derive_card_type_name(issue) == "Bug"  # defaults, unchanged
+
+
+def test_derive_card_type_name_first_configured_match_wins():
+    issue = {"issue_type": "Bug", "labels": ["enhancement"]}
+    assert derive_card_type_name(
+        issue, parse_card_type_map("label:enhancement=Improvement; type:Bug=Defect")) == "Improvement"
+    assert derive_card_type_name(
+        issue, parse_card_type_map("type:Bug=Defect; label:enhancement=Improvement")) == "Defect"
+
+
+def test_derive_card_type_name_returns_none_when_the_configured_map_matches_nothing():
+    configured = parse_card_type_map("type:Chore=Housekeeping")
+    assert derive_card_type_name({"issue_type": "Bug", "labels": ["bug"]}, configured) is None
+
+
+def test_reverse_seed_inverts_the_configured_map_so_the_two_directions_cannot_drift():
+    configured = parse_card_type_map("type:Bug=Defect; label:enhancement=Improvement")
+    assert reverse_seed_for_card_type("Defect", configured) == ReverseSeed(issue_type="Bug", label=None)
+    assert reverse_seed_for_card_type("Improvement", configured) == ReverseSeed(issue_type=None,
+                                                                               label="enhancement")
+
+
+def test_a_configured_map_seeds_nothing_for_a_card_type_it_does_not_mention():
+    """Adversarial-review finding (drift): falling back to the built-in table here let
+    `type:Bug=Defect` still seed a native `Bug` from a card typed `Bug` -- whose new issue then
+    derives FORWARD to `Defect`, retyping the very card the promotion came from. When a map is
+    configured it is the whole answer; unmentioned types seed nothing."""
+    configured = parse_card_type_map("type:Bug=Defect")
+    assert reverse_seed_for_card_type("Bug", configured) == ReverseSeed(None, None)
+    assert reverse_seed_for_card_type("Other Work", configured) == ReverseSeed(None, None)
+    assert reverse_seed_for_card_type("Nothing At All", configured) == ReverseSeed(None, None)
+
+
+def test_the_builtin_reverse_table_still_applies_when_nothing_is_configured():
+    """`Other Work` is reverse-only (no forward rule produces it) and keeps seeding a native Task
+    for every board that has not configured a map."""
+    assert reverse_seed_for_card_type("Other Work", None).issue_type == "Task"
+    assert reverse_seed_for_card_type("Other Work").issue_type == "Task"
+
+
+def test_a_configured_map_round_trips_without_retyping_the_source_card():
+    """The invariant the drift finding violated: seed a promoted card's type out to GitHub, derive
+    it back, and land on the SAME card type -- no oscillation, no retyping."""
+    configured = parse_card_type_map("type:Bug=Defect; label:enhancement=Improvement")
+    for card_type in ("Defect", "Improvement"):
+        seed = reverse_seed_for_card_type(card_type, configured)
+        issue = {"issue_type": seed.issue_type,
+                 "labels": [seed.label] if seed.label else []}
+        assert derive_card_type_name(issue, configured) == card_type
+
+
+def test_reverse_seed_for_a_card_type_none_is_still_total_with_a_configured_map():
+    assert reverse_seed_for_card_type(None, parse_card_type_map("type:Bug=Defect")) == ReverseSeed(
+        None, None)
+
+
+# --- board_type_title: the board-entry title reader --------------------------------------------
+
+@pytest.mark.parametrize("entry,expected", [
+    ({"title": "Defect"}, "Defect"),
+    ({"name": "Defect"}, "Defect"),
+    ({"title": "  Defect  "}, "Defect"),
+    ({"title": "", "name": "Defect"}, "Defect"),
+    ({"title": "   ", "name": "Defect"}, "Defect"),
+    ({"title": "Defect", "name": "Other"}, "Defect"),
+    ({}, ""),
+    ({"title": None, "name": None}, ""),
+    ({"title": 5, "name": ["x"]}, ""),
+])
+def test_board_type_title_reads_title_then_name_and_never_raises(entry, expected):
+    assert board_type_title(entry) == expected

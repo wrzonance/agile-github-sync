@@ -89,12 +89,35 @@ def test_list_issues_requests_issue_type_field(monkeypatch):
 # --- create_issue(): issue_type boundary validation ------------------------
 
 @pytest.mark.parametrize("apply", [True, False])
-def test_create_issue_rejects_an_unrecognized_issue_type_before_reaching_run(monkeypatch, apply):
+@pytest.mark.parametrize("issue_type", ["", "   ", "--type", 7])
+def test_create_issue_rejects_a_malformed_issue_type_before_reaching_run(monkeypatch, apply,
+                                                                        issue_type):
+    """The boundary check is on SHAPE -- blank, non-string, or flag-like -- since those are what
+    would reach subprocess unvalidated."""
     monkeypatch.setattr(ghkit, "run", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("must not call run for an invalid issue_type")))
 
     with pytest.raises(ValueError, match="issue_type"):
-        ghkit.create_issue({}, apply, "Title", "body", issue_type="Epic")
+        ghkit.create_issue({}, apply, "Title", "body", issue_type=issue_type)
+
+
+def test_create_issue_accepts_an_org_defined_issue_type_the_probe_confirmed(monkeypatch):
+    """Adversarial-review finding: an org-defined type such as `Incident` passes
+    card_types.validate_reverse_issue_type (the org probe lists it), and a hardcoded allowlist here
+    then rejected it -- aborting every intake promotion for a card type CARD_TYPE_MAP maps to it.
+    Org enablement is the caller's check, not this boundary's."""
+    captured = {}
+
+    def _run(cfg, args, **kwargs):
+        captured["args"] = args
+        return Mock(stdout="https://github.com/o/r/issues/1\n")
+
+    monkeypatch.setattr(ghkit, "run", _run)
+
+    result = ghkit.create_issue({}, True, "Title", "body", issue_type="Incident")
+
+    assert result == {"number": 1, "url": "https://github.com/o/r/issues/1"}
+    assert captured["args"][captured["args"].index("--type") + 1] == "Incident"
 
 
 @pytest.mark.parametrize("issue_type", ["Task", "Bug", "Feature"])

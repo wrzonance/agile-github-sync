@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import agileplace
+from card_types import board_type_title  # imported by name: `card_types` is a local param below
 from stages import STAGES, STAGE_CARD_STATUS, lane_matches_stage, title_contains_phrase
 
 
@@ -61,19 +62,28 @@ class BoardLayout(NamedTuple):
 def _card_types_with_ids(card_types: list) -> list[dict]:
     """Structural validation mirroring _lanes_with_ids: malformed card-type entries are skipped with
     one WARN each, never raised. Eligibility (isCardType) and name resolution are card_types.py's
-    semantic job -- this only guarantees every entry handed onward is a dict with a usable id."""
+    semantic job -- this only guarantees every entry handed onward is a dict with a usable id.
+
+    Display titles read through board_type_title (`title`, falling back to `name`), the
+    same hedge lane_title applies to lanes -- see that helper for why the io v2 cardTypes shape is
+    not taken for granted."""
     valid = []
     for card_type in card_types:
         if not isinstance(card_type, dict):
             print(f"WARN  card type <{type(card_type).__name__}> is not an object -- "
                   f"skipping malformed card type")
             continue
-        title = card_type.get("title")
-        if title is not None and not isinstance(title, str):
-            print(f"WARN  card type id {card_type.get('id', '<unknown>')!r} has non-string title "
-                  f"({type(title).__name__}) -- skipping malformed card type")
+        malformed_text = next(
+            (field for field in ("title", "name")
+             if card_type.get(field) is not None and not isinstance(card_type[field], str)),
+            None,
+        )
+        if malformed_text:
+            value = card_type[malformed_text]
+            print(f"WARN  card type id {card_type.get('id', '<unknown>')!r} has non-string "
+                  f"{malformed_text} ({type(value).__name__}) -- skipping malformed card type")
             continue
-        display_title = (title or "").strip() or "<untitled>"
+        display_title = board_type_title(card_type) or "<untitled>"
         if "id" not in card_type or card_type["id"] is None:
             print(f"WARN  card type '{display_title}' has no id -- skipping malformed card type")
             continue

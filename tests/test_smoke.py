@@ -533,3 +533,65 @@ def test_issue_graph_batch_failure_fails_the_run(tenant_env, capsys, monkeypatch
 
     assert smoke.main(["--yes"]) == 1
     assert "FAIL  issue-graph batched read (issue #98)" in capsys.readouterr().out
+
+
+def test_board_card_type_shape_step_resolves_a_name_keyed_entry(capsys, monkeypatch):
+    """Step 25: the io v2 cardTypes entry shape is unconfirmed (API-VALIDATION.md), so this step is
+    what would catch a live board keyed `name` instead of `title` -- the failure that otherwise
+    makes every board card type invisible and silently skips every typeId write."""
+    monkeypatch.setattr(smoke.board_layout, "board_layout", lambda cfg: smoke.board_layout.BoardLayout(
+        lanes=[], card_types=[{"id": "t1", "name": "Defect", "isCardType": True},
+                              {"id": "t2", "name": "Subtask", "isCardType": False}]))
+    results = []
+
+    smoke._check_board_card_type_shape({}, results)
+
+    assert results == [("board cardTypes[] titles resolve via board_type_title", True,
+                        "2 entry(ies), 1 eligible: Defect")]
+    assert "first entry raw keys: ['id', 'isCardType', 'name']" in capsys.readouterr().out
+
+
+def test_board_card_type_shape_step_fails_when_no_entry_yields_a_title(monkeypatch):
+    """A board that returns entries the reader cannot title is the exact silent-failure mode this
+    step exists to make loud -- it must FAIL, not skip."""
+    monkeypatch.setattr(smoke.board_layout, "board_layout", lambda cfg: smoke.board_layout.BoardLayout(
+        lanes=[], card_types=[{"id": "t1", "isCardType": True}]))
+    results = []
+
+    smoke._check_board_card_type_shape({}, results)
+
+    assert results[0][1] is False
+
+
+def test_board_card_type_shape_step_skips_informationally_on_a_typeless_board(monkeypatch):
+    monkeypatch.setattr(smoke.board_layout, "board_layout",
+                        lambda cfg: smoke.board_layout.BoardLayout(lanes=[], card_types=[]))
+    results = []
+
+    smoke._check_board_card_type_shape({}, results)
+
+    assert results[0][1] is None
+
+
+def test_pick_card_type_resolves_a_name_keyed_board_entry():
+    """The live board returns `cardTypes[]` keyed `name`, not `title` (confirmed by step 25's raw
+    key dump). Reading `title` alone made _pick_card_type return None on a board with six eligible
+    types, so steps 19-20 reported "no eligible card type configured" and never exercised the
+    typeId write at all -- the silent skip this whole feature exists to end."""
+    entries = [{"id": "t1", "isCardType": True, "name": "New Feature"}]
+
+    assert smoke._pick_card_type(entries) == entries[0]
+
+
+def test_pick_card_type_still_prefers_a_title_keyed_entry():
+    entries = [{"id": "t1", "isCardType": True, "title": "Improvement"}]
+
+    assert smoke._pick_card_type(entries) == entries[0]
+
+
+def test_pick_card_type_skips_task_only_and_untitled_entries():
+    """Eligibility is unchanged by the name fallback: a task-only type is still ineligible, and an
+    entry with neither key still yields nothing rather than a typeId the board would reject."""
+    assert smoke._pick_card_type([{"id": "t1", "isCardType": False, "name": "Subtask"}]) is None
+    assert smoke._pick_card_type([{"id": "t2", "isCardType": True}]) is None
+    assert smoke._pick_card_type([{"id": "t3", "isCardType": True, "name": "   "}]) is None

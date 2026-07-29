@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ghkit import create_label, edit_label, is_gh_label_safe  # noqa: E402
+from ghkit import create_label, edit_label, is_gh_label_safe, list_label_names  # noqa: E402
 from reconcile import Reconciled  # noqa: E402
 from metadata_sync import _filter_gh_safe_labels, sync_metadata  # noqa: E402
 
@@ -651,3 +651,49 @@ def test_sync_metadata_backward_compatible_on_safe_labels(monkeypatch, capsys):
     prev = issues_state[issue["url"]]
     assert set(prev["labels"]) == {"bug", "feature"}
     assert capsys.readouterr().out.count("WARN") == 0
+
+
+# --- list_label_names: tri-state read for the card-type mapping inventory -------------------------
+
+class _Out:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def test_list_label_names_returns_sorted_names(monkeypatch):
+    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: _Out(
+        '[{"name":"enhancement"},{"name":"bug"},{"name":"documentation"}]'))
+    assert list_label_names({}) == ["bug", "documentation", "enhancement"]
+
+
+def test_list_label_names_empty_repo_is_a_real_result_not_a_failure(monkeypatch):
+    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: _Out("[]"))
+    assert list_label_names({}) == []
+
+
+@pytest.mark.parametrize("stdout", ['{"name":"bug"}', "not json", "42"])
+def test_list_label_names_malformed_response_is_none(monkeypatch, stdout):
+    """Tri-state: None means "we don't know", so the inventory prints "unavailable" instead of an
+    empty list a reader would take for "this repo has no labels"."""
+    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: _Out(stdout))
+    assert list_label_names({}) is None
+
+
+def test_list_label_names_blank_stdout_is_an_empty_repo_not_a_failure(monkeypatch):
+    """gh emits nothing at all for an empty result set -- that is a real answer, not a read
+    failure, and matches list_issues'/org_issue_types' own `or "[]"` convention."""
+    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: _Out(""))
+    assert list_label_names({}) == []
+
+
+def test_list_label_names_subprocess_failure_is_none(monkeypatch):
+    def _boom(cfg, args, **k):
+        raise subprocess.CalledProcessError(1, "gh")
+    monkeypatch.setattr("ghkit.run", _boom)
+    assert list_label_names({}) is None
+
+
+def test_list_label_names_skips_malformed_entries_without_raising(monkeypatch):
+    monkeypatch.setattr("ghkit.run", lambda cfg, args, **k: _Out(
+        '[{"name":"bug"},{"nope":1},"bare string",null,{"name":7}]'))
+    assert list_label_names({}) == ["bug"]

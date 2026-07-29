@@ -1,6 +1,6 @@
 """Two-way GitHub issue <-> AgilePlace card comment sync (issue #66).
 
-This module carries the shared timestamp-normalization helper (Task 1), the pure planning core
+This module carries the pure planning core
 (Task 4): provenance-prefix build/parse, sync-identity check, and `resolve_comment_sync` -- the
 planner that turns (identity, ledger, gh_comments, ap_comments) into a `CommentSyncPlan` of
 `CommentAction`s -- plus the wiring layer (Task 5): `sync_comments`, the one-call-per-issue
@@ -45,29 +45,7 @@ from comment_render import (
     render_drift_edit,
     render_mirror_body,
 )
-
-
-def _parse_timestamp(raw: str | None) -> datetime | None:
-    """Normalizes a comment timestamp to a UTC-aware datetime so both sides of a sync (GH's
-    ISO-8601, AP's not-yet-confirmed format) become comparable through one funnel rather than via
-    raw lexical string comparison. Total: any input that isn't a parseable ISO-8601 string --
-    ``None``, blank, garbage, or simply the wrong type -- degrades to ``None`` and never raises, so a
-    comparison site can exclude the comment (with a WARN) instead of crashing the whole sync.
-    """
-    if not isinstance(raw, str):
-        return None
-    text = raw.strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+from timestamps import parse_timestamp
 
 
 def is_sync_authored(side: str, author_identifier: str | None, identity: dict | None) -> bool:
@@ -120,7 +98,7 @@ class CommentSyncPlan(NamedTuple):
     adopt/drop actions, then brand-new mirrors -- the latter chronologically ordered across
     interleaved GH/AP sources (design doc: "new mirrors post in chronological order"). `warnings`
     are plain, pre-built message strings for anomalies the planner noticed but stayed silent about
-    while planning (e.g. `_parse_timestamp`'s totality contract: "excluded ... with a WARN") --
+    while planning (e.g. `parse_timestamp`'s totality contract: "excluded ... with a WARN") --
     building a string is not I/O, so the planning core stays pure; only `sync_comments` (wiring)
     actually prints them."""
     actions: list[CommentAction]
@@ -205,7 +183,7 @@ def _ap_body_hash(comment: dict) -> str:
 def _side_drifted(live_edited: datetime | None, ledgered_edited: datetime | None) -> bool:
     """A side has drifted when its current edited-timestamp is parseable AND differs from the
     ledgered value. An unparseable LIVE timestamp is excluded from the decision (we genuinely can't
-    tell) rather than treated as drift -- see _parse_timestamp's totality contract. GH-only:
+    tell) rather than treated as drift -- see parse_timestamp's totality contract. GH-only:
     AgilePlace has no edit timestamp, so AP drift uses `_ap_body_hash` (see `_plan_drift`)."""
     return live_edited is not None and live_edited != ledgered_edited
 
@@ -219,8 +197,8 @@ def _plan_drift(row: dict, gh_id: int, ap_id: int, gh_comment: dict, ap_comment:
     timestamp, so the original most-recent-wins can't run; deterministic GH-wins replaces it. The
     provenance prefix always names the ORIGIN's own current author -- origin/mirror is permanent
     ledger bookkeeping, independent of which side's content happens to be canonical this round."""
-    gh_drifted = _side_drifted(_parse_timestamp(gh_comment.get("edited")),
-                               _parse_timestamp(row.get("gh_edited")))
+    gh_drifted = _side_drifted(parse_timestamp(gh_comment.get("edited")),
+                               parse_timestamp(row.get("gh_edited")))
     # ap_hash None is the UNCONFIRMED sentinel (a prior AP write whose readback failed): never treat
     # it as drift -- `confirm_ap_baseline` adopts the current body as the baseline next run instead.
     ledgered_hash = row.get("ap_hash")
@@ -246,7 +224,7 @@ def _gh_timestamp_warning(comment_id: int | None, raw) -> str | None:
     but fails to parse -- the exact case `_side_drifted` silently excludes from the GH drift decision.
     `None` when there's nothing to warn about (never edited / parseable). GH-only: AgilePlace has no
     comment edit timestamp, so there is no AP analogue to warn about."""
-    if raw is None or _parse_timestamp(raw) is not None:
+    if raw is None or parse_timestamp(raw) is not None:
         return None
     return (f"comment sync: unparseable edited timestamp on gh comment {comment_id!r} "
            f"({raw!r}) -- excluded from drift comparison")
@@ -336,12 +314,12 @@ def _find_origin_candidate(parsed: ProvenanceHeader, mirror_comment: dict, candi
               if _author_label(candidate_side, c).strip().casefold() == parsed.author_label.strip().casefold()]
     if not matches:
         return None
-    mirror_created = _parse_timestamp(mirror_comment.get("created"))
+    mirror_created = parse_timestamp(mirror_comment.get("created"))
     if mirror_created is None:
         return matches[0]
 
     def _gap_seconds(candidate: dict) -> float:
-        candidate_created = _parse_timestamp(candidate.get("created"))
+        candidate_created = parse_timestamp(candidate.get("created"))
         if candidate_created is None:
             return float("inf")
         return abs((candidate_created - mirror_created).total_seconds())
@@ -389,7 +367,7 @@ def _plan_mirror_new(gh_candidates: list[dict], ap_candidates: list[dict]) -> li
     unparseable) keep gh_candidates-then-ap_candidates original order."""
     far_future = datetime.max.replace(tzinfo=timezone.utc)
     tagged = [("gh", c) for c in gh_candidates] + [("ap", c) for c in ap_candidates]
-    tagged.sort(key=lambda pair: _parse_timestamp(pair[1].get("created")) or far_future)
+    tagged.sort(key=lambda pair: parse_timestamp(pair[1].get("created")) or far_future)
     actions = []
     for side, comment in tagged:
         target_side = _other_side(side)

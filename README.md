@@ -102,11 +102,19 @@ your lanes. You can list several lanes per stage: the first is where cards get m
 them counts as "already in that stage". See `.env.example`. Without the map, lanes are matched by
 title and card status, and an ambiguous match leaves the card alone.
 
+The sync also sets each card's **type** from its GitHub issue (native issue type first, then
+labels). Card type names are board-specific, so unless your board happens to use the built-in
+default names the mapping needs pinning with `CARD_TYPE_MAP` in `.env` — otherwise the run warns
+once per unresolved name and writes no type at all. Run `python type_inventory.py` to print what
+each side actually offers plus a copy-pasteable skeleton. The same map is inverted for reverse
+intake, so a promoted card seeds its new issue's type/label from its own card type.
+
 ## Run
 
 ```
 python sync.py            # dry run: prints what it would do, writes nothing
 python sync.py --apply    # create/move/connect cards and sync metadata and dates (needs a full .env and token scopes)
+python type_inventory.py  # read-only: list GitHub issue types/labels and board card types, for CARD_TYPE_MAP
 ```
 
 Runs are idempotent, so any schedule frequency is fine. With no AgilePlace token it still reads
@@ -142,6 +150,10 @@ The account running the schedule needs `python` and `gh` on PATH, `gh auth login
   date reads/writes).
 - `agileplace.py`: AgilePlace io v2 (board, cards, lanes, tags, dates, connections, blocked
   state).
+- `card_types.py`: pure card-type derivation, `CARD_TYPE_MAP` parsing, and board-type resolution
+  (unit-tested). `type_inventory.py`: read-only report of both sides' type/label names.
+- `description_sync.py`: pure GitHub body <-> card description merge, with the most-recent-wins
+  conflict policy anchored on the issue's `updated_at` (unit-tested).
 - `config.py`: `.env` config. `tests/`: pytest (`pytest -q`).
 
 The one-time initial stand-up (labels, milestones, first issues, adding issues to the Project) is

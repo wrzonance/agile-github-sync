@@ -511,7 +511,7 @@ def _ensure_cards_for_syncable_issues(cfg: dict, apply: bool, syncable_issues: l
         lane = None
         if not project_read_failed:
             lane, _ = board_layout.resolve_lane_for_stage(lanes, stage, issue.get("milestone") or "", stage_map)
-        derived_type = card_types.derive_card_type_name(issue)
+        derived_type = card_types.derive_card_type_name(issue, cfg.get("card_type_map"))
         type_id = type_by_name.get(derived_type) if derived_type else None
         created = agileplace.create_card(cfg, apply, issue_card_title(issue),
                                          issue_card_header(issue), issue["url"],
@@ -616,7 +616,7 @@ def main() -> None:
     # same `lanes = ...` line, so this is flagged as a likely merge conflict up front) ---
     layout = board_layout.board_layout(cfg) if online else board_layout.BoardLayout(lanes=[], card_types=[])
     lanes = layout.lanes
-    resolved = card_types.resolve_card_type_ids(layout.card_types)
+    resolved = card_types.resolve_card_type_ids(layout.card_types, cfg.get("card_type_map"))
     if online:
         for line in resolved.warnings:
             print(line)
