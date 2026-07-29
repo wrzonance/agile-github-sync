@@ -18,6 +18,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# Runnable both ways: `python -m agilesync.tools.probe_dependencies` from the repo root, and
+# `python path/to/agilesync/tools/probe_dependencies.py` from anywhere. Direct execution puts this
+# file's own directory on sys.path instead of the repo root, so the agilesync imports below
+# would fail without this. It can't be factored into a shared helper -- importing that helper
+# is precisely what these lines exist to make possible.
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from agilesync.board import agileplace
 from agilesync.config import env_config
 

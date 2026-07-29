@@ -167,8 +167,10 @@ scripts/             Windows Task Scheduler registration
 tests/               pytest (`pytest -q`)
 ```
 
-Run the operator tools as modules: `python -m agilesync.tools.smoke`,
-`python -m agilesync.tools.type_inventory`, `python -m agilesync.tools.probe_dependencies`.
+`sync.py` is the only entry point you run by path; it works from any working directory. The
+operator tools take either form -- as a module from the repo root
+(`python -m agilesync.tools.smoke`), or by path from anywhere
+(`python agilesync/tools/smoke.py`). Same for `type_inventory` and `probe_dependencies`.
 
 The one-time initial stand-up (labels, milestones, first issues, adding issues to the Project) is
 a separate throwaway step that lives outside this repo. This tool only maintains the ongoing
