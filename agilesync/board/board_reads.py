@@ -41,8 +41,7 @@ class ApCommentsFailure(NamedTuple):
     detail: str
 
 
-# Internal family keys -> the words a reader of the console sees.
-_READ_FAMILIES = {"desc": "description", "deps": "dependencies", "comm": "comments",
+_READ_FAMILIES ={"desc": "description", "deps": "dependencies", "comm": "comments",
                   "kids": "children"}
 
 
@@ -52,19 +51,17 @@ def _description(cfg: dict, card_id: str) -> str:
 
 
 def _failure_detail(exc: BaseException) -> str:
-    """One read failure's cause, for a console WARN. SystemExit is agileplace's own failure idiom
-    and already carries a fully-formed message ('AgilePlace GET ... failed: HTTP 500'), so it is
-    used verbatim; anything else is an unexpected exception whose type is half the diagnosis."""
+    """One read failure's cause. SystemExit is agileplace's failure idiom and already carries a
+    formed message, so it's used verbatim; for anything else the type is half the diagnosis."""
     if isinstance(exc, SystemExit):
         return str(exc)
     return f"{type(exc).__name__}: {exc}"
 
 
 def _comments(cfg: dict, card_id: str):
-    # Catches beyond list_comments' documented SystemExit idiom on purpose: response normalization
-    # can raise ValueError/TypeError, and those used to reach the outer handler as a bare None --
-    # leaving comment_sync's WARN to print its anonymous 'prefetched read failed' fallback with no
-    # cause. Carry every failure's detail; never print here (comment_sync owns that WARN).
+    # Wider than list_comments' documented SystemExit idiom: normalization can raise
+    # ValueError/TypeError, which used to reach the outer handler as a bare None -- leaving
+    # comment_sync's WARN with no cause. Never print here; comment_sync owns that WARN.
     try:
         return agileplace_comments.list_comments(cfg, card_id)
     except (Exception, SystemExit) as exc:  # noqa: BLE001 -- mapped to a sentinel, never swallowed
@@ -94,8 +91,6 @@ def gather_board_reads(cfg: dict, *, description_card_ids, dependency_card_ids,
                     # is SystemExit (not an Exception subclass); fail toward "unknown" either way.
                     # A failed description stays ABSENT, so the consumer's serial get_card
                     # fallback re-raises at the same call site the run fails loud at today.
-                    # Failing toward "unknown" keeps the run going, but a silently discarded cause
-                    # makes the resulting skip undiagnosable from the console -- so say why here.
                     print(f"WARN  prefetched {_READ_FAMILIES[family]} read failed for card {cid}: "
                           f"{_failure_detail(exc)}", file=sys.stderr)
                     if family != "desc":

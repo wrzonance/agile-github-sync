@@ -37,6 +37,7 @@ from agilesync.syncers.comment_sync import sync_comments
 from agilesync.config import STATE_FILE, env_config
 from agilesync.syncers.description_sync import sync_description
 from agilesync.syncers.metadata_sync import sync_dates, sync_metadata
+from agilesync.timestamps import format_elapsed
 from agilesync.stages import (epic_key_for_task, header_match_key, is_retired_issue, issue_card_header,
                     issue_custom_id, issue_stage, normalize_status, title_key)
 
@@ -562,6 +563,18 @@ def _run_intake_promotion(cfg: dict, apply: bool, cards: list, lanes: list, stag
 
 
 def main() -> None:
+    """Times the run around _run(), in a finally so an aborted run still reports how long it got."""
+    started = datetime.now()
+    print(started)
+    try:
+        _run()
+    finally:
+        finished = datetime.now()
+        print(finished)
+        print(f"elapsed {format_elapsed(finished - started)}")
+
+
+def _run() -> None:
     parser = argparse.ArgumentParser(description="Sync GitHub -> AgilePlace (per-issue cards, lanes, connections, metadata)")
     parser.add_argument("--apply", action="store_true", help="actually write (default: verbose dry run)")
     args = parser.parse_args()
@@ -778,13 +791,8 @@ def main() -> None:
         # into a phantom external-delete revert. Hold state at the last clean run -- skipped writes
         # retry then, and healthy cards re-derive harmlessly from the older base.
         print("WARN  poisoned card(s) this run -- sync state NOT persisted (merge bases held clean)")
-        now = datetime.now()
-        print(now)
-        
     else:
         print("--- dry run complete. Re-run with --apply (full .env) to write.")
-        now = datetime.now()
-        print(now)
 
 if __name__ == "__main__":
     main()

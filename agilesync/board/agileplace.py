@@ -74,9 +74,8 @@ def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None,
 
 
 def _retry_after_seconds(err) -> float | None:
-    """The server's own Retry-After, in seconds -- None when it sent none, so the caller can fall
-    back to its exponential schedule rather than to an invented constant. Both header forms are
-    accepted (delta-seconds and HTTP-date); an unparseable one is treated as absent."""
+    """The server's Retry-After in seconds (both header forms), or None when it sent none//an
+    unparseable one -- so the caller falls back to its own schedule, not an invented constant."""
     raw = err.headers.get("Retry-After")
     if raw is None:
         return None
@@ -91,10 +90,10 @@ def _retry_after_seconds(err) -> float | None:
 
 
 def _rate_limit_delay(err, attempt: int) -> float:
-    """How long to wait before retrying a 429. The server's Retry-After wins when it sent one --
-    it knows its own window; otherwise back off exponentially so a burst of concurrent readers
-    (board_reads' pool) spreads out instead of re-colliding at a fixed interval. Always clamped to
-    1s..MAX_RETRY_SLEEP, so neither a hostile header nor a late attempt can stall the run."""
+    """How long to wait before retrying a 429. Retry-After wins when the server sent one;
+    otherwise back off exponentially so concurrent readers spread out instead of re-colliding at a
+    fixed interval. Clamped to 1s..MAX_RETRY_SLEEP so neither a hostile header nor a late attempt
+    stalls the run."""
     retry_after = _retry_after_seconds(err)
     delay = retry_after if retry_after is not None else BACKOFF_BASE_SLEEP * (2 ** attempt)
     return min(MAX_RETRY_SLEEP, max(1.0, delay))

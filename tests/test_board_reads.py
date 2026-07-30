@@ -231,9 +231,9 @@ def test_comment_read_failure_carries_the_serial_warn_detail(monkeypatch):
 
 
 def test_comment_read_failure_carries_its_detail_whatever_the_exception_type(monkeypatch):
-    """list_comments' SystemExit is only its DOCUMENTED failure idiom -- normalization can still
-    raise ValueError/TypeError. Those must reach comment_sync's WARN with their cause intact
-    rather than as the anonymous 'prefetched read failed' fallback."""
+    """SystemExit is only list_comments' DOCUMENTED idiom -- normalization can raise
+    ValueError/TypeError, and those must reach comment_sync's WARN with their cause intact rather
+    than as the anonymous 'prefetched read failed' fallback."""
     monkeypatch.setattr(agileplace_comments, "list_comments",
                         Mock(side_effect=ValueError("unexpected comment id shape")))
 
@@ -244,8 +244,8 @@ def test_comment_read_failure_carries_its_detail_whatever_the_exception_type(mon
 
 
 def test_a_failed_prefetch_read_names_its_family_card_and_cause_on_stderr(monkeypatch, capsys):
-    """The pool's 'fail toward unknown' contract keeps the run going, but silently discarding the
-    exception left a skipped card undiagnosable from the console. Every failed read says why."""
+    """Failing toward 'unknown' keeps the run going, but discarding the exception left the
+    resulting skip undiagnosable."""
     monkeypatch.setattr(agileplace, "card_dependencies", Mock(side_effect=RuntimeError("boom")))
 
     board_reads.gather_board_reads({}, description_card_ids=[], dependency_card_ids=["B7"],

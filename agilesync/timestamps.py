@@ -8,7 +8,18 @@ own behavior is unchanged.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+
+def format_elapsed(delta: timedelta) -> str:
+    """A duration in the largest units it needs: '27.4s', '1m 12.5s', '1h 2m 3.0s'."""
+    hours, rest = divmod(delta.total_seconds(), 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f"{int(hours)}h {int(minutes)}m {seconds:.1f}s"
+    if minutes:
+        return f"{int(minutes)}m {seconds:.1f}s"
+    return f"{seconds:.1f}s"
 
 
 def parse_timestamp(raw: str | None) -> datetime | None:

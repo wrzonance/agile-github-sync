@@ -1,12 +1,11 @@
 """Rate-limit backoff and retry reporting for the AgilePlace client.
 
-A 429 is the one status this client retries: every other failure -- including 5xx -- is surfaced
-immediately, because the write gate sends non-idempotent POSTs (card/comment/dependency creates)
-that a blind retry could duplicate. Contracts pinned here:
-  - a rate-limited request is attempted at most MAX_ATTEMPTS times, then fails loud;
-  - waits grow exponentially between attempts and stay under MAX_RETRY_SLEEP;
-  - a server-sent Retry-After overrides the computed backoff;
-  - every retry announces itself on stderr, so a run's console shows WHY it stalled.
+429 is the one status this client retries -- every other failure, 5xx included, surfaces
+immediately, because the write gate sends non-idempotent POSTs a blind retry could duplicate.
+Waits grow exponentially under MAX_RETRY_SLEEP, a server-sent Retry-After overrides them, and every
+retry announces itself on stderr so the console shows why a run stalled.
+
+Run: pytest -q
 """
 from __future__ import annotations
 
