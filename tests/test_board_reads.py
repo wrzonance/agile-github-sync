@@ -228,3 +228,41 @@ def test_comment_read_failure_carries_the_serial_warn_detail(monkeypatch):
     failure = reads.ap_comments["C1"]
     assert not isinstance(failure, list)
     assert failure.detail == "AgilePlace GET card/C1/comment failed: HTTP 500"
+
+
+def test_comment_read_failure_carries_its_detail_whatever_the_exception_type(monkeypatch):
+    """list_comments' SystemExit is only its DOCUMENTED failure idiom -- normalization can still
+    raise ValueError/TypeError. Those must reach comment_sync's WARN with their cause intact
+    rather than as the anonymous 'prefetched read failed' fallback."""
+    monkeypatch.setattr(agileplace_comments, "list_comments",
+                        Mock(side_effect=ValueError("unexpected comment id shape")))
+
+    reads = board_reads.gather_board_reads({}, description_card_ids=[], dependency_card_ids=[],
+                                           comment_card_ids=["C1"], child_parent_ids=[])
+
+    assert reads.ap_comments["C1"].detail == "ValueError: unexpected comment id shape"
+
+
+def test_a_failed_prefetch_read_names_its_family_card_and_cause_on_stderr(monkeypatch, capsys):
+    """The pool's 'fail toward unknown' contract keeps the run going, but silently discarding the
+    exception left a skipped card undiagnosable from the console. Every failed read says why."""
+    monkeypatch.setattr(agileplace, "card_dependencies", Mock(side_effect=RuntimeError("boom")))
+
+    board_reads.gather_board_reads({}, description_card_ids=[], dependency_card_ids=["B7"],
+                                   comment_card_ids=[], child_parent_ids=[])
+
+    err = capsys.readouterr().err
+    assert "WARN" in err
+    assert "dependencies" in err  # which read family
+    assert "B7" in err            # which card
+    assert "RuntimeError: boom" in err  # the cause the outer handler used to swallow
+
+
+def test_successful_prefetch_reads_stay_silent(monkeypatch, capsys):
+    monkeypatch.setattr(agileplace, "card_dependencies", lambda _cfg, cid: [])
+    monkeypatch.setattr(agileplace_comments, "list_comments", lambda _cfg, cid: [])
+
+    board_reads.gather_board_reads({}, description_card_ids=[], dependency_card_ids=["B7"],
+                                   comment_card_ids=["B7"], child_parent_ids=[])
+
+    assert capsys.readouterr().err == ""

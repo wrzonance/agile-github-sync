@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -25,6 +26,8 @@ from types import MappingProxyType
 
 REQUEST_TIMEOUT = 30      # seconds per request
 MAX_RETRY_SLEEP = 60      # cap a hostile/large Retry-After so a run can't stall for hours
+MAX_ATTEMPTS = 5          # total tries for a rate-limited request (1 initial + 4 backed-off retries)
+BACKOFF_BASE_SLEEP = 1.0  # first retry's wait; doubles per attempt (1, 2, 4, 8) up to the cap
 MAX_CARD_PAGE_REQUESTS = 1_000  # absolute guard against absent/hostile pagination metadata
 PLANNED_CARD_ID_PREFIX = "planned-card:"
 
@@ -54,8 +57,12 @@ def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None,
             f"AgilePlace {method} /{path} failed: invalid JSON response {detail}"
         ) from err
     except urllib.error.HTTPError as err:
-        if err.code == 429 and _attempt < 3:
-            time.sleep(_retry_after_seconds(err))
+        if err.code == 429 and _attempt + 1 < MAX_ATTEMPTS:
+            delay = _rate_limit_delay(err, _attempt)
+            print(f"WARN  AgilePlace {method} /io/{path.lstrip('/')} rate limited (HTTP 429) on "
+                  f"attempt {_attempt + 1}/{MAX_ATTEMPTS} -- retrying in {delay:.1f}s",
+                  file=sys.stderr)
+            time.sleep(delay)
             return api(cfg, method, path, body, params, headers, _attempt + 1)
         detail = err.read().decode(errors="replace")
         exc = SystemExit(f"AgilePlace {method} /{path} failed: HTTP {err.code} {detail[:300]}")
@@ -66,16 +73,31 @@ def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None,
         raise SystemExit(f"AgilePlace {method} /{path} unreachable: {err.reason}") from err
 
 
-def _retry_after_seconds(err) -> float:
-    header = (err.headers.get("Retry-After") or "5").strip()
+def _retry_after_seconds(err) -> float | None:
+    """The server's own Retry-After, in seconds -- None when it sent none, so the caller can fall
+    back to its exponential schedule rather than to an invented constant. Both header forms are
+    accepted (delta-seconds and HTTP-date); an unparseable one is treated as absent."""
+    raw = err.headers.get("Retry-After")
+    if raw is None:
+        return None
+    header = raw.strip()
     try:
-        secs = float(header)
+        return float(header)
     except ValueError:
         try:
-            secs = (parsedate_to_datetime(header) - datetime.now(timezone.utc)).total_seconds()
+            return (parsedate_to_datetime(header) - datetime.now(timezone.utc)).total_seconds()
         except (TypeError, ValueError):
-            secs = 5.0
-    return min(MAX_RETRY_SLEEP, max(1.0, secs))
+            return None
+
+
+def _rate_limit_delay(err, attempt: int) -> float:
+    """How long to wait before retrying a 429. The server's Retry-After wins when it sent one --
+    it knows its own window; otherwise back off exponentially so a burst of concurrent readers
+    (board_reads' pool) spreads out instead of re-colliding at a fixed interval. Always clamped to
+    1s..MAX_RETRY_SLEEP, so neither a hostile header nor a late attempt can stall the run."""
+    retry_after = _retry_after_seconds(err)
+    delay = retry_after if retry_after is not None else BACKOFF_BASE_SLEEP * (2 ** attempt)
+    return min(MAX_RETRY_SLEEP, max(1.0, delay))
 
 
 def mutate(cfg: dict, apply: bool, method: str, path: str, body=None, headers=None, *, note: str = ""):

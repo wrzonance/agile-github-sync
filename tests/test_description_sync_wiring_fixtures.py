@@ -43,7 +43,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Re-pinned again for issue #105: the conflict-retry guard's own path table (/description,
 # /externalLink) lives in agileplace._card_value_for_patch_path and nowhere else. Description I/O
 # itself stays in agileplace_description.py, so the module split this hash protects still holds.
-AGILEPLACE_PY_SHA256 = "087c9b401ada7fa5141077a00108ee164e8fdaed6e15ddd0133efe8edf3803fe"
+# Re-pinned again for the rate-limit backoff change: api() is the single place any request is
+# issued, so 429 retry policy has nowhere else to live. No per-resource I/O moved in with it.
+AGILEPLACE_PY_SHA256 = "36997a9a75e0a84eabb5af264631cb5e7dd1048286e61888cc8a43d418236564"
 
 # Every file whose card fixtures reach sync.main()'s per-issue loop -- and therefore
 # sync_description's agileplace_description.card_description() call -- belongs here. This
