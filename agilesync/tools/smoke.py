@@ -19,6 +19,7 @@ diagnosable straight from the console.
 """
 from __future__ import annotations
 
+from datetime import datetime
 import argparse
 import json
 import re
@@ -62,6 +63,8 @@ CHILD_URL = "https://example.invalid/smoke/child"
 EXPECTED_CONFLICT_CODES = (409, 412, 428)
 PREVIEW_CARD_LIMIT = 20
 
+now = datetime.now()
+print(now)
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -741,10 +744,16 @@ def _summarize(results: list) -> int:
         failed = failed or ok is False  # ok=None is informational and never fails the run
         marker = {True: "PASS", False: "FAIL", None: "INFO"}[ok]
         print(f"{marker}  {name}" + (f" -- {detail}" if detail else ""))
+        now = datetime.now()
+        print(now)
     if failed:
         print("smoke FAILED -- fix the shapes above before trusting a live --apply run")
         return 1
+        now = datetime.now()
+        print(now)
     print("smoke OK -- every exercised write shape behaved as coded")
+    now = datetime.now()
+    print(now)
     return 0
 
 
@@ -767,10 +776,11 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         _print_http_failure(exc)
         results.append(("smoke sequence ran to completion", False, str(exc)))
+        now = datetime.now()
+        print(now)
     finally:
         _cleanup(cfg, created, results)
     return _summarize(results)
-
 
 if __name__ == "__main__":
     sys.exit(main())
