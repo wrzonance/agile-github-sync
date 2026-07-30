@@ -346,8 +346,12 @@ def test_new_card_dry_run_plans_every_action_apply_executes(paired_runs):
     assert dry.process_writes == ()
     assert not dry.state_file.exists()
     assert Counter(_planned_actions(dry.output)) == Counter(_executed_actions(apply))
+    # Issue #107: the card PATCH precedes the connection/dependency POSTs, which bump the card's
+    # resource version -- flushing after them staled the version the PATCH itself carries. This is
+    # the same ordering tests/test_sync_flush_order.py pins as an invariant, seen here at the real
+    # HTTP boundary.
     assert [action[0] for action in _planned_actions(dry.output)] == [
-        "create", "gh", "connect", "depend", "patch",
+        "create", "gh", "patch", "connect", "depend",
     ]
     assert PLAN_ID_PREFIX not in json.dumps([
         {"path": write.path, "body": write.body} for write in apply.http_writes

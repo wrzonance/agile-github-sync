@@ -31,6 +31,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from agilesync.syncers import card_ops  # noqa: E402
 from agilesync.syncers import comment_sync  # noqa: E402
 from agilesync import sync  # noqa: E402
 
@@ -90,7 +91,9 @@ def test_main_defers_comment_sync_and_holds_state_when_a_card_is_poisoned(tmp_pa
     stack.enter_context(patch("agilesync.sync.sync_description"))
     sync_comments_mock = stack.enter_context(patch("agilesync.sync.sync_comments"))
     save_state_mock = stack.enter_context(patch("agilesync.sync.save_state"))
-    monkeypatch.setattr(sync, "lane_conflict", lambda ops, lane_id: (None, True))
+    # The op queue owns the poisoning decision (issue #107 extraction), so lane_conflict is forced
+    # in card_ops' namespace -- main() no longer imports the name itself.
+    monkeypatch.setattr(card_ops, "lane_conflict", lambda ops, lane_id: (None, True))
 
     with stack, patch("agilesync.sync.env_config", return_value=cfg), patch("agilesync.sync.STATE_FILE", state_file), \
          patch("sys.argv", ["sync.py", "--apply"]):
