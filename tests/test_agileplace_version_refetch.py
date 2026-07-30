@@ -1,4 +1,5 @@
 """Regression tests for version-less card refetches and state-safe PATCH aborts (issue #29)."""
+import re
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -7,7 +8,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agilesync.board.agileplace import _card_with_version, patch_card  # noqa: E402
+from agilesync.board.agileplace import (  # noqa: E402
+    UnknownSnapshotValue,
+    _card_value_for_patch_path,
+    _card_with_version,
+    patch_card,
+)
 
 CFG = {"token": "t", "host": "h", "board_id": "b1"}
 
@@ -212,3 +218,130 @@ def test_non_conflict_failures_never_trigger_the_retry_path(monkeypatch):
     with pytest.raises(SystemExit):
         patch_card(CFG, True, _snapshot_card(), _LANE_OPS)
     assert len(tenant.patch_headers) == 1                  # 422 = shape bug: fail loud, no retry
+
+
+# --- issue #105: the guard must be able to VALIDATE every path the sync can queue -----
+#
+# The #72 retry above only ever gated on /laneId, so the gap this section pins went unnoticed: a
+# path _card_value_for_patch_path doesn't know raises ValueError, which _changed_patch_paths counts
+# as "changed" -- refusing the retry and re-raising the conflict. sync.main()'s flush queues
+# /description on essentially every card whose text differs from its issue (description_sync), so
+# that one missing case made the whole retry path dead for the ordinary sync, aborting real applies
+# on HTTP 428 (live 2026-07-29).
+
+def _flush_snapshot_card():
+    """The shape sync.main()'s flush actually patches: a card whose observed description is part of
+    the run's snapshot (board_reads.hydrate_run_reads hydrates `description` in place; a card
+    created this run gets it from sync._created_card_snapshot)."""
+    return {"id": "C1", "version": "1", "laneId": "L", "tags": [],
+            "description": "<p>as the run observed it</p>", "externalLink": None}
+
+
+_DESCRIPTION_OPS = [{"op": "replace", "path": "/description", "value": "<p>merged</p>"},
+                    {"op": "add", "path": "/tags/-", "value": "type:bug"}]
+
+
+def test_version_bump_retries_for_a_card_carrying_a_description_op(monkeypatch, capsys):
+    """The live failure: the card's version ticked between snapshot and flush (a dependency write
+    earlier in the same run), but nothing the queued ops target changed -- so ONE retry with the
+    fresh version must go out, exactly as it already does for a /laneId-only card."""
+    fresh = {**_flush_snapshot_card(), "version": "2"}      # description untouched on the server
+    tenant = _SequencedTenant(fresh, [428, {"id": "C1", "version": "3"}])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    result = patch_card(CFG, True, _flush_snapshot_card(), _DESCRIPTION_OPS)
+    assert result == {"id": "C1", "version": "3"}
+    assert [h.get("x-lk-resource-version") for h in tenant.patch_headers] == ["1", "2"]
+    assert "retrying the PATCH once" in capsys.readouterr().out
+
+
+def test_concurrently_edited_description_still_refuses_the_retry(monkeypatch):
+    """The flip side: a human really did edit the description meanwhile, so the run's merged text is
+    computed against a superseded base -- the conflict re-raises and no second PATCH is attempted."""
+    fresh = {**_flush_snapshot_card(), "version": "2", "description": "<p>a human typed this</p>"}
+    tenant = _SequencedTenant(fresh, [428])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    with pytest.raises(SystemExit):
+        patch_card(CFG, True, _flush_snapshot_card(), _DESCRIPTION_OPS)
+    assert len(tenant.patch_headers) == 1                  # no retry PATCH went out
+
+
+def test_snapshot_without_an_observed_description_refuses_the_retry(monkeypatch):
+    """A snapshot that never RECORDED the description (its prefetch failed, so description_sync's
+    merge came from card_description's lazy get_card and was never written back onto the card) has
+    nothing trustworthy to compare -- absent must mean "unknown", never "empty". Otherwise a human
+    who DELETES the description races the run: server "" vs absent-folded-to-"" reads as unchanged
+    and the retry silently overwrites the deletion with the run's merged text."""
+    snapshot = {k: v for k, v in _flush_snapshot_card().items() if k != "description"}
+    fresh = {**snapshot, "version": "2", "description": ""}   # the human deleted it mid-run
+    tenant = _SequencedTenant(fresh, [428])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    with pytest.raises(SystemExit):
+        patch_card(CFG, True, dict(snapshot), _DESCRIPTION_OPS)
+    assert len(tenant.patch_headers) == 1                  # no retry PATCH went out
+
+
+def test_known_empty_description_still_compares_as_empty(monkeypatch):
+    """The flip side of the above: a PRESENT description of ""/None is known-empty, a real current
+    value -- it must keep comparing equal to a server-side "" rather than failing closed."""
+    snapshot = {**_flush_snapshot_card(), "description": None}
+    fresh = {**snapshot, "version": "2", "description": ""}
+    tenant = _SequencedTenant(fresh, [428, {"id": "C1", "version": "3"}])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    assert patch_card(CFG, True, dict(snapshot), _DESCRIPTION_OPS) == {"id": "C1", "version": "3"}
+
+
+def test_version_bump_retries_for_a_card_carrying_an_external_link_op(monkeypatch):
+    """Same gap, same fix, for intake's /externalLink writeback path."""
+    link_ops = [{"op": "add", "path": "/externalLink",
+                 "value": {"label": "GitHub #7", "url": "https://example.test/7"}}]
+    fresh = {**_flush_snapshot_card(), "version": "2"}
+    tenant = _SequencedTenant(fresh, [428, {"id": "C1", "version": "3"}])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    assert patch_card(CFG, True, _flush_snapshot_card(), link_ops) == {"id": "C1", "version": "3"}
+    assert [h.get("x-lk-resource-version") for h in tenant.patch_headers] == ["1", "2"]
+
+
+def test_concurrently_added_external_link_still_refuses_the_retry(monkeypatch):
+    link_ops = [{"op": "add", "path": "/externalLink",
+                 "value": {"label": "GitHub #7", "url": "https://example.test/7"}}]
+    fresh = {**_flush_snapshot_card(), "version": "2",
+             "externalLink": {"label": "Jira", "url": "https://jira.test/X-1"}}
+    tenant = _SequencedTenant(fresh, [428])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    with pytest.raises(SystemExit):
+        patch_card(CFG, True, _flush_snapshot_card(), link_ops)
+    assert len(tenant.patch_headers) == 1                  # a foreign link must never be clobbered
+
+
+_OP_PATH_LITERAL = re.compile(r'"path":\s*"(/[^"]*)"')
+
+# Paths whose op-builder computes them (so the source scan below cannot see the literal):
+# agileplace.ops_dates' f"/{field}". Listed explicitly rather than left uncovered.
+_COMPUTED_OP_PATHS = ("/plannedStart", "/plannedFinish")
+
+
+def _op_paths_in_production_source() -> set[str]:
+    """Every literal JSON-Patch path any module under agilesync/ can emit."""
+    package = Path(__file__).resolve().parent.parent / "agilesync"
+    return {path
+            for source in package.rglob("*.py")
+            for path in _OP_PATH_LITERAL.findall(source.read_text(encoding="utf-8"))}
+
+
+def test_every_op_path_the_package_emits_is_recognized_by_the_guard():
+    """Completeness pin for PATH RECOGNITION only -- that is the exact gap issue #105 was: a path
+    the table doesn't know becomes a refused retry, so a new op-builder can silently re-break it.
+    Whether each branch resolves the RIGHT read-side value is pinned by the behavior tests above,
+    not here. UnknownSnapshotValue is expected and accepted: the path is recognized, this bare card
+    just records nothing for it.
+
+    Deliberately partial as a scan: it sees double-quoted `"path": "/..."` literals under
+    agilesync/ only, so a path built by concatenation, a general f-string, a module-level constant,
+    or a builder living elsewhere stays invisible (_COMPUTED_OP_PATHS above exists precisely
+    because ops_dates' f-string is already such a case). Failing here means: add the branch to
+    _card_value_for_patch_path -- never relax its fail-closed behavior for unknown paths."""
+    for path in sorted(_op_paths_in_production_source() | set(_COMPUTED_OP_PATHS)):
+        try:
+            _card_value_for_patch_path({}, path)
+        except UnknownSnapshotValue:
+            pass                               # recognized path, unrecorded value -> fail closed

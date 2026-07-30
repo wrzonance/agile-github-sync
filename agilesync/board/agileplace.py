@@ -459,8 +459,17 @@ def _lane_id(card: dict) -> str:
     return str(lane_id if lane_id is not None else nested_id if nested_id is not None else "")
 
 
+class UnknownSnapshotValue(ValueError):
+    """The path IS supported, but this snapshot never recorded the value it depends on, so the op
+    can't be validated against a refetch. Fails closed exactly like an unsupported path (both are
+    counted as "changed" by _changed_patch_paths) -- but it is NOT the issue #105 gap, so the
+    op-path completeness test tells the two apart."""
+
+
 def _card_value_for_patch_path(card: dict, path: str):
-    """Return the read-side value whose snapshot a supported JSON-Patch path depends on."""
+    """Return the read-side value whose snapshot a supported JSON-Patch path depends on. Raises
+    ValueError for a path this table doesn't know, or UnknownSnapshotValue when the path is known
+    but `card` never recorded that value -- callers must treat either as "cannot validate"."""
     root = path.removeprefix("/").split("/", 1)[0]
     if not path.startswith("/") or not root:
         raise ValueError(f"invalid JSON-Patch path {path!r}")
@@ -479,6 +488,27 @@ def _card_value_for_patch_path(card: dict, path: str):
     if root == "typeId":
         card_type = card.get("type")
         return card_type.get("id") if isinstance(card_type, dict) else None
+    if root == "description":
+        # The description AS THIS RUN OBSERVED IT, when the snapshot actually recorded it:
+        # board_reads.hydrate_run_reads sets the real API `description` key on every matched card,
+        # and a card created this run carries it from sync._created_card_snapshot's refetch -- so
+        # comparing that against a refetch is a true concurrent-edit check, not a comparison of the
+        # run's own merge output.
+        # ABSENT is "unknown", never "empty" -- the same distinction
+        # agileplace_description.card_description() draws (absent -> lazy get_card; present-but-""
+        # -> a real, current empty description). When the key is absent the run's merge came from
+        # that lazy read, which was never written back onto this snapshot, so there is nothing
+        # trustworthy to compare: folding it to "" would read a human's DELETION (server "") as
+        # "unchanged" and let the retry overwrite it.
+        if "description" not in card:
+            raise UnknownSnapshotValue(
+                f"snapshot records no value for JSON-Patch path {path!r}")
+        return card.get("description") or ""
+    if root == "externalLink":
+        # Value comparison only. It is NOT a precondition check: `add` on an occupied
+        # /externalLink REPLACES it, so a caller must confirm the card it writes is still
+        # link-less itself (intake._writeback does, against the snapshot it actually PATCHes).
+        return card.get("externalLink")
     raise ValueError(f"unsupported JSON-Patch path {path!r}")
 
 

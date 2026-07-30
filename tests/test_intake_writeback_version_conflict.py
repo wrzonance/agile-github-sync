@@ -6,9 +6,12 @@
 PATCH bumps the card's server-side resource version; reusing the same, now-stale `card.version`
 for the second PATCH deterministically produces an HTTP 409/428 on every real apply=True writeback
 against a card that came from `agileplace.list_cards()` with a usable version -- the ordinary case.
-`agileplace._card_value_for_patch_path` has no case for `/externalLink`, so `_conflict_retry`
-always treats it as "changed" and refuses the retry, and the original conflict propagates
-uncaught out of `sync.main()`, aborting the entire run.
+When this test was written `agileplace._card_value_for_patch_path` had no case for `/externalLink`,
+so `_conflict_retry` treated it as "changed", refused the retry, and the original conflict
+propagated uncaught out of `sync.main()`, aborting the entire run. Issue #105 added that case (and
+`/description`, the same gap on the ordinary sync flush), so a conflict here would now be
+recoverable -- but the assertion below is unchanged and deliberately stricter than "recovers": the
+writeback must not inflict the conflict in the first place.
 
 This test drives `intake._writeback` against a small stateful fake AgilePlace tenant (mirroring
 `tests/test_agileplace_version_refetch.py`'s `_SequencedTenant`, but tracking the card's version
@@ -97,6 +100,52 @@ def test_writeback_second_write_never_reuses_the_first_writes_stale_version(monk
     assert server.patch_versions_sent == ["1", "2"]
     assert server.card["customId"] == "GitHub Issue #42"
     assert server.card["externalLink"] == {"label": "GitHub #42", "url": issue["url"]}
+
+
+def test_link_write_is_skipped_when_the_refetch_reveals_a_link_that_appeared_mid_run(monkeypatch,
+                                                                                     capsys):
+    """The "never clobber a foreign link" guarantee has to hold against the card actually written,
+    not just the one read at candidate time. `add` on an occupied `/externalLink` REPLACES it, so a
+    Jira link a human adds between this run's board read and the link write would be destroyed --
+    silently, with no conflict involved, because _card_for_link_write refetches and then PATCHes
+    whatever it got back. The precondition must be re-checked on that refetched snapshot."""
+    card = {"id": "C1", "version": "1", "laneId": "X", "title": "Foo"}
+    issue = {"number": 42, "url": "https://github.com/o/r/issues/42"}
+    server = _VersionedCardServer(card)
+    foreign = {"label": "Jira", "url": "https://jira.test/X-1"}
+
+    def urlopen(req, timeout=None):
+        if req.get_method() == "GET":       # the human's link lands before the refetch
+            server.card["externalLink"] = foreign
+        return server.urlopen(req, timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    intake._writeback(CFG, True, card, issue)
+
+    assert server.card["externalLink"] == foreign       # the foreign link survives untouched
+    assert server.card["customId"] == "GitHub Issue #42"   # the join key still got written
+    assert server.patch_versions_sent == ["1"]          # exactly one PATCH: no link write attempted
+    assert "WARN" in capsys.readouterr().out
+
+
+def test_link_write_is_skipped_when_the_refetch_reveals_a_plural_links_array(monkeypatch, capsys):
+    """Same guarantee for the array-shaped `externalLinks` field this feature never writes: a card
+    whose links live there must be left alone, whichever read revealed it."""
+    card = {"id": "C1", "version": "1", "laneId": "X", "title": "Foo"}
+    issue = {"number": 42, "url": "https://github.com/o/r/issues/42"}
+    server = _VersionedCardServer(card)
+
+    def urlopen(req, timeout=None):
+        if req.get_method() == "GET":
+            server.card["externalLinks"] = [{"label": "Jira", "url": "https://jira.test/X-1"}]
+        return server.urlopen(req, timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    intake._writeback(CFG, True, card, issue)
+
+    assert "externalLink" not in server.card
+    assert server.patch_versions_sent == ["1"]
+    assert "WARN" in capsys.readouterr().out
 
 
 def test_writeback_never_mutates_the_original_card_object(monkeypatch):
