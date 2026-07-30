@@ -778,12 +778,13 @@ def main() -> None:
         # into a phantom external-delete revert. Hold state at the last clean run -- skipped writes
         # retry then, and healthy cards re-derive harmlessly from the older base.
         print("WARN  poisoned card(s) this run -- sync state NOT persisted (merge bases held clean)")
+        now = datetime.now()
+        print(now)
+        
     else:
         print("--- dry run complete. Re-run with --apply (full .env) to write.")
-
-now = datetime.now()
-
-print(now)
+        now = datetime.now()
+        print(now)
 
 if __name__ == "__main__":
     main()
