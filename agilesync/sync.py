@@ -19,6 +19,7 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping
+from datetime import datetime
 
 from agilesync.board import agileplace
 from agilesync.board import board_layout
@@ -780,6 +781,9 @@ def main() -> None:
     else:
         print("--- dry run complete. Re-run with --apply (full .env) to write.")
 
+now = datetime.now()
+
+print(now)
 
 if __name__ == "__main__":
     main()
