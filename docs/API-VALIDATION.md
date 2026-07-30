@@ -381,7 +381,13 @@ alone, since this worktree has no `.env` and no live board to probe against:
    `card` unchanged, zero network calls) before the second PATCH -- avoiding the self-inflicted
    conflict outright rather than depending on a retry path that structurally can't recover from it.
    A genuine concurrent edit landing in the narrow window between that refetch and the PATCH itself
-   still 409/428s and still propagates uncaught, unchanged from the original design intent above.
+   409/428s and then takes `patch_card`'s ordinary retry-or-re-raise path (issue #105 made
+   `/externalLink` validatable). Because that retry can now fire here, `_writeback` re-checks the
+   "still link-less" precondition against the refetched snapshot it actually PATCHes, not just the
+   candidate-time card: `add` on an occupied `/externalLink` REPLACES it, so a foreign link that
+   appeared mid-run must skip the write. That recheck also closes a pre-existing hole with no
+   conflict involved at all -- the refetched card was previously PATCHed without re-testing the
+   precondition the candidate scan established.
 4. **`card_web_url`'s host is an UNCONFIRMED best guess.** The issue body written for a promoted
    card links back to the card in AgilePlace's web app. No separate "web host" config key exists
    in `config.py`/`.env.example` distinct from `AGILEPLACE_HOST` (the API host), and no live board
@@ -506,10 +512,24 @@ AgilePlace PATCH /card/<id> failed: HTTP 428 ... {"op":"test","path":"/version",
   ordinary sync flush. Fixed by adding the `/description` and `/externalLink` branches;
   `tests/test_agileplace_version_refetch.py` now also pins that EVERY literal op path any module
   under `agilesync/` emits is resolvable by that table.
-- **`/description` is a sound thing to compare:** `board_reads.hydrate_run_reads` puts the observed
-  `description` on every matched card snapshot, and `sync._created_card_snapshot`'s refetch carries
-  it for a card created this run -- so snapshot-vs-refetch is a genuine concurrent-edit check. A
-  card whose description read failed carries no key and keeps failing closed.
+- **`/description` is a sound thing to compare, but only when the snapshot RECORDED it:**
+  `board_reads.hydrate_run_reads` puts the observed `description` on every matched card snapshot,
+  and `sync._created_card_snapshot`'s refetch carries it for a card created this run -- so
+  snapshot-vs-refetch is then a genuine concurrent-edit check. An ABSENT key is "unknown", never
+  "empty" (the same distinction `card_description` draws): the run's merge came from that
+  function's lazy `get_card`, which the snapshot never recorded, so folding absent to `""` would
+  read a human's DELETION (server `""`) as "unchanged" and let the retry overwrite it. The guard
+  raises `UnknownSnapshotValue` instead and fails closed. Present-but-`None`/`""` is a real,
+  current empty description and still compares as `""`.
+- **Comparison is raw stored HTML, deliberately, even though the description MERGE compares
+  canonical Markdown** (`description_sync._canonicalize_ap_description`, which absorbs the
+  server-side HTML normalization recorded above). The asymmetry is a chosen tradeoff, not an
+  oversight: raw comparison can only ever be too strict -- a normalization-only rewrite of the
+  stored HTML reads as "changed", the retry is refused, the run aborts with state held, and the
+  next run re-derives against the new stored form and proceeds. Canonicalizing inside the
+  concurrency guard would buy one saved abort at the cost of an `agileplace` -> `markup` dependency
+  and HTML parsing on the conflict path, with a lost-update as the failure mode if it ever
+  over-normalized. Fail-closed and self-healing beats clever here.
 - **UNCONFIRMED (what bumped the version):** the run's own step 4 (`POST /card/dependency`) is the
   only write that touched that card between its snapshot and the flush, which points at dependency
   creation bumping the card's resource version -- but no live probe has measured a card's `version`

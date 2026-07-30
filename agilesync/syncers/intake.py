@@ -256,15 +256,29 @@ def _writeback(cfg: dict, apply: bool, card: dict, issue: dict) -> None:
     key = _writeback_header(card.get("title", ""), issue["number"])
     agileplace.patch_card(cfg, apply, card, [agileplace.op_custom_id(key)],
                           note=f"intake customId -> {key}")
-    if "externalLinks" in card or card.get("externalLink"):
-        print(f"WARN  card {card_id}: already carries an external link -- skipping intake link "
-              "writeback (a singular /externalLink `add` would REPLACE an existing foreign link, "
-              "and the array externalLinks shape is unsupported here); customId writeback already "
-              "completed")
-    else:
-        link_op = op_external_link(f"GitHub #{issue['number']}", issue["url"])
-        agileplace.patch_card(cfg, apply, _card_for_link_write(cfg, apply, card), [link_op],
-                              note=f"intake link -> {issue['url']}")
+    if _carries_external_link(card):
+        _skip_link_write(card_id, "already carries an external link")
+        return
+    link_card = _card_for_link_write(cfg, apply, card)
+    if _carries_external_link(link_card):
+        _skip_link_write(card_id, "gained an external link between this run's board read and now")
+        return
+    link_op = op_external_link(f"GitHub #{issue['number']}", issue["url"])
+    agileplace.patch_card(cfg, apply, link_card, [link_op],
+                          note=f"intake link -> {issue['url']}")
+
+
+def _carries_external_link(card: dict) -> bool:
+    """Whether `card` holds any external link, in either shape: a plural, array-shaped
+    `externalLinks` field (present at all -- an unconfirmed shape this feature never writes) or a
+    populated singular `externalLink`."""
+    return "externalLinks" in card or bool(card.get("externalLink"))
+
+
+def _skip_link_write(card_id, reason: str) -> None:
+    print(f"WARN  card {card_id}: {reason} -- skipping intake link writeback (a singular "
+          "/externalLink `add` would REPLACE it, and the array externalLinks shape is unsupported "
+          "here); customId writeback already completed")
 
 
 def _card_for_link_write(cfg: dict, apply: bool, card: dict) -> dict:

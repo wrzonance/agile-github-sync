@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agilesync.board.agileplace import (  # noqa: E402
+    UnknownSnapshotValue,
     _card_value_for_patch_path,
     _card_with_version,
     patch_card,
@@ -264,6 +265,31 @@ def test_concurrently_edited_description_still_refuses_the_retry(monkeypatch):
     assert len(tenant.patch_headers) == 1                  # no retry PATCH went out
 
 
+def test_snapshot_without_an_observed_description_refuses_the_retry(monkeypatch):
+    """A snapshot that never RECORDED the description (its prefetch failed, so description_sync's
+    merge came from card_description's lazy get_card and was never written back onto the card) has
+    nothing trustworthy to compare -- absent must mean "unknown", never "empty". Otherwise a human
+    who DELETES the description races the run: server "" vs absent-folded-to-"" reads as unchanged
+    and the retry silently overwrites the deletion with the run's merged text."""
+    snapshot = {k: v for k, v in _flush_snapshot_card().items() if k != "description"}
+    fresh = {**snapshot, "version": "2", "description": ""}   # the human deleted it mid-run
+    tenant = _SequencedTenant(fresh, [428])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    with pytest.raises(SystemExit):
+        patch_card(CFG, True, dict(snapshot), _DESCRIPTION_OPS)
+    assert len(tenant.patch_headers) == 1                  # no retry PATCH went out
+
+
+def test_known_empty_description_still_compares_as_empty(monkeypatch):
+    """The flip side of the above: a PRESENT description of ""/None is known-empty, a real current
+    value -- it must keep comparing equal to a server-side "" rather than failing closed."""
+    snapshot = {**_flush_snapshot_card(), "description": None}
+    fresh = {**snapshot, "version": "2", "description": ""}
+    tenant = _SequencedTenant(fresh, [428, {"id": "C1", "version": "3"}])
+    monkeypatch.setattr(urllib.request, "urlopen", tenant.urlopen)
+    assert patch_card(CFG, True, dict(snapshot), _DESCRIPTION_OPS) == {"id": "C1", "version": "3"}
+
+
 def test_version_bump_retries_for_a_card_carrying_an_external_link_op(monkeypatch):
     """Same gap, same fix, for intake's /externalLink writeback path."""
     link_ops = [{"op": "add", "path": "/externalLink",
@@ -302,11 +328,20 @@ def _op_paths_in_production_source() -> set[str]:
             for path in _OP_PATH_LITERAL.findall(source.read_text(encoding="utf-8"))}
 
 
-def test_every_op_path_the_package_emits_is_resolvable_by_the_guard():
-    """Completeness pin, not a shape test: _changed_patch_paths turns an unresolvable path into a
-    refused retry, so a NEW op-builder whose path the guard doesn't know silently re-breaks issue
-    #105's failure mode. If this fails, add a case to _card_value_for_patch_path for the reported
-    path (mapping it to the read-side field whose snapshot the op depends on) -- do NOT relax the
-    guard's fail-closed behavior for genuinely unknown paths."""
+def test_every_op_path_the_package_emits_is_recognized_by_the_guard():
+    """Completeness pin for PATH RECOGNITION only -- that is the exact gap issue #105 was: a path
+    the table doesn't know becomes a refused retry, so a new op-builder can silently re-break it.
+    Whether each branch resolves the RIGHT read-side value is pinned by the behavior tests above,
+    not here. UnknownSnapshotValue is expected and accepted: the path is recognized, this bare card
+    just records nothing for it.
+
+    Deliberately partial as a scan: it sees double-quoted `"path": "/..."` literals under
+    agilesync/ only, so a path built by concatenation, a general f-string, a module-level constant,
+    or a builder living elsewhere stays invisible (_COMPUTED_OP_PATHS above exists precisely
+    because ops_dates' f-string is already such a case). Failing here means: add the branch to
+    _card_value_for_patch_path -- never relax its fail-closed behavior for unknown paths."""
     for path in sorted(_op_paths_in_production_source() | set(_COMPUTED_OP_PATHS)):
-        _card_value_for_patch_path({}, path)   # raises ValueError if the guard can't resolve it
+        try:
+            _card_value_for_patch_path({}, path)
+        except UnknownSnapshotValue:
+            pass                               # recognized path, unrecorded value -> fail closed

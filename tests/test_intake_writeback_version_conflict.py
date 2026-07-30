@@ -102,6 +102,52 @@ def test_writeback_second_write_never_reuses_the_first_writes_stale_version(monk
     assert server.card["externalLink"] == {"label": "GitHub #42", "url": issue["url"]}
 
 
+def test_link_write_is_skipped_when_the_refetch_reveals_a_link_that_appeared_mid_run(monkeypatch,
+                                                                                     capsys):
+    """The "never clobber a foreign link" guarantee has to hold against the card actually written,
+    not just the one read at candidate time. `add` on an occupied `/externalLink` REPLACES it, so a
+    Jira link a human adds between this run's board read and the link write would be destroyed --
+    silently, with no conflict involved, because _card_for_link_write refetches and then PATCHes
+    whatever it got back. The precondition must be re-checked on that refetched snapshot."""
+    card = {"id": "C1", "version": "1", "laneId": "X", "title": "Foo"}
+    issue = {"number": 42, "url": "https://github.com/o/r/issues/42"}
+    server = _VersionedCardServer(card)
+    foreign = {"label": "Jira", "url": "https://jira.test/X-1"}
+
+    def urlopen(req, timeout=None):
+        if req.get_method() == "GET":       # the human's link lands before the refetch
+            server.card["externalLink"] = foreign
+        return server.urlopen(req, timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    intake._writeback(CFG, True, card, issue)
+
+    assert server.card["externalLink"] == foreign       # the foreign link survives untouched
+    assert server.card["customId"] == "GitHub Issue #42"   # the join key still got written
+    assert server.patch_versions_sent == ["1"]          # exactly one PATCH: no link write attempted
+    assert "WARN" in capsys.readouterr().out
+
+
+def test_link_write_is_skipped_when_the_refetch_reveals_a_plural_links_array(monkeypatch, capsys):
+    """Same guarantee for the array-shaped `externalLinks` field this feature never writes: a card
+    whose links live there must be left alone, whichever read revealed it."""
+    card = {"id": "C1", "version": "1", "laneId": "X", "title": "Foo"}
+    issue = {"number": 42, "url": "https://github.com/o/r/issues/42"}
+    server = _VersionedCardServer(card)
+
+    def urlopen(req, timeout=None):
+        if req.get_method() == "GET":
+            server.card["externalLinks"] = [{"label": "Jira", "url": "https://jira.test/X-1"}]
+        return server.urlopen(req, timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    intake._writeback(CFG, True, card, issue)
+
+    assert "externalLink" not in server.card
+    assert server.patch_versions_sent == ["1"]
+    assert "WARN" in capsys.readouterr().out
+
+
 def test_writeback_never_mutates_the_original_card_object(monkeypatch):
     """Immutability: whatever mechanism forces the second write's version refresh must build a new
     object, never mutate the `card` dict the caller (intake.promote's candidate loop) still holds."""

@@ -239,7 +239,7 @@ AGILEPLACE_HARD_CAP_LINES = 800
 # the read-side field it depends on, so the fix has nowhere else to live -- the same reason issue
 # #82's typeId branch landed here. The invariant this hash exists to protect is unaffected: no
 # comment I/O (nor description I/O) moved into agileplace.py.
-AGILEPLACE_SHA256 = "b8a2a412ebf347fd6784d3bd1d2812b10aedcbc8a2fe46e2b1bd6473d03bd4c8"
+AGILEPLACE_SHA256 = "087c9b401ada7fa5141077a00108ee164e8fdaed6e15ddd0133efe8edf3803fe"
 
 # Names issue #79 moved out of sync.py into metadata_sync.py. sync_metadata/sync_dates are the two
 # public entry points (still reachable as `sync.sync_metadata` via sync.py's own import -- hence the
