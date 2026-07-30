@@ -234,7 +234,12 @@ AGILEPLACE_HARD_CAP_LINES = 800
 # diff), pins the stronger byte-for-byte invariant the line-count tests above cannot express.
 # Re-pinned for issue #93's create_card link_label parameter (the only agileplace.py change that
 # feature makes).
-AGILEPLACE_SHA256 = "2a0539fe835285161beb17a9e4f5d7d01c53cbbf0ac011c96c2fd99703cc5c07"
+# Re-pinned again for issue #105's two new _card_value_for_patch_path branches (/description and
+# /externalLink). That guard function is the single place the codebase resolves a queued op path to
+# the read-side field it depends on, so the fix has nowhere else to live -- the same reason issue
+# #82's typeId branch landed here. The invariant this hash exists to protect is unaffected: no
+# comment I/O (nor description I/O) moved into agileplace.py.
+AGILEPLACE_SHA256 = "b8a2a412ebf347fd6784d3bd1d2812b10aedcbc8a2fe46e2b1bd6473d03bd4c8"
 
 # Names issue #79 moved out of sync.py into metadata_sync.py. sync_metadata/sync_dates are the two
 # public entry points (still reachable as `sync.sync_metadata` via sync.py's own import -- hence the

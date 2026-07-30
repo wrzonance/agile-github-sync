@@ -229,9 +229,8 @@ def _writeback(cfg: dict, apply: bool, card: dict, issue: dict) -> None:
     patch_card calls -- never batched into one PATCH.
 
     customId (the actual sync join key -- both `_is_candidate`'s own disqualification check and the
-    ordinary sync's card-matching key on it) is written FIRST. It's also the only one of the two
-    writes patch_card retries once on a 409/428 version conflict (see API-VALIDATION.md). Writing it
-    first means the state left behind by ANY failure partway through this function is always one of:
+    ordinary sync's card-matching key on it) is written FIRST. Writing it first means the state left
+    behind by ANY failure partway through this function is always one of:
     nothing written (card stays a full candidate; the next run's marker-resume scan retries the
     whole writeback), or customId written but the link missing (the card is still fully tracked --
     matched and reconciled by the ordinary sync via its customId -- just missing the informational
@@ -241,10 +240,9 @@ def _writeback(cfg: dict, apply: bool, card: dict, issue: dict) -> None:
     join key was never actually established -- stranding it with no further retry path at all.
 
     The link write is skipped (with a WARN) whenever `card` already carries ANY external link --
-    either the plural, array-shaped `externalLinks` field (agileplace._card_value_for_patch_path has
-    no case for the singular `/externalLink` path this feature writes, so a 409/428 conflict on that
-    write can never retry -- it unconditionally re-raises; see API-VALIDATION.md and
-    _card_for_link_write below) OR a singular, populated `externalLink` (a candidate deliberately
+    either the plural, array-shaped `externalLinks` field (an unconfirmed shape this feature never
+    writes -- see op_external_link -- so a card whose links live there is left alone rather than
+    written blind) OR a singular, populated `externalLink` (a candidate deliberately
     KEEPS a foreign link -- one not matching a known target-repo issue URL -- per _is_candidate, and
     a singular `/externalLink` `add` REPLACES an occupied property, so writing here would silently
     destroy that foreign Jira/doc link). Only a bare, link-less card gets the intake link written.
@@ -274,20 +272,21 @@ def _card_for_link_write(cfg: dict, apply: bool, card: dict) -> dict:
     `card`: returns it unchanged for a dry run (apply=False), or a distinct, freshly-fetched
     snapshot for apply=True (see below) -- either way the caller's own `card` reference is intact.
 
-    The customId write just above may have bumped the card's server-side resource version.
-    agileplace._card_value_for_patch_path has no case for `/externalLink`, so agileplace's own
-    generic version-conflict recovery (patch_card's refetch-before-PATCH for a version-less card,
-    and its one-retry-on-409/428 path) can never validate or retry this path -- it always fails
-    closed and re-raises. Reusing `card`'s now-possibly-stale version here would therefore
-    deterministically 409/428 on every real apply=True writeback against a card with a usable
-    version (the ordinary agileplace.list_cards() case), with no recovery.
+    The customId write just above may have bumped the card's server-side resource version. Reusing
+    `card`'s now-possibly-stale version here would deterministically 409/428 on every real
+    apply=True writeback against a card with a usable version (the ordinary agileplace.list_cards()
+    case). When this was written agileplace's own recovery couldn't even absorb that -- it had no
+    `/externalLink` case, so every conflict on this path failed closed and re-raised (issue #105
+    added the case; that same missing-path mechanism was killing the ordinary sync flush through
+    `/description`).
 
-    An explicit refetch here -- via the same agileplace.get_card GET the rest of this codebase
-    already uses -- sidesteps that gap by never sending a stale version in the first place, rather
-    than depending on agileplace to recover from a conflict it structurally can't validate. A
-    genuine concurrent edit landing in the narrow window between this refetch and the PATCH itself
-    still 409/428s and still propagates uncaught -- unchanged, intentional behavior (see
-    API-VALIDATION.md's "Reverse intake" section).
+    The refetch stays regardless, because it prevents rather than recovers: a conflict the run
+    inflicted on itself is one it already knows about, and spending a failed PATCH plus a refetch to
+    rediscover it -- under a "version bumped by an unrelated change" note that isn't true here -- is
+    strictly worse than fetching the version it just superseded. Done via the same
+    agileplace.get_card GET the rest of this codebase already uses. A genuine concurrent edit landing
+    in the narrow window between this refetch and the PATCH itself takes agileplace's ordinary
+    retry-or-re-raise path (see API-VALIDATION.md's "Reverse intake" section).
 
     apply=False (dry run) returns `card` unchanged, performing zero network calls: patch_card's own
     version-less-card path already tolerates a missing version without refetching when apply is

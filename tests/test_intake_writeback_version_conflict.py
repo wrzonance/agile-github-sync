@@ -6,9 +6,12 @@
 PATCH bumps the card's server-side resource version; reusing the same, now-stale `card.version`
 for the second PATCH deterministically produces an HTTP 409/428 on every real apply=True writeback
 against a card that came from `agileplace.list_cards()` with a usable version -- the ordinary case.
-`agileplace._card_value_for_patch_path` has no case for `/externalLink`, so `_conflict_retry`
-always treats it as "changed" and refuses the retry, and the original conflict propagates
-uncaught out of `sync.main()`, aborting the entire run.
+When this test was written `agileplace._card_value_for_patch_path` had no case for `/externalLink`,
+so `_conflict_retry` treated it as "changed", refused the retry, and the original conflict
+propagated uncaught out of `sync.main()`, aborting the entire run. Issue #105 added that case (and
+`/description`, the same gap on the ordinary sync flush), so a conflict here would now be
+recoverable -- but the assertion below is unchanged and deliberately stricter than "recovers": the
+writeback must not inflict the conflict in the first place.
 
 This test drives `intake._writeback` against a small stateful fake AgilePlace tenant (mirroring
 `tests/test_agileplace_version_refetch.py`'s `_SequencedTenant`, but tracking the card's version

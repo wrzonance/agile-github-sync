@@ -40,7 +40,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # agileplace_comments.py -- the module split this feature's design record requires.
 # Re-pinned for issue #93's create_card link_label parameter (the only agileplace.py change that
 # feature makes).
-AGILEPLACE_PY_SHA256 = "2a0539fe835285161beb17a9e4f5d7d01c53cbbf0ac011c96c2fd99703cc5c07"
+# Re-pinned again for issue #105: the conflict-retry guard's own path table (/description,
+# /externalLink) lives in agileplace._card_value_for_patch_path and nowhere else. Description I/O
+# itself stays in agileplace_description.py, so the module split this hash protects still holds.
+AGILEPLACE_PY_SHA256 = "b8a2a412ebf347fd6784d3bd1d2812b10aedcbc8a2fe46e2b1bd6473d03bd4c8"
 
 # Every file whose card fixtures reach sync.main()'s per-issue loop -- and therefore
 # sync_description's agileplace_description.card_description() call -- belongs here. This

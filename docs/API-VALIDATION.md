@@ -350,16 +350,17 @@ alone, since this worktree has no `.env` and no live board to probe against:
    and no live probe was possible here. `intake.py`'s `op_external_link` ships only the singular
    `add`; a card that already has a different external link is treated as the array-shaped case
    (see finding 3) rather than guessed at.
-3. **The externalLink writeback has NO conflict-retry support -- this is intentional, not an
-   oversight.** `agileplace.py`'s `_card_value_for_patch_path` (the table the 409/428
-   conflict-retry path in `agileplace.patch_card` uses to recompute a stale op's value before
-   retrying) does not recognize `/externalLink` at all -- and, per `agileplace.py`'s own file-budget
-   note (805/800 lines before this feature existed; see `intake.py`'s module docstring), extending
-   it to do so isn't free. So unlike the `customId` writeback (which does retry once on a version
-   conflict), a 409/428 hit on the link write is uncaught and propagates as a failed run.
+3. **The externalLink writeback had NO conflict-retry support (gap CLOSED by issue #105).**
+   `agileplace.py`'s `_card_value_for_patch_path` (the table the 409/428 conflict-retry path in
+   `agileplace.patch_card` uses to validate a stale op before retrying) did not recognize
+   `/externalLink` at all, so unlike the `customId` writeback (which does retry once on a version
+   conflict), a 409/428 hit on the link write was uncaught and propagated as a failed run. Issue
+   #105 added the `/externalLink` and `/description` branches, so the retry can now validate and
+   recover both paths. The prevention described below is kept regardless: not sending a version the
+   run itself just superseded beats recovering from the conflict afterward.
    `_writeback` in `intake.py` issues the `customId` write and the link write as two SEPARATE
    `patch_card` calls, `customId` FIRST (fixed post-review, issue #62 follow-up): writing the
-   more-reliable, retry-supported join-key write first means any failure partway through leaves the
+   more-reliable join-key write first means any failure partway through leaves the
    card either fully unwritten (still a full candidate; the next run's marker-resume scan retries
    the whole writeback) or customId-written-but-link-missing (still fully tracked -- matched and
    reconciled by the ordinary sync via its customId -- just missing the informational external-link
@@ -372,9 +373,10 @@ alone, since this worktree has no `.env` and no live board to probe against:
    write ITSELF bumps the card's server-side version, so the link write, issued against the SAME,
    now-stale `card` snapshot, deterministically conflicted on every real apply=True writeback
    against a card with a usable version (the ordinary `agileplace.list_cards()` case) -- and because
-   `_card_value_for_patch_path` doesn't recognize `/externalLink`, the conflict-retry path always
-   refused to recover (unsupported path -> always treated as "changed"), re-raising and aborting the
-   entire sync run. `_writeback` now routes the link write's card through `_card_for_link_write`,
+   `_card_value_for_patch_path` did not then recognize `/externalLink`, the conflict-retry path
+   always refused to recover (unsupported path -> always treated as "changed"), re-raising and
+   aborting the entire sync run. (The same dead-retry mechanism hit the ordinary sync flush through
+   `/description`; see the issue #105 section below.) `_writeback` now routes the link write's card through `_card_for_link_write`,
    which explicitly refetches the card via `agileplace.get_card` (apply=True only; a dry run reuses
    `card` unchanged, zero network calls) before the second PATCH -- avoiding the self-inflicted
    conflict outright rather than depending on a retry path that structurally can't recover from it.
@@ -485,3 +487,35 @@ what was sent):**
 - [live-check] `customId` accepts and preserves an issue #93 header-format value
   (`KEY (GitHub Issue #N)` -- parens, `#`, spaces) verbatim on PATCH replace, confirmed by
   refetch. Exercised by smoke step 23.
+
+## Conflict-retry path table (issue #105) -- observed live 2026-07-29
+
+A real `--apply` run aborted on the flush PATCH of a card created seconds earlier:
+
+```
+dep    [0F5b] +1 dependency(ies)
+AgilePlace PATCH /card/<id> failed: HTTP 428 ... {"op":"test","path":"/version","value":"1",
+  "fromHeader":"x-lk-resource-version","error":"Test operation failed","actualValue":"2"}
+```
+
+- **CONFIRMED (mechanism):** the 409/428 retry added in issue #72 could not fire.
+  `_conflict_retry` validates through `_card_value_for_patch_path`, which had no `/description`
+  case; an unresolvable path is counted as "changed" (fail closed), so the retry was refused and the
+  conflict re-raised out of `sync.main()`. `description_sync` queues `/description` on essentially
+  every card whose text differs from its issue, so the retry path was effectively dead for the
+  ordinary sync flush. Fixed by adding the `/description` and `/externalLink` branches;
+  `tests/test_agileplace_version_refetch.py` now also pins that EVERY literal op path any module
+  under `agilesync/` emits is resolvable by that table.
+- **`/description` is a sound thing to compare:** `board_reads.hydrate_run_reads` puts the observed
+  `description` on every matched card snapshot, and `sync._created_card_snapshot`'s refetch carries
+  it for a card created this run -- so snapshot-vs-refetch is a genuine concurrent-edit check. A
+  card whose description read failed carries no key and keeps failing closed.
+- **UNCONFIRMED (what bumped the version):** the run's own step 4 (`POST /card/dependency`) is the
+  only write that touched that card between its snapshot and the flush, which points at dependency
+  creation bumping the card's resource version -- but no live probe has measured a card's `version`
+  across a dependency POST, and an asynchronous server-side bump shortly after create is not ruled
+  out. If dependency/connection writes do bump it, the run is inflicting a conflict on itself every
+  time a card gains a dependency AND carries queued ops, and flushing before those writes (or
+  refetching the version for the affected cards) would avoid the wasted round trip -- the same
+  prevention-over-recovery reasoning as `intake._card_for_link_write`. Tracked separately; the
+  retry above is what keeps such a run correct meanwhile.

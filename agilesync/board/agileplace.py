@@ -479,6 +479,17 @@ def _card_value_for_patch_path(card: dict, path: str):
     if root == "typeId":
         card_type = card.get("type")
         return card_type.get("id") if isinstance(card_type, dict) else None
+    if root == "description":
+        # The description AS THIS RUN OBSERVED IT is part of the card snapshot: board_reads.
+        # hydrate_run_reads sets the real API `description` key on every matched card, and a card
+        # created this run carries it from sync._created_card_snapshot's refetch -- so comparing it
+        # against a refetch is a true concurrent-edit check, not a comparison of the run's own
+        # merge output. Normalized to "" exactly like agileplace_description.card_description():
+        # a card whose description read FAILED carries no key at all, so it compares "" against the
+        # server's real text and keeps failing closed, unchanged.
+        return card.get("description") or ""
+    if root == "externalLink":
+        return card.get("externalLink")
     raise ValueError(f"unsupported JSON-Patch path {path!r}")
 
 
