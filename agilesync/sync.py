@@ -30,8 +30,8 @@ from agilesync.gh import ghproject
 from agilesync.syncers import intake
 from agilesync.syncers import vetting_latch
 from agilesync.syncers.card_coherence import (contested_cards, fence_cid_index, fence_run_indices,
-                            filter_poisoned_edges, laneid_op_value, lane_conflict,
-                            poisoned_card_ids, same_card)
+                            filter_poisoned_edges, same_card)
+from agilesync.syncers.card_ops import CardOpQueue
 from agilesync.syncers.comment_sync import sync_comments
 from agilesync.config import STATE_FILE, env_config
 from agilesync.syncers.description_sync import sync_description
@@ -128,7 +128,7 @@ def sync_child_connections(cfg: dict, apply: bool, epics: list[dict], card_for, 
                            by_number: dict, poisoned: frozenset[str],
                            managed_card_ids: set[str],
                            sub_issues: dict[int, list[int]] | None = None) -> None:
-    """Mirror GitHub sub-issues as native AgilePlace parent/child card connections (step 3):
+    """Mirror GitHub sub-issues as native AgilePlace parent/child card connections (step 4):
     authoritative native reads reconcile exactly (additions and removals); the [KEY] title-key
     fallback is add-only, because a heuristic must never authorize destructive reconciliation.
 
@@ -658,33 +658,16 @@ def main() -> None:
         return _matching_card(issue, card_by_url, card_by_cid)
 
     # Issue #99: one bounded concurrent read phase completes the matched card snapshots; blocked_by
-    # resolves first (step 4 consumes it) so an unusable snapshot never prefetches dependency reads.
+    # resolves first (step 5 consumes it) so an unusable snapshot never prefetches dependency reads.
     blocked_by = ghkit_snapshot.resolve_blocked_by(
         cfg, graph, online, [i["number"] for i in syncable_issues])
     board_reads.hydrate_run_reads(cfg, online, syncable_issues, card_for, epics,
                                   prefetch_deps=blocked_by is not None)
 
-    card_ops: dict = {}
-
-    def queue(card, ops, note):
-        # Issue #70 Layer 2: two queue() calls for the same card can carry conflicting /laneId
-        # values (e.g. duplicate [KEY]-prefixed issue titles matching the same card through the
-        # customId fallback within one run). Detect and poison the entry rather than risk one
-        # issue's lane move clobbering another's -- the poisoned entry is skipped wholesale at
-        # flush (below), never partially applied.
-        cid = str(card["id"])
-        entry = card_ops.setdefault(
-            cid, {"card": card, "ops": [], "notes": [], "lane_id": None, "poisoned": False})
-        new_lane_id, conflict = lane_conflict(ops, entry["lane_id"])
-        if conflict:
-            entry["poisoned"] = True
-            conflicting_value = laneid_op_value(ops)
-            print(f"WARN  card {cid} poisoned: conflicting /laneId ops "
-                  f"({entry['lane_id']!r} vs {conflicting_value!r})")
-        else:
-            entry["lane_id"] = new_lane_id
-        entry["ops"].extend(ops)
-        entry["notes"].append(note)
+    # The run's card-op accumulator: every card-field mutation batches into ONE versioned PATCH
+    # (see card_ops.CardOpQueue for the batching, poisoning and flush-ordering contract).
+    card_op_queue = CardOpQueue()
+    queue = card_op_queue.queue
 
     # Retired issues (see _retire_matched_issues for the full contract).
     _retire_matched_issues(retired_issues, retired_card_by_url, all_card_by_cid, contested,
@@ -739,13 +722,20 @@ def main() -> None:
         sync_description(cfg, apply, issue, card, issues_state, queue)
         card_types.sync_card_type(cfg, apply, issue, card, resolved.by_name, issues_state, queue)
 
-    # 3) parent/child connections (see sync_child_connections for the full contract).
-    poisoned = poisoned_card_ids(card_ops)
+    # 3) flush: ONE versioned PATCH per card. Issue #107: this precedes the edge steps below
+    # because their POSTs bump each card's resource version, staling the version its own flush is
+    # about to send -- see card_ops.CardOpQueue's docstring. Nothing below reads what the flush
+    # writes (they reconcile edges, not card fields), and both of their inputs are computable the
+    # moment step 2 is done.
+    poisoned = card_op_queue.poisoned_ids()
     managed_card_ids = _managed_card_ids(syncable_issues, card_for, retired_card_by_url)
+    card_op_queue.flush(cfg, apply)
+
+    # 4) parent/child connections (see sync_child_connections for the full contract).
     sync_child_connections(cfg, apply, epics, card_for, by_key, by_number, poisoned, managed_card_ids,
                            sub_issues=graph.sub_issues if graph else None)
 
-    # 4) GitHub blocked-by edges -> native card dependencies (issue #57) -- all edges, managed
+    # 5) GitHub blocked-by edges -> native card dependencies (issue #57) -- all edges, managed
     # pairs only, retired Done blockers resolving through their URL-owned cards. Skip entirely
     # unless the whole blocked-by snapshot is complete. The card Blocked flag belongs to humans:
     # the sync never writes /isBlocked or /blockReason (the old flag-text mirror was retired in
@@ -762,12 +752,6 @@ def main() -> None:
                           _removal_authority_card_ids(syncable_issues, card_by_url, retired_card_by_url),
                           poisoned)
 
-    # 5) flush: ONE versioned PATCH per card (optimistic concurrency)
-    for entry in card_ops.values():
-        if entry["poisoned"]:
-            continue  # Issue #70 Layer 2: conflicting /laneId ops -- discard, don't half-apply
-        agileplace.patch_card(cfg, apply, entry["card"], entry["ops"], "; ".join(entry["notes"]))
-
     # 6) comment sync (issue #66). Unlike every queued op above, sync_comments writes to GitHub AND
     # AgilePlace IMMEDIATELY (its comment endpoints aren't part of the card-PATCH queue), so an
     # applied comment write can't be rolled back by the poisoned-card hold below. Run it only when
@@ -775,8 +759,9 @@ def main() -> None:
     # or a CLEAN apply -- never on a poisoned apply where save_state is skipped: otherwise one issue's
     # poisoned card would strand ANOTHER issue's applied comment writes with no ledger, re-mirroring
     # them next run (issue #66 Codex P1 #4). Deferred here, after the flush, so it shares the atomic
-    # save's own gate.
-    clean = not any(entry["poisoned"] for entry in card_ops.values())
+    # save's own gate -- and, since issue #107, because a comment write bumps the card's resource
+    # version too: ahead of the flush it would stale every queued PATCH.
+    clean = card_op_queue.clean
     if not apply or clean:
         for issue in syncable_issues:
             card = card_for(issue)

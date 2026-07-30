@@ -530,12 +530,25 @@ AgilePlace PATCH /card/<id> failed: HTTP 428 ... {"op":"test","path":"/version",
   concurrency guard would buy one saved abort at the cost of an `agileplace` -> `markup` dependency
   and HTML parsing on the conflict path, with a lost-update as the failure mode if it ever
   over-normalized. Fail-closed and self-healing beats clever here.
-- **UNCONFIRMED (what bumped the version):** the run's own step 4 (`POST /card/dependency`) is the
-  only write that touched that card between its snapshot and the flush, which points at dependency
-  creation bumping the card's resource version -- but no live probe has measured a card's `version`
-  across a dependency POST, and an asynchronous server-side bump shortly after create is not ruled
-  out. If dependency/connection writes do bump it, the run is inflicting a conflict on itself every
-  time a card gains a dependency AND carries queued ops, and flushing before those writes (or
-  refetching the version for the affected cards) would avoid the wasted round trip -- the same
-  prevention-over-recovery reasoning as `intake._card_for_link_write`. Tracked separately; the
-  retry above is what keeps such a run correct meanwhile.
+- **CONFIRMED (what bumped the version), issue #107: EVERY write bumps a card's resource version
+  by exactly 1** -- card PATCHes, connection POSTs, dependency POSTs and comment writes alike.
+  Measured by arithmetic over a full live `python -m agilesync.tools.smoke` run (2026-07-30): the
+  throwaway parent card was created at version 1 (the create response carries no version) and step
+  21 read `actualValue: 15` after exactly 14 writes to it -- 7 PATCHes (steps 3, 4, 5, 6, 13, 14,
+  19), 2 connection POSTs (steps 9, 10), 2 dependency POSTs (steps 11, 12 -- the duplicate-create
+  409 wrote nothing) and 3 comment writes (steps 15, 17, 18). `1 + 14 = 15` exactly: any write that
+  did not bump would leave the total short, and the alternative explanation -- an asynchronous
+  server-side bump shortly after create -- would overshoot, so it is ruled out.
+  - **Residual caveat (still worth one cheap probe):** this is a TOTAL, not a per-call measurement.
+    It holds unless one write bumps twice while another does not bump at all. The direct probe
+    (read `version`, one `POST /card/dependency`, read `version`) costs two GETs and belongs in
+    `smoke.py`, which is blocked on the issue #108 extraction -- until it runs, treat the per-call
+    attribution as inferred from the total rather than individually measured.
+- **What that changed (issue #107):** the run was inflicting the conflict on itself. `sync.main()`
+  now flushes its card PATCHes BEFORE the child-connection and dependency steps, so no card is
+  written between its own snapshot and its own flush -- prevention over recovery, the same
+  reasoning as `intake._card_for_link_write`. Comment sync bumps the version too, so it stays
+  AFTER the flush (where it already sat, for its own state-gate reason). The retry above remains
+  the safety net for genuine concurrent edits by humans, which no ordering can prevent.
+  `tests/test_sync_flush_order.py` pins the ordering as an invariant; `tests/test_run.py` pins the
+  resulting write sequence at the HTTP boundary.
