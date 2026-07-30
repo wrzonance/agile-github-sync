@@ -498,7 +498,7 @@ what was sent):**
 
 A real `--apply` run aborted on the flush PATCH of a card created seconds earlier:
 
-```
+```text
 dep    [0F5b] +1 dependency(ies)
 AgilePlace PATCH /card/<id> failed: HTTP 428 ... {"op":"test","path":"/version","value":"1",
   "fromHeader":"x-lk-resource-version","error":"Test operation failed","actualValue":"2"}
