@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import sys
 import time
 import urllib.error
@@ -24,12 +25,19 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from types import MappingProxyType
 
+from agilesync.board.rate_limit import RateLimiter
+
 REQUEST_TIMEOUT = 30      # seconds per request
 MAX_RETRY_SLEEP = 60      # cap a hostile/large Retry-After so a run can't stall for hours
 MAX_ATTEMPTS = 5          # total tries for a rate-limited request (1 initial + 4 backed-off retries)
 BACKOFF_BASE_SLEEP = 1.0  # first retry's wait; doubles per attempt (1, 2, 4, 8) up to the cap
+JITTER_FRACTION = 0.25    # spread added to a retry wait so concurrent callers don't re-collide
+MAX_REQUESTS_PER_MINUTE = 150  # opening pace; halves itself per 429 until the run stops earning them
 MAX_CARD_PAGE_REQUESTS = 1_000  # absolute guard against absent/hostile pagination metadata
 PLANNED_CARD_ID_PREFIX = "planned-card:"
+
+# One per process: the read pool's threads all issue through api(), so pacing needs a shared schedule.
+_LIMITER = RateLimiter(MAX_REQUESTS_PER_MINUTE)
 
 
 def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None, _attempt=0):
@@ -47,6 +55,7 @@ def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None,
         headers={"Authorization": f"Bearer {cfg['token']}", "Content-Type": "application/json",
                  "Accept": "application/json", **(headers or {})},
     )
+    _LIMITER.acquire()
     try:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             raw = resp.read()
@@ -57,10 +66,13 @@ def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None,
             f"AgilePlace {method} /{path} failed: invalid JSON response {detail}"
         ) from err
     except urllib.error.HTTPError as err:
+        if err.code == 429:
+            _LIMITER.penalize()
         if err.code == 429 and _attempt + 1 < MAX_ATTEMPTS:
             delay = _rate_limit_delay(err, _attempt)
-            print(f"WARN  AgilePlace {method} /io/{path.lstrip('/')} rate limited (HTTP 429) on "
-                  f"attempt {_attempt + 1}/{MAX_ATTEMPTS} -- retrying in {delay:.1f}s",
+            print(f"WARN  AgilePlace {method} /io/{path.lstrip('/')} rate limited (HTTP 429) after "
+                  f"{_LIMITER.recent_requests()} requests in 60s ({_LIMITER.total_requests} this "
+                  f"run), attempt {_attempt + 1}/{MAX_ATTEMPTS} -- retrying in {delay:.1f}s",
                   file=sys.stderr)
             time.sleep(delay)
             return api(cfg, method, path, body, params, headers, _attempt + 1)
@@ -96,7 +108,10 @@ def _rate_limit_delay(err, attempt: int) -> float:
     stalls the run."""
     retry_after = _retry_after_seconds(err)
     delay = retry_after if retry_after is not None else BACKOFF_BASE_SLEEP * (2 ** attempt)
-    return min(MAX_RETRY_SLEEP, max(1.0, delay))
+    delay = min(MAX_RETRY_SLEEP, max(1.0, delay))
+    # Jitter rides on top of the already-capped base, never subtracted (waiting less than the
+    # server asked just earns another 429). Capping the SUM would collapse a near-cap wait onto it.
+    return delay + random.uniform(0, delay * JITTER_FRACTION)
 
 
 def mutate(cfg: dict, apply: bool, method: str, path: str, body=None, headers=None, *, note: str = ""):

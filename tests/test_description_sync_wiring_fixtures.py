@@ -45,7 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # itself stays in agileplace_description.py, so the module split this hash protects still holds.
 # Re-pinned again for the rate-limit backoff change: api() is the single place any request is
 # issued, so 429 retry policy has nowhere else to live. No per-resource I/O moved in with it.
-AGILEPLACE_PY_SHA256 = "0160e38b7e81d660d226c16bddda487036a4a45e0e3b5fef74560129b86ce838"
+AGILEPLACE_PY_SHA256 = "afc0301c21be7a7dd197565914112ac38224107d41b034e8874ad039163b00b8"
 
 # Every file whose card fixtures reach sync.main()'s per-issue loop -- and therefore
 # sync_description's agileplace_description.card_description() call -- belongs here. This

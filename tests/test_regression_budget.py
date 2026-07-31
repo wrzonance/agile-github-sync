@@ -243,7 +243,7 @@ AGILEPLACE_HARD_CAP_LINES = 800
 # transport's own concern (api() is the only place a request is issued), so exponential backoff and
 # its retry WARN have nowhere else to live. The invariant this hash protects is untouched: no
 # comment, description, or other per-resource I/O moved into agileplace.py.
-AGILEPLACE_SHA256 = "0160e38b7e81d660d226c16bddda487036a4a45e0e3b5fef74560129b86ce838"
+AGILEPLACE_SHA256 = "afc0301c21be7a7dd197565914112ac38224107d41b034e8874ad039163b00b8"
 
 # Names issue #79 moved out of sync.py into metadata_sync.py. sync_metadata/sync_dates are the two
 # public entry points (still reachable as `sync.sync_metadata` via sync.py's own import -- hence the
