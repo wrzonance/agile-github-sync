@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 
 
 class RateLimiter:
@@ -39,6 +40,8 @@ class RateLimiter:
         self._lock = threading.Lock()
         self._next_slot: float | None = None
         self._last_penalty: float | None = None
+        self._issued: deque[float] = deque()  # slot times, trimmed to the reporting window
+        self._total = 0
 
     @property
     def rate_per_minute(self) -> float:
@@ -53,8 +56,30 @@ class RateLimiter:
             slot = now if self._next_slot is None else max(now, self._next_slot)
             self._next_slot = slot + 60.0 / self._rate
             wait = slot - now
+            self._issued.append(slot)
+            self._total += 1
+            self._trim(slot)
         if wait > 0:
             self._sleep(wait)
+
+    REPORTING_WINDOW_SECONDS = 60.0
+
+    def _trim(self, now: float) -> None:
+        while self._issued and now - self._issued[0] > self.REPORTING_WINDOW_SECONDS:
+            self._issued.popleft()
+
+    @property
+    def total_requests(self) -> int:
+        with self._lock:
+            return self._total
+
+    def recent_requests(self, window_seconds: float = REPORTING_WINDOW_SECONDS) -> int:
+        """Requests issued in the trailing window -- the number that pins down an undocumented
+        quota when the server answers 429."""
+        with self._lock:
+            now = self._monotonic()
+            self._trim(now)
+            return sum(1 for issued in self._issued if now - issued <= window_seconds)
 
     def penalize(self) -> float:
         """Halve the rate in response to a rate-limit signal, down to the floor. Signals arriving

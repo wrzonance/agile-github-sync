@@ -32,12 +32,11 @@ MAX_RETRY_SLEEP = 60      # cap a hostile/large Retry-After so a run can't stall
 MAX_ATTEMPTS = 5          # total tries for a rate-limited request (1 initial + 4 backed-off retries)
 BACKOFF_BASE_SLEEP = 1.0  # first retry's wait; doubles per attempt (1, 2, 4, 8) up to the cap
 JITTER_FRACTION = 0.25    # spread added to a retry wait so concurrent callers don't re-collide
-MAX_REQUESTS_PER_MINUTE = 300  # opening pace; halves itself per 429 until the run stops earning them
+MAX_REQUESTS_PER_MINUTE = 150  # opening pace; halves itself per 429 until the run stops earning them
 MAX_CARD_PAGE_REQUESTS = 1_000  # absolute guard against absent/hostile pagination metadata
 PLANNED_CARD_ID_PREFIX = "planned-card:"
 
-# One limiter for the whole process: the read pool's threads all issue through api(), so pacing is
-# only meaningful if they share a schedule.
+# One per process: the read pool's threads all issue through api(), so pacing needs a shared schedule.
 _LIMITER = RateLimiter(MAX_REQUESTS_PER_MINUTE)
 
 
@@ -71,8 +70,9 @@ def api(cfg: dict, method: str, path: str, body=None, params=None, headers=None,
             _LIMITER.penalize()
         if err.code == 429 and _attempt + 1 < MAX_ATTEMPTS:
             delay = _rate_limit_delay(err, _attempt)
-            print(f"WARN  AgilePlace {method} /io/{path.lstrip('/')} rate limited (HTTP 429) on "
-                  f"attempt {_attempt + 1}/{MAX_ATTEMPTS} -- retrying in {delay:.1f}s",
+            print(f"WARN  AgilePlace {method} /io/{path.lstrip('/')} rate limited (HTTP 429) after "
+                  f"{_LIMITER.recent_requests()} requests in 60s ({_LIMITER.total_requests} this "
+                  f"run), attempt {_attempt + 1}/{MAX_ATTEMPTS} -- retrying in {delay:.1f}s",
                   file=sys.stderr)
             time.sleep(delay)
             return api(cfg, method, path, body, params, headers, _attempt + 1)

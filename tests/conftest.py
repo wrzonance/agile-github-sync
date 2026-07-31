@@ -17,11 +17,16 @@ from agilesync.board import agileplace  # noqa: E402
 
 
 class _UnpacedLimiter:
+    total_requests = 0
+
     def acquire(self) -> None:
         pass
 
     def penalize(self) -> float:
         return 0.0
+
+    def recent_requests(self, window_seconds: float = 60.0) -> int:
+        return 0
 
 
 @pytest.fixture(autouse=True)

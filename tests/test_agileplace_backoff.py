@@ -76,7 +76,8 @@ def test_every_request_takes_a_slot_from_the_shared_limiter(monkeypatch):
 def test_a_rate_limited_response_slows_the_limiter_down(monkeypatch):
     penalties = []
     monkeypatch.setattr(agileplace, "_LIMITER",
-                        SimpleNamespace(acquire=lambda: None,
+                        SimpleNamespace(acquire=lambda: None, total_requests=0,
+                                        recent_requests=lambda: 0,
                                         penalize=lambda: penalties.append("halved")))
 
     with patch("agilesync.board.agileplace.urllib.request.urlopen", _rate_limited(times=2,
@@ -176,6 +177,7 @@ def test_every_rate_limited_retry_is_reported_on_stderr(no_jitter, capsys):
     assert "POST /io/card/9/comment" in err  # which request stalled
     assert "attempt 1" in err and str(agileplace.MAX_ATTEMPTS) in err  # how far into the budget
     assert "1.0s" in err  # how long it waited
+    assert "in 60s" in err  # and how many requests bought the 429 -- the quota is undocumented
 
 
 def test_a_non_rate_limit_http_error_is_never_retried():

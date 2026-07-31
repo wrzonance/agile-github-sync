@@ -117,6 +117,31 @@ def test_the_rate_never_falls_below_its_floor():
     assert limiter.rate_per_minute == 75
 
 
+def test_it_counts_the_requests_issued_in_the_trailing_window():
+    """The board's quota is a budget per ~60s window and its size is undocumented -- reporting how
+    many requests were issued when a 429 lands is what pins it down."""
+    clock = FakeClock()
+    limiter = _limiter(600, clock)
+
+    for _ in range(5):
+        limiter.acquire()
+
+    assert limiter.recent_requests(window_seconds=60) == 5
+    assert limiter.total_requests == 5
+
+
+def test_requests_older_than_the_window_no_longer_count():
+    clock = FakeClock()
+    limiter = _limiter(600, clock)
+    limiter.acquire()
+
+    clock.now += 61.0
+    limiter.acquire()
+
+    assert limiter.recent_requests(window_seconds=60) == 1
+    assert limiter.total_requests == 2
+
+
 def test_a_non_positive_rate_is_rejected():
     with pytest.raises(ValueError):
         RateLimiter(0)
