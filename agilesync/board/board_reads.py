@@ -9,10 +9,12 @@ agileplace_comments functions -- every write path in the run stays serial and or
 A worker failure maps to the same 'unknown' value each serial reader produces today (absent for
 descriptions -> the lazy get_card fallback; None elsewhere -> the consumer's existing skip
 contract), so consumers keep their exact semantics and a thread exception never propagates.
-max_workers=8 stays well under AgilePlace rate limits; the client's own per-request 429 retry
-still applies inside each thread. urllib opens one connection per request, so concurrency here
-overlaps the TLS handshakes it cannot eliminate (~260 serial round-trips -> ~22 latency waves
-on the reference board)."""
+max_workers=8 does NOT stay under AgilePlace's rate limits on its own -- measured 2026-07-30, a
+saturated pool earns 429s with a ~57s Retry-After on the reference board. What keeps a run under
+the quota is agileplace._LIMITER, which paces every request across these threads; the client's own
+429 retry and backoff still apply inside each thread. urllib opens one connection per request, so
+concurrency here overlaps the TLS handshakes it cannot eliminate (~260 serial round-trips -> ~22
+latency waves on the reference board)."""
 from __future__ import annotations
 
 import sys

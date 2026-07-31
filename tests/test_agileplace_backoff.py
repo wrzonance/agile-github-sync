@@ -15,6 +15,7 @@ import json
 import sys
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -34,6 +35,13 @@ def _http_error(code: int, retry_after: str | None = None) -> urllib.error.HTTPE
                                   headers, io.BytesIO(b'{"error":"rate limited"}'))
 
 
+@pytest.fixture
+def no_jitter():
+    """Pins the randomized spread to zero so a schedule can be asserted exactly."""
+    with patch("agilesync.board.agileplace.random.uniform", return_value=0.0):
+        yield
+
+
 def _rate_limited(times: int, then=None):
     """urlopen stub: `times` consecutive 429s, then `then` (a payload) or another 429."""
     calls = {"n": 0}
@@ -48,6 +56,52 @@ def _rate_limited(times: int, then=None):
 
     fake_urlopen.calls = calls
     return fake_urlopen
+
+
+def test_every_request_takes_a_slot_from_the_shared_limiter(monkeypatch):
+    """Pacing has to sit at the one place a request is issued, or the read pool's threads bypass
+    it entirely."""
+    taken = []
+    monkeypatch.setattr(agileplace, "_LIMITER",
+                        SimpleNamespace(acquire=lambda: taken.append("slot"), penalize=lambda: 0))
+
+    with patch("agilesync.board.agileplace.urllib.request.urlopen",
+               lambda req, timeout=None: io.BytesIO(b"{}")):
+        agileplace.api(CFG, "GET", "card/1")
+        agileplace.api(CFG, "GET", "card/2")
+
+    assert taken == ["slot", "slot"]
+
+
+def test_a_rate_limited_response_slows_the_limiter_down(monkeypatch):
+    penalties = []
+    monkeypatch.setattr(agileplace, "_LIMITER",
+                        SimpleNamespace(acquire=lambda: None,
+                                        penalize=lambda: penalties.append("halved")))
+
+    with patch("agilesync.board.agileplace.urllib.request.urlopen", _rate_limited(times=2,
+                                                                                  then={})), \
+         patch("agilesync.board.agileplace.time.sleep"):
+        agileplace.api(CFG, "GET", "card/1")
+
+    assert penalties == ["halved", "halved"]  # once per push-back, not once per run
+
+
+def test_the_retry_wait_is_jittered_so_the_pool_does_not_wake_in_lockstep():
+    """Eight workers rate-limited by the same response would otherwise sleep the identical
+    Retry-After and collide again on the next window."""
+    waits = set()
+
+    for _ in range(20):
+        with patch("agilesync.board.agileplace.urllib.request.urlopen",
+                   lambda req, timeout=None: (_ for _ in ()).throw(_http_error(429, "10"))), \
+             patch("agilesync.board.agileplace.time.sleep") as sleep, \
+             pytest.raises(SystemExit):
+            agileplace.api(CFG, "GET", "card/1")
+        waits.update(call.args[0] for call in sleep.call_args_list)
+
+    assert len(waits) > 1, "every retry waited exactly the same time"
+    assert all(10.0 <= wait <= 10.0 * (1 + agileplace.JITTER_FRACTION) for wait in waits), waits
 
 
 def test_rate_limited_request_is_attempted_at_most_max_attempts_times():
@@ -73,7 +127,7 @@ def test_rate_limited_request_succeeds_once_the_limit_clears():
     assert urlopen.calls["n"] == 3  # stops retrying the moment it succeeds
 
 
-def test_waits_between_rate_limited_attempts_grow_exponentially():
+def test_waits_between_rate_limited_attempts_grow_exponentially(no_jitter):
     slept = []
 
     with patch("agilesync.board.agileplace.urllib.request.urlopen", _rate_limited(times=99)), \
@@ -96,7 +150,7 @@ def test_backoff_wait_is_capped_so_a_run_cannot_stall_for_hours():
     assert max(slept) <= 3
 
 
-def test_server_sent_retry_after_overrides_the_computed_backoff():
+def test_server_sent_retry_after_overrides_the_computed_backoff(no_jitter):
     slept = []
 
     def fake_urlopen(req, timeout=None):
@@ -110,7 +164,7 @@ def test_server_sent_retry_after_overrides_the_computed_backoff():
     assert slept == [30.0, 30.0, 30.0, 30.0]  # the server's instruction wins over 1/2/4/8
 
 
-def test_every_rate_limited_retry_is_reported_on_stderr(capsys):
+def test_every_rate_limited_retry_is_reported_on_stderr(no_jitter, capsys):
     with patch("agilesync.board.agileplace.urllib.request.urlopen", _rate_limited(times=1,
                                                                                   then={})), \
          patch("agilesync.board.agileplace.time.sleep"):
