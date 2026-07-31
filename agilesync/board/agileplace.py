@@ -109,9 +109,9 @@ def _rate_limit_delay(err, attempt: int) -> float:
     retry_after = _retry_after_seconds(err)
     delay = retry_after if retry_after is not None else BACKOFF_BASE_SLEEP * (2 ** attempt)
     delay = min(MAX_RETRY_SLEEP, max(1.0, delay))
-    # Jitter added on top, never subtracted: waiting less than the server asked just earns another
-    # 429 and burns an attempt.
-    return min(MAX_RETRY_SLEEP, delay + random.uniform(0, delay * JITTER_FRACTION))
+    # Jitter rides on top of the already-capped base, never subtracted (waiting less than the
+    # server asked just earns another 429). Capping the SUM would collapse a near-cap wait onto it.
+    return delay + random.uniform(0, delay * JITTER_FRACTION)
 
 
 def mutate(cfg: dict, apply: bool, method: str, path: str, body=None, headers=None, *, note: str = ""):

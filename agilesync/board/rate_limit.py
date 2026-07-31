@@ -50,17 +50,23 @@ class RateLimiter:
 
     def acquire(self) -> None:
         """Block until this thread's slot comes up. The slot is reserved under the lock and waited
-        out outside it, so waiting threads don't serialize behind each other's sleeps."""
+        out outside it, so waiting threads don't serialize behind each other's sleeps.
+
+        The request is counted after the wait, not at reservation: the pool's threads all reserve
+        at once, and counting a slot that hasn't been issued yet would overstate the observed
+        rate by up to max_workers-1 -- in exactly the concurrent burst the count is read from."""
         with self._lock:
             now = self._monotonic()
             slot = now if self._next_slot is None else max(now, self._next_slot)
             self._next_slot = slot + 60.0 / self._rate
             wait = slot - now
-            self._issued.append(slot)
-            self._total += 1
-            self._trim(slot)
         if wait > 0:
             self._sleep(wait)
+        with self._lock:
+            issued = self._monotonic()
+            self._issued.append(issued)
+            self._total += 1
+            self._trim(issued)
 
     REPORTING_WINDOW_SECONDS = 60.0
 

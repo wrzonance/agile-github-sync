@@ -130,6 +130,27 @@ def test_it_counts_the_requests_issued_in_the_trailing_window():
     assert limiter.total_requests == 5
 
 
+def test_a_request_still_waiting_for_its_slot_is_not_counted_yet():
+    """Counting a request when its slot is RESERVED rather than when it is issued inflates the
+    number by up to max_workers-1: the pool's eight threads reserve instantly, but seven are still
+    sleeping. That overstates the very quota this counter exists to measure."""
+    clock = FakeClock()
+    limiter = None
+    counted_while_waiting = []
+
+    def sleeping(seconds):
+        counted_while_waiting.append(limiter.recent_requests())
+        clock.sleep(seconds)
+
+    limiter = RateLimiter(60, monotonic=clock.monotonic, sleep=sleeping)
+    limiter.acquire()  # goes out immediately
+    limiter.acquire()  # has to wait a second for its slot
+
+    assert counted_while_waiting == [1]  # only the request that actually reached the wire
+    assert limiter.recent_requests() == 2
+    assert limiter.total_requests == 2
+
+
 def test_requests_older_than_the_window_no_longer_count():
     clock = FakeClock()
     limiter = _limiter(600, clock)

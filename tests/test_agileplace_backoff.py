@@ -105,6 +105,26 @@ def test_the_retry_wait_is_jittered_so_the_pool_does_not_wake_in_lockstep():
     assert all(10.0 <= wait <= 10.0 * (1 + agileplace.JITTER_FRACTION) for wait in waits), waits
 
 
+def test_a_retry_after_near_the_cap_still_gets_a_real_spread():
+    """The board's own Retry-After is ~57s, a hair under MAX_RETRY_SLEEP. Clamping the JITTERED
+    value to the cap would collapse most draws back onto an identical 60.0s -- reintroducing the
+    lockstep wake-up that jitter exists to break, in the one case that actually happens."""
+    waits = set()
+
+    for _ in range(20):
+        with patch("agilesync.board.agileplace.urllib.request.urlopen",
+                   lambda req, timeout=None: (_ for _ in ()).throw(_http_error(429, "57"))), \
+             patch("agilesync.board.agileplace.time.sleep") as sleep, \
+             pytest.raises(SystemExit):
+            agileplace.api(CFG, "GET", "card/1")
+        waits.update(call.args[0] for call in sleep.call_args_list)
+
+    at_the_cap = [w for w in waits if w == agileplace.MAX_RETRY_SLEEP]
+    assert not at_the_cap, f"jitter collapsed onto the cap: {sorted(waits)}"
+    assert len(waits) > 1
+    assert all(57.0 <= w <= 57.0 * (1 + agileplace.JITTER_FRACTION) for w in waits), sorted(waits)
+
+
 def test_rate_limited_request_is_attempted_at_most_max_attempts_times():
     urlopen = _rate_limited(times=99)
 
@@ -140,6 +160,9 @@ def test_waits_between_rate_limited_attempts_grow_exponentially(no_jitter):
 
 
 def test_backoff_wait_is_capped_so_a_run_cannot_stall_for_hours():
+    """MAX_RETRY_SLEEP caps the BASE wait; jitter then rides on top, so the real bound is
+    cap x (1 + JITTER_FRACTION). Capping the jittered sum instead would collapse near-cap waits
+    back onto an identical value -- the lockstep this file's near-cap test pins against."""
     slept = []
 
     with patch("agilesync.board.agileplace.urllib.request.urlopen", _rate_limited(times=99)), \
@@ -148,7 +171,7 @@ def test_backoff_wait_is_capped_so_a_run_cannot_stall_for_hours():
          pytest.raises(SystemExit):
         agileplace.api(CFG, "GET", "card/1")
 
-    assert max(slept) <= 3
+    assert max(slept) <= 3 * (1 + agileplace.JITTER_FRACTION)
 
 
 def test_server_sent_retry_after_overrides_the_computed_backoff(no_jitter):
